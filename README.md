@@ -19,6 +19,24 @@ Softprobe Agent is a WebAssembly (WASM) plugin for Istio that captures complete 
 - **🔒 Enterprise Ready**: Production-grade security and performance
  - **🏎️ High Performance & Async**: Rust+WASM streaming, asynchronous HTTP capture with minimal overhead
 
+## Session Management Integration
+
+To achieve complete session-based tracing capabilities, Softprobe Agent can be used in conjunction with [@softprobe/sessify](https://github.com/softprobe/sessify), a lightweight frontend session management library.
+
+### How It Works Together
+
+1. **Frontend Session Tracking**: @softprobe/sessify manages user sessions in the browser, automatically creating and maintaining session identifiers
+2. **Request Header Injection**: The library injects session information into HTTP request headers as part of the `tracestate` field
+3. **Backend Correlation**: Softprobe Agent captures these headers and correlates requests with the same session ID
+4. **Session Flow Visualization**: In Softprobe Dashboard, you can view complete session flows across your service mesh
+
+### Benefits of Combined Usage
+
+- **Session-Level Tracing**: Track complete user journeys across multiple services
+- **Enhanced Troubleshooting**: Identify issues specific to user sessions or user segments
+- **Business Flow Analysis**: Understand how users navigate through your application
+- **No Additional Backend Changes**: The integration works seamlessly with existing Softprobe Agent deployment
+
 ## Documentation
 
 [Documentation](https://document.softprobe.ai/)
