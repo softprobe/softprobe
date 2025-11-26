@@ -38,3 +38,35 @@ deploy/otel-auto-instrumentation-for-dev.yaml
 scripts/cleanup.sh
 scripts/logs-demo-airline.sh
 scripts/logs-demo-ota.sh
+
+# Java / Maven
+backend/target/
+backend/.classpath
+backend/.project
+backend/.settings/
+backend/.idea/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# Node.js / Next.js
+context-viewer/node_modules/
+context-viewer/.next/
+context-viewer/out/
+context-viewer/build/
+context-viewer/dist/
+context-viewer/.env*.local
+context-viewer/.vercel
+context-viewer/.turbo
+context-viewer/.cache/
+*.tsbuildinfo
+next-env.d.ts
+
+# Test outputs
+test-output.log
+test-run.log
+final-test.log

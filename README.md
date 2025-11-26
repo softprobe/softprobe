@@ -64,25 +64,68 @@ brew install kind kubectl istioctl
 curl -L https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/scripts/cluster-setup.sh | sh
 ```
 
-### 2. Install the travel demo
+### 2. Deploy the backend and context viewer
 
 ```bash
-# Install Softprobe Istio WASM Plugin
-kubectl apply -f https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/deploy/minimal.yaml
-# Install demo app
-kubectl apply -f https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/examples/travel/apps.yaml
-# Expose the demo
-sleep 10 && kubectl port-forward -n istio-system svc/istio-ingressgateway 8080:80
+# Deploy ClickHouse and Redis
+kubectl apply -f deploy/quickstart/clickhouse.yaml
+kubectl apply -f deploy/quickstart/redis.yaml
+
+# Build and load backend image into Kind
+cd backend
+docker build -t otel-backend:latest .
+kind load docker-image otel-backend:latest --name sp-demo-cluster
+cd ..
+
+# Deploy backend service
+kubectl apply -f deploy/quickstart/backend.yaml
+
+# Build and load context-viewer image into Kind
+cd context-viewer
+docker build -t context-viewer:latest .
+kind load docker-image context-viewer:latest --name sp-demo-cluster
+cd ..
+
+# Deploy context viewer
+kubectl apply -f deploy/quickstart/context-viewer.yaml
+
+# Wait for services to be ready
+kubectl wait --for=condition=available --timeout=300s deployment/otel-backend -n otel-backend
+kubectl wait --for=condition=available --timeout=300s deployment/context-viewer -n otel-backend
 ```
 
-Play with the demo travel app by open [`http://localhost:8080/`](http://localhost:8080/) in browser, select a pari of cities and do a search, book and payment (fill any fake information). Then you can go to [Softprobe Dashboard](https://dashboard.softprobe.ai), check `Trave View` on the left navagation menu.
-
-https://github.com/user-attachments/assets/dc8c68db-dd8b-4da8-a6e2-346adf6ecffb
-
-
-### 3. Cleanup
+### 3. Install the travel demo with local backend
 
 ```bash
+# Install WASM Plugin pointing to local backend
+kubectl apply -f deploy/quickstart/wasm-plugin.yaml
+
+# Install demo app
+kubectl apply -f examples/travel/apps.yaml
+
+# Expose services
+kubectl port-forward -n otel-backend svc/otel-backend 8080:8080 &
+kubectl port-forward -n otel-backend svc/context-viewer 3000:3000 &
+kubectl port-forward -n istio-system svc/istio-ingressgateway 8081:80
+```
+
+### 4. Use the demo
+
+1. **Generate traffic**: Open [`http://localhost:8081/`](http://localhost:8081/) in your browser, select a pair of cities and do a search, book and payment (fill any fake information).
+
+2. **View traces**: Open [`http://localhost:3000/`](http://localhost:3000/) to view the context viewer with all captured traces. No Softprobe account or API keys required!
+
+3. **Check backend API**: Visit [`http://localhost:8080/swagger-ui.html`](http://localhost:8080/swagger-ui.html) for API documentation, or query sessions directly:
+   ```bash
+   curl http://localhost:8080/api/sessions
+   ```
+
+
+### 5. Cleanup
+
+```bash
+# Stop port forwards (Ctrl+C in terminals)
+# Delete cluster
 kind delete cluster --name sp-demo-cluster
 ```
 

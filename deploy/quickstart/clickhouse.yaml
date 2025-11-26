@@ -1,0 +1,73 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: otel-backend
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: otel-backend
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:latest
+        ports:
+        - containerPort: 8123
+          name: http
+        - containerPort: 9000
+          name: native
+        env:
+        - name: CLICKHOUSE_DB
+          value: "otel"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        volumeMounts:
+        - name: clickhouse-data
+          mountPath: /var/lib/clickhouse
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: clickhouse-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: otel-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8123
+    targetPort: 8123
+    name: http
+  - port: 9000
+    targetPort: 9000
+    name: native
+  selector:
+    app: clickhouse
+

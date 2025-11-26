@@ -1,0 +1,48 @@
+server:
+  port: 8080
+
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 30s
+  cloud:
+    gcp:
+      storage:
+        bucket: ${GCS_BUCKET:softprobe-otel-data}
+        project-id: ${GCP_PROJECT_ID:}
+        credentials:
+          location: ${GCP_CREDENTIALS_PATH:}
+    aws:
+      region:
+        static: ${AWS_REGION:us-east-1}
+      s3:
+        bucket: ${S3_BUCKET:softprobe-otel-data}
+      credentials:
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        secret-key: ${AWS_SECRET_ACCESS_KEY:}
+
+# ClickHouse configuration
+clickhouse:
+  url: ${CLICKHOUSE_URL:jdbc:clickhouse://localhost:8123/default}
+  database: ${CLICKHOUSE_DATABASE:otel}
+  username: ${CLICKHOUSE_USERNAME:default}
+  password: ${CLICKHOUSE_PASSWORD:}
+  logs-table-id: logs
+  metrics-table-id: metrics
+  spans-table-id: spans
+  envoy-proxy-spans-table-id: envoy_proxy_spans
+  default-page-size: 100
+  max-page-size: 1000
+  query-timeout: 30s
+
+# Multi-cloud storage configuration
+storage:
+  provider: ${STORAGE_PROVIDER:s3}  # "gcs" for Google Cloud Storage, "s3" for AWS S3
+  bucket-name: ${STORAGE_BUCKET:softprobe-otel-data}
+
+# Injection cache configuration
+injection:
+  cache-ttl-seconds: ${CACHE_TTL_SECONDS:86400}
+

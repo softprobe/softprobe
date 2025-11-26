@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-backend-config
+  namespace: otel-backend
+data:
+  application.yml: |
+    server:
+      port: 8080
+    spring:
+      data:
+        redis:
+          host: redis
+          port: 6379
+          timeout: 30s
+    clickhouse:
+      url: jdbc:clickhouse://clickhouse:8123/default
+      database: otel
+      username: default
+      password: ""
+      logs-table-id: logs
+      metrics-table-id: metrics
+      spans-table-id: spans
+      envoy-proxy-spans-table-id: envoy_proxy_spans
+    storage:
+      provider: s3
+      bucket-name: otel-data
+    injection:
+      cache-ttl-seconds: 86400
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-backend
+  namespace: otel-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-backend
+  template:
+    metadata:
+      labels:
+        app: otel-backend
+    spec:
+      containers:
+      - name: otel-backend
+        image: otel-backend:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: CLICKHOUSE_URL
+          value: "jdbc:clickhouse://clickhouse:8123/default"
+        - name: CLICKHOUSE_DATABASE
+          value: "otel"
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: otel-backend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-backend
+  namespace: otel-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: otel-backend
+

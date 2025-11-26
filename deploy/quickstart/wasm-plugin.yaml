@@ -1,0 +1,59 @@
+# SERVER Mode - Deployed to collect inbound traffic
+---
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: sp-istio-agent-server
+spec:
+  url: oci://docker.io/softprobe/softprobe:latest
+  phase: AUTHN
+  match:
+    - mode: SERVER
+  pluginConfig:
+    # Backend Configuration - point to local backend
+    sp_backend_url: "http://otel-backend.otel-backend.svc.cluster.local:8080"
+    traffic_direction: "server"
+    collectionRules:
+      http:
+        server:
+          - path: ".*"
+  vmConfig:
+    env:
+---
+# CLIENT Mode - Deployed to collect outbound traffic
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: sp-istio-agent-client
+spec:
+  url: oci://docker.io/softprobe/softprobe:latest
+  phase: AUTHN
+  match:
+    - mode: CLIENT
+  pluginConfig:
+    # Backend Configuration - point to local backend
+    sp_backend_url: "http://otel-backend.otel-backend.svc.cluster.local:8080"
+    traffic_direction: "client"
+    collectionRules:
+      http:
+        client:
+          - host: ".*"
+            paths: [".*"]
+  vmConfig:
+    env:
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: otel-backend-entry
+  namespace: istio-system
+spec:
+  hosts:
+  - otel-backend.otel-backend.svc.cluster.local
+  ports:
+  - number: 8080
+    name: http
+    protocol: HTTP
+  location: MESH_INTERNAL
+  resolution: DNS
+
