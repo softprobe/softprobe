@@ -1,0 +1,30 @@
+{
+  "name": "@softprobe/context-viewer",
+  "version": "0.1.0",
+  "description": "Call graph visualization library for distributed traces",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "type-check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@xyflow/react": "^12.8.5",
+    "@dagrejs/dagre": "^1.1.5",
+    "lucide-react": "^0.487.0"
+  },
+  "dependencies": {
+    "tailwind-merge": "^3.2.0",
+    "clsx": "^2.1.1",
+    "sonner": "^2.0.3"
+  },
+  "keywords": [
+    "trace",
+    "visualization",
+    "call-graph",
+    "distributed-tracing"
+  ],
+  "license": "MIT"
+}
+
