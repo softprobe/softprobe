@@ -1,0 +1,121 @@
+networks:
+  backend_net:
+    driver: bridge
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    environment:
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - backend_net
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9002:9000"   # API (moved to avoid conflict with ClickHouse)
+      - "9001:9001"   # Console
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_DOMAIN=minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./warehouse/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      backend_net:
+        aliases:
+          - warehouse.minio
+
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest
+    container_name: iceberg-rest
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8181 && echo -e 'GET /v1/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && cat <&3 | grep -q 'HTTP/1.1 200'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+
+  etl-worker:
+    build: ./etl-worker
+    container_name: etl-worker
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - ICEBERG_CATALOG_URI=http://iceberg-rest:8181
+      - ICEBERG_WAREHOUSE=s3://warehouse/
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./warehouse:/warehouse
+      - ./etl-worker/config.yaml:/app/config.yaml
+      - ./scripts:/app/scripts:ro
+    networks:
+      - backend_net
+    ports:
+      - "8080:8080"  # Prometheus metrics (etl-worker)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  otlp-backend:
+    build: ./softprobe-otlp-backend
+    container_name: otlp-backend
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=info
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+    volumes:
+      - ./softprobe-otlp-backend/tests/config/test-docker.yaml:/app/config.yaml:ro
+    networks:
+      - backend_net
+    ports:
+      - "4317:4317"  # OTLP gRPC
+

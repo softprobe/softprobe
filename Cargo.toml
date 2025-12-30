@@ -1,0 +1,108 @@
+[package]
+name = "softprobe-otlp-backend"
+version = "0.1.0"
+edition = "2021"
+authors = ["SoftProbe Team"]
+description = "OpenTelemetry-compatible backend for recording storage/retrieval with Iceberg and S3"
+license = "Apache-2.0"
+repository = "https://github.com/softprobe/backend"
+
+[dependencies]
+# HTTP Server
+axum = { version = "0.8.6", features = ["json", "multipart", "macros", "tokio"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "decompression-gzip", "decompression-deflate", "decompression-br", "decompression-zstd"] }
+
+# Async Runtime
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# OpenTelemetry Protocol
+opentelemetry-proto = "0.7"
+prost = "0.13"
+prost-types = "0.13"
+tonic = { version = "0.12", features = ["gzip"] }
+
+# S3 Storage (mock for now)
+# aws-sdk-s3 = "1.0"
+# aws-config = "1.0"
+
+# Iceberg (optional integration via feature)
+iceberg = { version = "0.7", optional = true, features = ["storage-all"] }
+iceberg-catalog-rest = { version = "0.7", optional = true }
+object_store = { version = "0.9", optional = true }
+
+# DuckDB (optional for now)
+# duckdb = { version = "1.0", features = ["bundled"] }
+
+# Configuration YAML
+serde_yaml = "0.9"
+
+# Arrow and Parquet
+arrow = "55"
+parquet = { version = "55", features = ["zstd"] }
+
+# Compression
+zstd = "0.13"
+
+# Configuration
+config = "0.14"
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+time = "0.3"
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Utils
+dashmap = "5.5"  # Concurrent HashMap for caching
+once_cell = "1.19"
+hex = "0.4"
+
+# HTTP client for binaries (upgraded to 0.12 to match iceberg-catalog-rest)
+reqwest = { version = "0.12", features = ["json"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+tempfile = "3.10"
+axum-test = "15.7"
+serde_json = "1.0"
+tower = "0.4"
+hyper = "1.0"
+
+[lib]
+name = "softprobe_otlp_backend"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+[features]
+default = ["iceberg_catalog"]
+iceberg_catalog = ["iceberg", "iceberg-catalog-rest", "object_store"]
+
+

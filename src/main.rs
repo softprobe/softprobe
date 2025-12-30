@@ -1,0 +1,66 @@
+use axum::extract::DefaultBodyLimit;
+use std::net::SocketAddr;
+use tower::ServiceBuilder;
+use tower_http::{
+    cors::CorsLayer,
+    trace::TraceLayer,
+    decompression::RequestDecompressionLayer,
+};
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
+
+pub mod api;
+pub mod storage;
+pub mod query;
+pub mod compaction;
+pub mod config;
+
+use config::Config;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "softprobe_otlp_backend=info,tower_http=info".into()),
+        )
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    info!("Starting SoftProbe OTLP Backend v{}", env!("CARGO_PKG_VERSION"));
+
+    // Load configuration
+    let config = Config::load()?;
+    info!("Configuration loaded: {:?}", config);
+
+    // Initialize storage components
+    let storage = storage::create_storage(&config).await?;
+    let query_engine = query::create_query_engine(&config).await?;
+
+    // Initialize span buffer with Iceberg writer
+    let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await?;
+
+    // Initialize API handlers
+    let app = api::create_router(storage, query_engine, Some(span_buffer)).await?.layer(
+        ServiceBuilder::new()
+            .layer(TraceLayer::new_for_http())
+            .layer(CorsLayer::permissive())
+            // Decompress request bodies (gzip, deflate, brotli, zstd)
+            .layer(RequestDecompressionLayer::new())
+            .layer(DefaultBodyLimit::max(config.server.max_body_size))
+            .into_inner(),
+    );
+
+    // Start HTTP server
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
+    info!("Server listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("OTLP collector service initialized successfully");
+    
+    axum::serve(listener, app.into_make_service()).await?;
+
+    Ok(())
+}

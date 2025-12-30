@@ -1,0 +1,59 @@
+HELP.md
+**/target/
+.git
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+logs
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+*.log
+
+### VS Code ###
+.vscode/
+
+.DS_Store
+.venv/
+
+### Spark ###
+spark/*.csv
+spark/recordings
+spark/screenshots.json
+
+opentelemetry-javaagent.jar
+arex-agent.jar
+
+dependency-tree.txt
+
+.env
+
+**/node_modules/
+**/.venv/
+
+warehouse/
+
+**/.m2/
+
+__pycache__/

@@ -1,0 +1,61 @@
+# Cloudflare R2 Iceberg Catalog Test Configuration
+# This configuration uses Cloudflare R2's native Iceberg catalog support
+#
+# Setup instructions:
+# 1. Create R2 bucket: npx wrangler r2 bucket create your-bucket-name
+# 2. Enable catalog: npx wrangler r2 bucket catalog enable your-bucket-name
+# 3. Create API token with R2 Data Catalog permissions
+# 4. Update credentials below
+#
+# Security: DO NOT commit real credentials to git!
+
+server:
+  port: 8090
+  host: 127.0.0.1
+  max_body_size: 104857600  # 100MB
+  worker_threads: null
+
+storage:
+  s3_region: "auto"  # R2 uses "auto" region
+
+span_buffering:
+  max_buffer_spans: 1  # Flush after each span for testing
+  max_buffer_bytes: 10485760  # 10MB
+  flush_interval_seconds: 1  # Flush every second
+
+compaction:
+  enabled: false
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864  # 64MB
+  compaction_interval_seconds: 3600
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: "2GB"
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: "/tmp/duckdb_spill"
+
+s3:
+  # Cloudflare R2 S3-compatible endpoint
+  endpoint: "https://fb4b299688885a31058d94ee11ee1129.r2.cloudflarestorage.com"
+  # S3 API credentials (Access Key ID and Secret Access Key from R2 API Token)
+  access_key_id: "f4264a811928d7649cdd426f55fa3091"
+  secret_access_key: "f46ba8076875f179cacb191cc96c6ff608654de54c744e692b2aba011a62662a"
+
+iceberg:
+  catalog_type: "rest"
+  # Cloudflare R2 Iceberg Catalog URI
+  catalog_uri: "https://catalog.cloudflarestorage.com/fb4b299688885a31058d94ee11ee1129/r2-data-catalog-tutorial"
+  # API Token for catalog authentication (Bearer token)
+  catalog_token: "tKMkVh6ytpX0Ca33E2vpQemi8dsIMB6ag7wQRx58"
+  # Warehouse identifier from Cloudflare
+  warehouse: "fb4b299688885a31058d94ee11ee1129_r2-data-catalog-tutorial"
+  # Test table name
+  table_name: "test_spans"
+  # Write settings
+  write_target_file_size_bytes: 67108864  # 64MB
+  write_row_group_size_bytes: 134217728  # 128MB
+  write_page_size_bytes: 1048576  # 1MB
+  # Force immediate commits for testing
+  force_close_after_append: true

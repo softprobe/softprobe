@@ -1,0 +1,56 @@
+# GCP Production Deployment Test Configuration
+# This configuration is used to test the deployed backend at https://i.softprobe.ai
+#
+# Key differences from local/dev:
+# - Production buffer settings (60s timeout, 128MB, 10K spans)
+# - Public endpoint (no local services)
+# - May contain real data from other users
+#
+# Usage:
+#   OTLP_ENDPOINT=https://i.softprobe.ai python test_deployment.py
+
+server:
+  port: 8090
+  host: 127.0.0.1
+  max_body_size: 104857600  # 100MB
+  worker_threads: null
+
+storage:
+  s3_region: "us-central1"  # GCP region
+
+span_buffering:
+  max_buffer_spans: 10000  # Production: 10K spans
+  max_buffer_bytes: 134217728  # Production: 128MB
+  flush_interval_seconds: 60  # Production: 60s timeout
+
+compaction:
+  enabled: true
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864  # 64MB
+  compaction_interval_seconds: 3600
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: "2GB"
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: "/tmp/duckdb_spill"
+
+# Note: GCP deployment S3/Iceberg settings are configured server-side
+# These settings are for reference only
+s3:
+  endpoint: null  # GCP Cloud Storage
+  access_key_id: null
+  secret_access_key: null
+
+iceberg:
+  catalog_type: "rest"
+  # GCP-deployed catalog URI (set via environment)
+  catalog_uri: "https://i.softprobe.ai/catalog"  # Placeholder
+  catalog_token: null
+  warehouse: "gs://softprobe-iceberg-warehouse"  # GCP Cloud Storage
+  table_name: "raw_sessions"
+  write_target_file_size_bytes: 134217728  # 128MB for production
+  write_row_group_size_bytes: 134217728  # 128MB
+  write_page_size_bytes: 1048576  # 1MB
+  force_close_after_append: false  # Production: buffered writes

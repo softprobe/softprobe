@@ -1,0 +1,49 @@
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600  # 100MB
+  worker_threads: null
+
+storage:
+  s3_region: "us-east-1"
+
+# Session-aware buffering configuration
+session_buffering:
+  # Session timeout for flushing incomplete sessions (in seconds)
+  session_timeout_seconds: 1800  # 30 minutes
+  # Maximum number of sessions to buffer in memory
+  max_buffered_sessions: 10000
+  # Flush when a session reaches this many spans
+  max_spans_per_session: 1000
+  # Force flush file when it reaches this size (in bytes)
+  file_flush_size_bytes: 134217728  # 128MB
+  # Force flush file when it has been open for this long (in seconds)
+  file_flush_timeout_seconds: 60
+
+compaction:
+  enabled: true
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864  # 64MB
+  compaction_interval_seconds: 3600  # 1 hour
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: "2GB"
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: "/tmp/duckdb_spill"
+
+s3:
+  endpoint: "http://localhost:9002"  # Local MinIO endpoint
+  access_key_id: "minioadmin"
+  secret_access_key: "minioadmin"
+
+iceberg:
+  catalog_type: "rest"
+  catalog_uri: "http://localhost:8181"
+  table_name: "raw_sessions"
+  write_target_file_size_bytes: 67108864  # 64MB
+  write_row_group_size_bytes: 134217728  # 128MB
+  write_page_size_bytes: 1048576  # 1MB
+  force_close_after_append: false
+

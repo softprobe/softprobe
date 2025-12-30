@@ -1,0 +1,41 @@
+server:
+  port: 8090
+  host: 0.0.0.0
+  max_body_size: 104857600
+  worker_threads: null
+
+storage:
+  s3_region: us-east-1
+
+span_buffering:
+  max_buffer_bytes: 134217728  # 128MB
+  max_buffer_spans: 1  # Flush after 1 span for testing
+  flush_interval_seconds: 1  # Flush every second
+
+compaction:
+  enabled: false
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864
+  compaction_interval_seconds: 3600
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: 2GB
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: /tmp/duckdb_spill
+
+s3:
+  endpoint: http://localhost:9002
+  access_key_id: minioadmin
+  secret_access_key: minioadmin
+
+iceberg:
+  catalog_type: rest
+  catalog_uri: http://localhost:8181
+  warehouse: s3://warehouse/iceberg  # MinIO warehouse path
+  table_name: test_spans
+  write_target_file_size_bytes: 67108864
+  write_row_group_size_bytes: 134217728
+  write_page_size_bytes: 1048576
+  force_close_after_append: true
