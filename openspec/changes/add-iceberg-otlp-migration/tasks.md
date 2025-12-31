@@ -4,10 +4,10 @@
 - [x] 0.3 Implement multi-app row-group batching and Parquet writer
 
 ## 1. OTLP Logs and Metrics APIs
-- [ ] 1.1 Implement OTLP `/v1/logs` endpoint accepting LogRecords
-- [ ] 1.2 Extend session buffering to handle both traces and logs together
-- [ ] 1.3 Create Iceberg table schema for logs (`otlp_logs`) with session-based partitioning
-- [ ] 1.4 Implement coordinated flush for traces+logs to maintain session alignment
+- [x] 1.1 Implement OTLP `/v1/logs` endpoint accepting LogRecords
+- [x] 1.2 Create separate log buffer (independent from traces buffer to avoid fragmentation)
+- [x] 1.3 Create Iceberg table schema for logs (`otlp_logs`) with session-based partitioning
+- [x] 1.4 Implement flush logic for logs buffer to `otlp_logs` table
 - [ ] 1.5 Implement OTLP `/v1/metrics` endpoint accepting Metrics
 - [ ] 1.6 Add separate metrics buffering (NOT session-based, organized by metric_name)
 - [ ] 1.7 Create Iceberg table schema for metrics with metric_name partitioning (experimental)

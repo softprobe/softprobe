@@ -10,6 +10,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 pub mod api;
+pub mod models;
 pub mod storage;
 pub mod query;
 pub mod compaction;
@@ -42,8 +43,11 @@ async fn main() -> anyhow::Result<()> {
     // Initialize span buffer with Iceberg writer
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await?;
 
+    // Initialize log buffer with Iceberg writer
+    let log_buffer = storage::create_log_buffer(&config, storage.iceberg_writer.clone()).await?;
+
     // Initialize API handlers
-    let app = api::create_router(storage, query_engine, Some(span_buffer)).await?.layer(
+    let app = api::create_router(storage, query_engine, Some(span_buffer), Some(log_buffer)).await?.layer(
         ServiceBuilder::new()
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive())

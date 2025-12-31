@@ -93,22 +93,33 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
 
 ## 3. Buffering Strategy
 
-### 3.1 Unified Traces and Logs Buffering
+### 3.1 Separate Buffers for Traces and Logs
 
-**Rationale**: Traces and logs are typically used together for session investigation.
+**Rationale**: While traces and logs are used together for session investigation, they must be buffered separately to avoid Iceberg file fragmentation. Writing to separate tables from a unified buffer would create many small Parquet files.
 
-- **Buffer Organization**: HashMap<session_id, (Vec<Span>, Vec<LogRecord>)>
+**Traces Buffer**:
+- **Buffer Organization**: HashMap<session_id, Vec<Span>> OR global Vec<Span> with session tracking
 - **Flush Triggers**:
   - Size: ~128MB buffer size
   - Age: 60 seconds
   - Session timeout: 30 minutes (configurable)
-- **Coordinated Write**: Flush writes to both `otlp_traces` and `otlp_logs` atomically
+- **Storage**: Writes to `otlp_traces` table with session-based row groups
+
+**Logs Buffer**:
+- **Buffer Organization**: HashMap<session_id, Vec<LogRecord>> OR global Vec<LogRecord> with session tracking
+- **Flush Triggers**:
+  - Size: ~128MB buffer size (independent tracking)
+  - Age: 60 seconds
+  - Session timeout: 30 minutes (same timeout as traces for consistency)
+- **Storage**: Writes to `otlp_logs` table with session-based row groups
+
+**Session Coordination**: While buffers are separate, session timeouts can be coordinated to ensure traces and logs for a session are queryable around the same time. This is a query optimization, not a storage requirement.
 
 ### 3.2 Separate Metrics Buffering
 
 **Rationale**: Metrics are aggregations, NOT session-correlated.
 
-- **Buffer Organization**: HashMap<metric_name, Vec<MetricDataPoint>>
+- **Buffer Organization**: HashMap<metric_name, Vec<MetricDataPoint>> OR global Vec<MetricDataPoint>
 - **Flush Triggers**:
   - Size: ~128MB buffer size
   - Age: 60 seconds (independent of session timeouts)
@@ -317,14 +328,20 @@ See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for curr
 - Embedded secondary indexes (not yet mature in Iceberg ecosystem)
 **Trade-off**: Accept potentially slower queries vs. dedicated index in exchange for simpler architecture and no ETL pipeline
 
-### Decision 4: Unified Traces+Logs Buffering, Separate Metrics
+### Decision 4: Separate Buffers for Traces, Logs, and Metrics
 
-**Choice**: Single unified buffer for traces and logs by session_id; separate buffer for metrics by metric_name
+**Choice**: Separate buffers for traces, logs, and metrics - each signal type buffered independently
 **Rationale**:
-- Traces and logs are used together for debugging/investigation workflows
-- Metrics are aggregations, NOT session-correlated events
+- **Traces**: Buffered by session_id, written to `otlp_traces` table with session-based row groups
+- **Logs**: Buffered independently by session_id, written to `otlp_logs` table with session-based row groups
+- **Metrics**: Buffered by metric_name (NOT session), written to `otlp_metrics` table
+- **Why separate?**: Unified buffer would cause Iceberg fragmentation - writing to separate tables from one buffer creates many small Parquet files
+**Alternatives Considered**:
+- Unified buffer for traces+logs (would cause file fragmentation and poor Iceberg compaction)
+- Single buffer for all three signal types (metrics are fundamentally different - aggregations, not session-correlated)
 **Implementation**:
-- Coordinated flush to both `otlp_traces` and `otlp_logs` tables maintains session alignment
+- Independent buffers with separate flush triggers based on size/time
+- Session timeout coordination (30 min) ensures traces and logs for a session are queryable around the same time
 - Metrics flushed independently organized by metric_name + timestamp
 **Note**: Iceberg may not be ideal for time-series metrics - consider Prometheus/InfluxDB later
 

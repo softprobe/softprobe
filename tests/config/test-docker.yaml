@@ -34,7 +34,7 @@ iceberg:
   catalog_type: rest
   catalog_uri: http://iceberg-rest:8181
   warehouse: s3://warehouse/
-  table_name: raw_sessions
+  table_name: otlp_traces
   write_target_file_size_bytes: 67108864
   write_row_group_size_bytes: 134217728
   write_page_size_bytes: 1048576

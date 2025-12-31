@@ -7,18 +7,11 @@ server:
 storage:
   s3_region: "us-east-1"
 
-# Session-aware buffering configuration
-session_buffering:
-  # Session timeout for flushing incomplete sessions (in seconds)
-  session_timeout_seconds: 1800  # 30 minutes
-  # Maximum number of sessions to buffer in memory
-  max_buffered_sessions: 10000
-  # Flush when a session reaches this many spans
-  max_spans_per_session: 1000
-  # Force flush file when it reaches this size (in bytes)
-  file_flush_size_bytes: 134217728  # 128MB
-  # Force flush file when it has been open for this long (in seconds)
-  file_flush_timeout_seconds: 60
+# Span buffering configuration
+span_buffering:
+  max_buffer_bytes: 134217728  # 128MB
+  max_buffer_spans: 10000
+  flush_interval_seconds: 60
 
 compaction:
   enabled: true
@@ -41,7 +34,6 @@ s3:
 iceberg:
   catalog_type: "rest"
   catalog_uri: "http://localhost:8181"
-  table_name: "raw_sessions"
   write_target_file_size_bytes: 67108864  # 64MB
   write_row_group_size_bytes: 134217728  # 128MB
   write_page_size_bytes: 1048576  # 1MB

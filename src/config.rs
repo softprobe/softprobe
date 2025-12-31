@@ -64,7 +64,6 @@ pub struct IcebergConfig {
     pub catalog_token: Option<String>,       // Bearer token for REST catalog (e.g., Cloudflare R2)
     #[serde(default = "default_warehouse")]
     pub warehouse: String,                   // Warehouse location (s3://path or warehouse ID)
-    pub table_name: String,
     pub write_target_file_size_bytes: usize, // 64MB
     pub write_row_group_size_bytes: usize,   // 128MB
     pub write_page_size_bytes: usize,        // 1MB
@@ -115,7 +114,6 @@ impl Default for Config {
                 catalog_uri: "s3://softprobe-recordings".to_string(),
                 catalog_token: None,
                 warehouse: "s3://warehouse".to_string(),
-                table_name: "recordings".to_string(),
                 write_target_file_size_bytes: 64 * 1024 * 1024, // 64MB
                 write_row_group_size_bytes: 128 * 1024 * 1024, // 128MB
                 write_page_size_bytes: 1024 * 1024, // 1MB

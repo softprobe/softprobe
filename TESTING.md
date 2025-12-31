@@ -112,7 +112,6 @@ iceberg:
   catalog_type: rest
   catalog_uri: http://localhost:8181
   warehouse: s3://warehouse/iceberg
-  table_name: test_spans
 
 s3:
   endpoint: http://localhost:9002
@@ -129,7 +128,6 @@ iceberg:
   catalog_uri: https://catalog.cloudflarestorage.com/...
   catalog_token: "your-token-here"
   warehouse: "your-warehouse-id"
-  table_name: test_spans
 
 s3:
   endpoint: https://<account>.r2.cloudflarestorage.com

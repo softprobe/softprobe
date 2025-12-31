@@ -23,7 +23,6 @@ async fn start_test_server() -> String {
     // Use REST catalog for integration tests
     config.iceberg.catalog_type = "rest".to_string();
     config.iceberg.catalog_uri = "http://localhost:8181".to_string();
-    config.iceberg.table_name = "raw_sessions".to_string();
     config.iceberg.force_close_after_append = true; // Force immediate commits for tests
     
     // Ensure MinIO/S3 env for REST catalog (dev-compose defaults)
@@ -40,7 +39,7 @@ async fn start_test_server() -> String {
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
     
     // Create router
-    let app = api::create_router(storage, query_engine, Some(span_buffer)).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
     
     // Bind to a random available port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -480,7 +479,6 @@ async fn test_parquet_output_written_and_closed() {
     config.iceberg.catalog_uri = "http://localhost:8181".to_string();
     // Ensure writer uses the same warehouse URI as scanner
     config.iceberg.warehouse = "s3://warehouse/iceberg".to_string();
-    config.iceberg.table_name = "raw_sessions".to_string();
     // Provide S3 settings for client-side file IO to MinIO
     config.s3.endpoint = Some("http://localhost:9002".to_string());
     config.s3.access_key_id = Some("minioadmin".to_string());
@@ -493,7 +491,7 @@ async fn test_parquet_output_written_and_closed() {
     let storage = storage::create_storage(&config).await.unwrap();
     let query_engine = query::create_query_engine(&config).await.unwrap();
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
-    let app = api::create_router(storage, query_engine, Some(span_buffer)).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -571,13 +569,13 @@ async fn test_parquet_output_written_and_closed() {
         .await
         .unwrap();
     
-    let table_ident = TableIdent::from_strs(["default", "raw_sessions"])
-        .or_else(|_| TableIdent::from_strs(["raw_sessions"]))
+    let table_ident = TableIdent::from_strs(["default", "otlp_traces"])
+        .or_else(|_| TableIdent::from_strs(["otlp_traces"]))
         .unwrap();
     let table = match catalog.load_table(&table_ident).await {
         Ok(t) => t,
         Err(e) => {
-            panic!("Table 'raw_sessions' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/raw_sessions.sql. Error: {}", e);
+            panic!("Table 'otlp_traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/otlp_traces.sql. Error: {}", e);
         }
     };
     
@@ -636,8 +634,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     config.s3.secret_access_key = Some("minioadmin".to_string());
     config.storage.s3_region = "us-east-1".to_string();
     // Use the default table; we filter results to our sessions to avoid data pollution
-    let table_name = "raw_sessions".to_string();
-    config.iceberg.table_name = table_name.clone();
+    let table_name = "otlp_traces".to_string();
     config.span_buffering.flush_interval_seconds = 1; // flush after 1s
     config.span_buffering.max_buffer_spans = 1; // flush after a single span
     config.iceberg.force_close_after_append = true; // Force immediate commits
@@ -645,7 +642,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     let storage = storage::create_storage(&config).await.unwrap();
     let query_engine = query::create_query_engine(&config).await.unwrap();
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
-    let app = api::create_router(storage, query_engine, Some(span_buffer)).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -729,7 +726,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     let table = match catalog.load_table(&table_ident).await {
         Ok(t) => t,
         Err(e) => {
-            panic!("Table 'raw_sessions' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/raw_sessions.sql. Error: {}", e);
+            panic!("Table 'otlp_traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/otlp_traces.sql. Error: {}", e);
         }
     };
     

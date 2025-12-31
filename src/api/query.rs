@@ -134,54 +134,30 @@ pub struct SpanData {
 /// Query all spans for a given session_id
 /// GET /v1/query/session/{session_id}
 pub async fn query_session_by_id(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionQueryResponse>, (StatusCode, String)> {
     tracing::info!("Querying spans for session_id: {}", session_id);
 
-    // Query the Iceberg table via the storage layer
-    match state.storage.iceberg_writer.query_by_session_id(&session_id).await {
-        Ok(spans) => {
-            tracing::info!("Found {} spans for session_id: {}", spans.len(), session_id);
-            Ok(Json(SessionQueryResponse {
-                session_id: session_id.clone(),
-                total_count: spans.len(),
-                spans,
-            }))
-        }
-        Err(e) => {
-            tracing::error!("Failed to query session {}: {}", session_id, e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to query session: {}", e),
-            ))
-        }
-    }
+    // TODO: Re-implement query methods in refactored Iceberg module
+    tracing::warn!("Query methods not yet implemented after refactoring");
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "Query functionality temporarily disabled during refactoring".to_string(),
+    ))
 }
 
 /// Debug endpoint: Query all spans (no filter) to test table visibility
 /// GET /v1/query/debug/all
 pub async fn query_all_spans_debug(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Result<Json<SessionQueryResponse>, (StatusCode, String)> {
     tracing::info!("DEBUG: Querying all spans (no predicate) with limit 100");
 
-    // Query the Iceberg table via the storage layer (no predicate)
-    match state.storage.iceberg_writer.query_all_spans_debug(100).await {
-        Ok(spans) => {
-            tracing::info!("DEBUG: Found {} spans total", spans.len());
-            Ok(Json(SessionQueryResponse {
-                session_id: "DEBUG_ALL_SPANS".to_string(),
-                total_count: spans.len(),
-                spans,
-            }))
-        }
-        Err(e) => {
-            tracing::error!("DEBUG: Failed to query all spans: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to query all spans: {}", e),
-            ))
-        }
-    }
+    // TODO: Re-implement query methods in refactored Iceberg module
+    tracing::warn!("Query methods not yet implemented after refactoring");
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "Query functionality temporarily disabled during refactoring".to_string(),
+    ))
 }

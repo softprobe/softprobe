@@ -1,5 +1,5 @@
 use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::storage::span_buffer::SpanData;
+use softprobe_otlp_backend::models::{Span as SpanData, SpanEvent, Log as LogData};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -188,15 +188,12 @@ async fn test_config_loading() {
     // Test that test config can be loaded and has valid iceberg section
     let config = load_test_config();
     assert!(!config.iceberg.catalog_uri.is_empty(), "Catalog URI should not be empty");
-    assert!(!config.iceberg.table_name.is_empty(), "Table name should not be empty");
-    assert_eq!(config.iceberg.table_name, "test_spans", "Should load test table name");
     assert_eq!(config.span_buffering.max_buffer_spans, 1, "Should have test buffer config");
 }
 
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_session_roundtrip() {
-    use softprobe_otlp_backend::storage::span_buffer::SpanEvent;
     use iceberg_catalog_rest::RestCatalogBuilder;
     use iceberg_catalog_rest::{REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE};
     use iceberg::{Catalog, CatalogBuilder, TableIdent};
@@ -265,7 +262,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     // Act: write all sessions in one batch (creates 1 file with multiple row groups)
     println!("🧪 Writing {} sessions ({} total spans) to Iceberg...", num_sessions, total_spans);
     let write_timer = Timer::start(&format!("Multi-Session Write ({} sessions)", num_sessions));
-    writer.write_session_batches(all_session_batches).await.expect("multi-session write should succeed");
+    writer.write_span_batches(all_session_batches).await.expect("multi-session write should succeed");
     let write_duration = write_timer.stop();
 
     // Report write performance
@@ -316,8 +313,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             .expect("load catalog")
     };
 
-    let table_ident = TableIdent::from_strs(["default", config.iceberg.table_name.as_str()])
-        .or_else(|_| TableIdent::from_strs([config.iceberg.table_name.as_str()]))
+    // Use the otlp_traces table (refactored architecture has separate tables for spans and logs)
+    let table_ident = TableIdent::from_strs(["default", "otlp_traces"])
         .expect("table ident");
 
     // Performance tracking: measure table load time
@@ -390,4 +387,208 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     println!("\n✅ All {} sessions verified with perfect selectivity (100%)", num_sessions);
     println!("✅ Row group per session design validated: each session query scans only its own row group");
+}
+
+#[tokio::test]
+async fn test_iceberg_writer_bulk_log_roundtrip() {
+    use iceberg_catalog_rest::RestCatalogBuilder;
+    use iceberg_catalog_rest::{REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE};
+    use iceberg::{Catalog, CatalogBuilder, TableIdent};
+    use iceberg::expr::Reference;
+    use iceberg::spec::Datum;
+    use arrow::array::{Array, StringArray};
+    use futures::StreamExt;
+
+    let config = load_test_config();
+    let writer = softprobe_otlp_backend::storage::iceberg::IcebergWriter::new(&config).await
+        .expect("writer init");
+
+    // Create multiple sessions with logs to test multi-session row groups
+    let num_sessions = 5;
+    let logs_per_session = 1000;
+    let now = Utc::now();
+
+    let mut all_session_batches = Vec::new();
+    let mut session_ids = Vec::new();
+
+    for session_idx in 0..num_sessions {
+        let session_id = format!("log-session-{}", uuid::Uuid::new_v4());
+        session_ids.push(session_id.clone());
+
+        let mut session_logs = Vec::new();
+        for i in 0..logs_per_session {
+            let mut attributes = HashMap::new();
+            attributes.insert("log.index".to_string(), i.to_string());
+            attributes.insert("source".to_string(), "test".to_string());
+
+            let mut resource_attributes = HashMap::new();
+            resource_attributes.insert("service.name".to_string(), format!("test-service-{}", session_idx));
+            resource_attributes.insert("host.name".to_string(), "localhost".to_string());
+
+            // Vary severity across logs
+            let severity_number = (i % 5 + 1) * 4; // INFO=4, WARN=8, ERROR=12, etc.
+            let severity_text = match severity_number {
+                4 => "INFO",
+                8 => "WARN",
+                12 => "ERROR",
+                16 => "FATAL",
+                _ => "DEBUG",
+            }.to_string();
+
+            // Add trace correlation for every 5th log
+            let (trace_id, span_id) = if i % 5 == 0 {
+                (
+                    Some(format!("trace-{}-{}", session_idx, i)),
+                    Some(format!("span-{}-{}", session_idx, i)),
+                )
+            } else {
+                (None, None)
+            };
+
+            session_logs.push(LogData {
+                session_id: Some(session_id.clone()),
+                timestamp: now + chrono::Duration::milliseconds((session_idx * 1000 + i) as i64),
+                observed_timestamp: Some(now + chrono::Duration::milliseconds((session_idx * 1000 + i + 1) as i64)),
+                severity_number: severity_number as i32,
+                severity_text,
+                body: format!("Test log message {} from session {}", i, session_idx),
+                attributes,
+                resource_attributes,
+                trace_id,
+                span_id,
+            });
+        }
+        all_session_batches.push(session_logs);
+    }
+
+    let total_logs = num_sessions * logs_per_session;
+
+    // Act: write all sessions in one batch (creates 1 file with multiple row groups)
+    println!("🧪 Writing {} sessions ({} total logs) to Iceberg otlp_logs table...", num_sessions, total_logs);
+    let write_timer = Timer::start(&format!("Multi-Session Log Write ({} sessions)", num_sessions));
+    writer.write_log_batches(all_session_batches).await.expect("multi-session log write should succeed");
+    let write_duration = write_timer.stop();
+
+    // Report write performance
+    let write_metrics = PerformanceMetrics::new(&format!("Multi-Session Log Write ({} sessions, {} logs)", num_sessions, total_logs))
+        .with_duration(write_duration)
+        .with_rows(total_logs);
+    write_metrics.print_report();
+    // Target: should be faster than writing sessions individually
+    write_metrics.assert_performance_target(5000, "Multi-session log write time");
+
+    println!("✅ Write completed, querying back each session to verify row group isolation...");
+
+    // Assert: query back via REST catalog scan
+    let mut props = std::collections::HashMap::new();
+    props.insert(REST_CATALOG_PROP_URI.to_string(), config.iceberg.catalog_uri.clone());
+    let warehouse = std::env::var("ICEBERG_WAREHOUSE")
+        .unwrap_or_else(|_| config.iceberg.warehouse.clone());
+    props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse);
+
+    // Add bearer token if present
+    if let Some(ref token) = config.iceberg.catalog_token {
+        props.insert("token".to_string(), token.clone());
+    }
+
+    if let Some(ep) = std::env::var("S3_ENDPOINT").ok().or(config.s3.endpoint.clone()) {
+        props.insert("s3.endpoint".to_string(), ep);
+    }
+    if let Some(ak) = std::env::var("S3_ACCESS_KEY").ok().or(config.s3.access_key_id.clone()) {
+        props.insert("s3.access-key-id".to_string(), ak);
+    }
+    if let Some(sk) = std::env::var("S3_SECRET_KEY").ok().or(config.s3.secret_access_key.clone()) {
+        props.insert("s3.secret-access-key".to_string(), sk);
+    }
+    props.insert("s3.region".to_string(), config.storage.s3_region.clone());
+
+    // For testing/development with TLS interception, use custom client
+    let catalog = if std::env::var("ICEBERG_DISABLE_TLS_VALIDATION").is_ok() {
+        let http_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("build http client");
+        RestCatalogBuilder::default()
+            .with_client(http_client)
+            .load("rest", props).await
+            .expect("load catalog")
+    } else {
+        RestCatalogBuilder::default().load("rest", props).await
+            .expect("load catalog")
+    };
+
+    // Use the otlp_logs table (refactored architecture has separate tables for spans and logs)
+    let table_ident = TableIdent::from_strs(["default", "otlp_logs"])
+        .expect("table ident");
+
+    // Performance tracking: measure table load time
+    let load_timer = Timer::start("Table Load (otlp_logs)");
+    let table = catalog.load_table(&table_ident).await.expect("load table");
+    let load_duration = load_timer.stop();
+
+    // Report table metadata loading performance
+    let load_metrics = PerformanceMetrics::new("Table Load (otlp_logs)")
+        .with_duration(load_duration);
+    load_metrics.print_report();
+    load_metrics.assert_performance_target(1000, "Table load time");
+
+    // Query each session individually to verify row group isolation
+    let mut total_query_duration = std::time::Duration::ZERO;
+    let mut all_selectivities = Vec::new();
+
+    for (session_idx, session_id) in session_ids.iter().enumerate() {
+        println!("\n🔍 Querying log session {}/{}: {}", session_idx + 1, num_sessions, session_id);
+
+        let predicate = Reference::new("session_id").equal_to(Datum::string(session_id));
+        let scan = table.scan()
+            .with_filter(predicate)
+            .build()
+            .expect("scan build");
+
+        let query_timer = Timer::start(&format!("Query log session {}", session_idx + 1));
+        let mut arrow_stream = scan.to_arrow().await.expect("arrow stream");
+
+        let mut found = 0usize;
+        let mut rows_scanned = 0usize;
+
+        while let Some(batch_result) = arrow_stream.next().await {
+            let batch = batch_result.expect("batch ok");
+            rows_scanned += batch.num_rows();
+
+            if let Some((idx, _)) = batch.schema().fields().iter().enumerate().find(|(_, f)| f.name() == "session_id") {
+                let col = batch.column(idx);
+                let arr = col.as_any().downcast_ref::<StringArray>().expect("string arr");
+                for i in 0..arr.len() {
+                    if arr.value(i) == session_id.as_str() { found += 1; }
+                }
+            }
+        }
+
+        let query_duration = query_timer.stop();
+        total_query_duration += query_duration;
+
+        let selectivity = (found as f64 / rows_scanned.max(1) as f64) * 100.0;
+        all_selectivities.push(selectivity);
+
+        println!("  ✓ Found {} rows, scanned {} rows (selectivity: {:.1}%)", found, rows_scanned, selectivity);
+
+        assert_eq!(found, logs_per_session,
+                   "Expected exactly {} logs for session {}, found {}",
+                   logs_per_session, session_id, found);
+
+        // Verify perfect selectivity (100% = only scanned the target row group)
+        assert_eq!(found, rows_scanned,
+                   "Expected perfect selectivity (100%), but scanned {} rows and matched {} rows",
+                   rows_scanned, found);
+    }
+
+    println!("\n📊 Multi-Session Log Query Performance Summary:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("⏱️  Total query time ({} sessions): {:?}", num_sessions, total_query_duration);
+    println!("⏱️  Average per session: {:?}", total_query_duration / num_sessions as u32);
+    println!("📊 Selectivity: {:.1}% (all sessions)", all_selectivities.iter().sum::<f64>() / all_selectivities.len() as f64);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    println!("\n✅ All {} log sessions verified with perfect selectivity (100%)", num_sessions);
+    println!("✅ Row group per session design validated for logs: each session query scans only its own row group");
 }

@@ -49,7 +49,6 @@ iceberg:
   catalog_uri: "https://i.softprobe.ai/catalog"  # Placeholder
   catalog_token: null
   warehouse: "gs://softprobe-iceberg-warehouse"  # GCP Cloud Storage
-  table_name: "raw_sessions"
   write_target_file_size_bytes: 134217728  # 128MB for production
   write_row_group_size_bytes: 134217728  # 128MB
   write_page_size_bytes: 1048576  # 1MB

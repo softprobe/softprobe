@@ -34,7 +34,6 @@ iceberg:
   catalog_type: rest
   catalog_uri: http://localhost:8181
   warehouse: s3://warehouse/iceberg  # MinIO warehouse path
-  table_name: test_spans
   write_target_file_size_bytes: 67108864
   write_row_group_size_bytes: 134217728
   write_page_size_bytes: 1048576

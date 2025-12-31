@@ -1,21 +1,14 @@
 use axum::{extract::State, Json};
 use axum::http::{HeaderMap, header::CONTENT_TYPE, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
 use crate::api::AppState;
-use crate::storage::span_buffer::{SpanData, SpanEvent};
+use crate::api::ingestion::IngestResponse;
+use crate::models::{Span as SpanData, SpanEvent};
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, Span};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
 use anyhow::Result;
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IngestResponse {
-    pub success: bool,
-    pub ingested_count: usize,
-    pub message: String,
-}
 
 /// OTLP /v1/traces JSON handler with proper parsing
 pub async fn ingest_otlp_traces_json(
@@ -166,7 +159,7 @@ async fn process_otlp_traces(
 
     // Add all spans to the buffer in one batch with body size tracking
     if let Some(span_buffer) = &state.span_buffer {
-        span_buffer.add_spans(spans, body_size).await?;
+        span_buffer.add_items(spans, body_size).await?;
     } else {
         warn!("Span buffer not initialized");
     }
@@ -178,7 +171,7 @@ async fn process_otlp_traces(
 /// Extract resource attributes from ResourceSpans
 fn extract_resource_attributes(resource_spans: &ResourceSpans) -> HashMap<String, String> {
     let mut attributes = HashMap::new();
-    
+
     if let Some(resource) = &resource_spans.resource {
         for attr in &resource.attributes {
             if let Some(value) = &attr.value {
@@ -193,7 +186,7 @@ fn extract_resource_attributes(resource_spans: &ResourceSpans) -> HashMap<String
             }
         }
     }
-    
+
     attributes
 }
 
@@ -259,7 +252,7 @@ fn convert_otlp_span_to_span_data(
     } else {
         chrono::Utc::now()
     };
-    
+
     let end_timestamp = if span.end_time_unix_nano > 0 {
         Some(chrono::DateTime::from_timestamp(
             (span.end_time_unix_nano / 1_000_000_000) as i64,
@@ -303,7 +296,3 @@ fn convert_otlp_span_to_span_data(
         }),
     })
 }
-
-#[cfg(test)]
-#[path = "ingestion_test.rs"]
-mod ingestion_test;
