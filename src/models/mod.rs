@@ -3,6 +3,8 @@
 
 pub mod span;
 pub mod log;
+pub mod metric;
 
 pub use span::{Span, SpanEvent};
 pub use log::Log;
+pub use metric::Metric;

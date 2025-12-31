@@ -6,7 +6,7 @@ pub mod transaction;
 use std::pin::Pin;
 use std::sync::Arc;
 use crate::config::Config;
-use crate::models::{Span, Log};
+use crate::models::{Span, Log, Metric};
 use buffer::SimpleBuffer;
 use anyhow::Result;
 
@@ -15,6 +15,7 @@ pub use iceberg::IcebergWriter;
 // Type aliases for buffers using unified domain models
 pub type SpanBuffer = SimpleBuffer<Span>;
 pub type LogBuffer = SimpleBuffer<Log>;
+pub type MetricBuffer = SimpleBuffer<Metric>;
 
 /// Simplified storage - only Iceberg writer needed
 pub struct Storage {
@@ -67,6 +68,28 @@ pub async fn create_log_buffer(
 
     Ok(LogBuffer::new(
         "logs".to_string(),
+        config.span_buffering.clone(), // Reuse same config for now
+        flush_callback,
+    ))
+}
+
+/// Create metric buffer with Iceberg writer as flush callback
+pub async fn create_metric_buffer(
+    config: &Config,
+    iceberg_writer: Arc<IcebergWriter>,
+) -> Result<MetricBuffer> {
+    // Create flush callback that writes metric batches to Iceberg
+    // Metrics are organized by metric_name, NOT session_id
+    let flush_callback = Arc::new(move |metric_batches: Vec<Vec<Metric>>| -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        let writer = iceberg_writer.clone();
+
+        Box::pin(async move {
+            writer.write_metric_batches(metric_batches).await
+        })
+    });
+
+    Ok(MetricBuffer::new(
+        "metrics".to_string(),
         config.span_buffering.clone(), // Reuse same config for now
         flush_callback,
     ))

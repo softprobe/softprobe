@@ -28,8 +28,7 @@ impl IcebergCatalog {
 
         // Authentication token (for Cloudflare R2, etc.)
         if let Some(ref token) = config.iceberg.catalog_token {
-            info!("Adding bearer token for catalog authentication (token: {}...)",
-                &token.chars().take(10).collect::<String>());
+            info!("Adding bearer token for catalog authentication");
             catalog_props.insert("token".to_string(), token.clone());
         }
 

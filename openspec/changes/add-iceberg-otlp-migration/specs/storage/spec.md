@@ -1,19 +1,19 @@
 ## ADDED Requirements
 
 ### Requirement: Iceberg Tables for Each Signal Type
-The system SHALL persist telemetry data to separate Iceberg tables: `otlp_traces`, `otlp_logs`, `otlp_metrics`, all in Parquet format with day-based partitioning.
+The system SHALL persist telemetry data to separate Iceberg tables: `traces`, `logs`, `metrics`, all in Parquet format with day-based partitioning.
 
 #### Scenario: Write traces to dedicated table
 - **WHEN** buffered spans are flushed
-- **THEN** they are written to the `otlp_traces` table with partition by date and sort by session_id, trace_id, timestamp
+- **THEN** they are written to the `traces` table with partition by date and sort by session_id, trace_id, timestamp
 
 #### Scenario: Write logs to dedicated table
 - **WHEN** buffered log records are flushed
-- **THEN** they are written to the `otlp_logs` table with partition by date and sort by session_id, timestamp
+- **THEN** they are written to the `logs` table with partition by date and sort by session_id, timestamp
 
 #### Scenario: Write metrics to dedicated table
 - **WHEN** buffered metrics are flushed
-- **THEN** they are written to the `otlp_metrics` table with partition by date and metric_name, sorted by metric_name, timestamp (NOT session-based)
+- **THEN** they are written to the `metrics` table with partition by date and metric_name, sorted by metric_name, timestamp (NOT session-based)
 
 ### Requirement: Session-Based Row Grouping for Traces and Logs
 The system SHALL write one row group per session_id for traces and logs; metrics use different organization since they are NOT session-correlated.
@@ -65,7 +65,7 @@ The system SHALL coordinate writes to traces and logs tables to maintain session
 
 #### Scenario: Same sessions in both tables
 - **WHEN** flushing a session with both traces and logs
-- **THEN** the same session appears in both `otlp_traces` and `otlp_logs` with aligned row groups
+- **THEN** the same session appears in both `traces` and `logs` with aligned row groups
 
 #### Scenario: Atomic session commit
 - **WHEN** writing session data

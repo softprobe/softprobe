@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use anyhow::Result;
 
 /// Unified OTLP /v1/logs handler that switches on Content-Type
-pub async fn ingest_otlp_logs(
+pub async fn ingest_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -26,7 +26,7 @@ pub async fn ingest_otlp_logs(
     // Protobuf
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
-            Ok(request) => match process_otlp_logs(state, request, body_size).await {
+            Ok(request) => match process_logs(state, request, body_size).await {
                 Ok(count) => Json(IngestResponse {
                     success: true,
                     ingested_count: count,
@@ -49,7 +49,7 @@ pub async fn ingest_otlp_logs(
     } else {
         // Default to JSON
         match serde_json::from_slice::<ExportLogsServiceRequest>(&body) {
-            Ok(request) => match process_otlp_logs(state, request, body_size).await {
+            Ok(request) => match process_logs(state, request, body_size).await {
                 Ok(count) => Json(IngestResponse {
                     success: true,
                     ingested_count: count,
@@ -73,7 +73,7 @@ pub async fn ingest_otlp_logs(
 }
 
 /// Core OTLP logs processing logic
-async fn process_otlp_logs(
+async fn process_logs(
     state: AppState,
     request: ExportLogsServiceRequest,
     body_size: usize,

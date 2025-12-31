@@ -63,9 +63,9 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
          ▼
 ┌───────────────────────────────────┐
 │ Apache Iceberg Tables             │
-│ ├─ otlp_traces (session-based)    │
-│ ├─ otlp_logs (session-based)      │
-│ └─ otlp_metrics (metric_name-based)│
+│ ├─ traces (session-based)    │
+│ ├─ logs (session-based)      │
+│ └─ metrics (metric_name-based)│
 └────────┬──────────────────────────┘
          │
          │ Direct Query with Predicates
@@ -103,7 +103,7 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
   - Size: ~128MB buffer size
   - Age: 60 seconds
   - Session timeout: 30 minutes (configurable)
-- **Storage**: Writes to `otlp_traces` table with session-based row groups
+- **Storage**: Writes to `traces` table with session-based row groups
 
 **Logs Buffer**:
 - **Buffer Organization**: HashMap<session_id, Vec<LogRecord>> OR global Vec<LogRecord> with session tracking
@@ -111,7 +111,7 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
   - Size: ~128MB buffer size (independent tracking)
   - Age: 60 seconds
   - Session timeout: 30 minutes (same timeout as traces for consistency)
-- **Storage**: Writes to `otlp_logs` table with session-based row groups
+- **Storage**: Writes to `logs` table with session-based row groups
 
 **Session Coordination**: While buffers are separate, session timeouts can be coordinated to ensure traces and logs for a session are queryable around the same time. This is a query optimization, not a storage requirement.
 
@@ -131,14 +131,14 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
 
 ## 4. Iceberg Storage Schema
 
-### 4.1 Table: otlp_traces
+### 4.1 Table: traces
 
 **Partition**: `date` (day-based)
 **Sort Order**: `session_id, trace_id, timestamp`
 **Row Groups**: One row group per session_id
 
 ```
-CREATE TABLE otlp_traces (
+CREATE TABLE traces (
   trace_id STRING,
   span_id STRING,
   parent_span_id STRING,
@@ -158,14 +158,14 @@ CREATE TABLE otlp_traces (
 PARTITIONED BY (date)
 ```
 
-### 4.2 Table: otlp_logs
+### 4.2 Table: logs
 
 **Partition**: `date` (day-based)
 **Sort Order**: `session_id, timestamp`
 **Row Groups**: One row group per session_id (aligned with traces)
 
 ```
-CREATE TABLE otlp_logs (
+CREATE TABLE logs (
   session_id STRING,
   timestamp TIMESTAMP,
   observed_timestamp TIMESTAMP,
@@ -179,14 +179,14 @@ CREATE TABLE otlp_logs (
 PARTITIONED BY (date)
 ```
 
-### 4.3 Table: otlp_metrics (Experimental)
+### 4.3 Table: metrics (Experimental)
 
 **Partition**: `date, metric_name` (NOT session-based)
 **Sort Order**: `metric_name, timestamp`
 **Row Groups**: Organized by metric_name, NOT session_id
 
 ```
-CREATE TABLE otlp_metrics (
+CREATE TABLE metrics (
   metric_name STRING,
   description STRING,
   unit STRING,
@@ -222,12 +222,12 @@ PARTITIONED BY (date, metric_name)
 GET /v1/query/session/{session_id}
 
 // Parallel Iceberg scans:
-let traces = iceberg_table("otlp_traces")
+let traces = iceberg_table("traces")
     .scan()
     .filter(col("session_id").eq(session_id))
     .collect();
 
-let logs = iceberg_table("otlp_logs")
+let logs = iceberg_table("logs")
     .scan()
     .filter(col("session_id").eq(session_id))
     .collect();
@@ -311,7 +311,7 @@ See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for curr
 
 ### Decision 2: Separate Iceberg Tables per Signal Type
 
-**Choice**: Use separate tables (`otlp_traces`, `otlp_logs`, `otlp_metrics`) instead of a unified table
+**Choice**: Use separate tables (`traces`, `logs`, `metrics`) instead of a unified table
 **Rationale**: Optimizes schema and queries for each signal type - traces, logs, and metrics have fundamentally different access patterns and structure
 **Alternatives Considered**:
 - Single unified table (complex schema, harder to optimize for different query patterns)
@@ -332,9 +332,9 @@ See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for curr
 
 **Choice**: Separate buffers for traces, logs, and metrics - each signal type buffered independently
 **Rationale**:
-- **Traces**: Buffered by session_id, written to `otlp_traces` table with session-based row groups
-- **Logs**: Buffered independently by session_id, written to `otlp_logs` table with session-based row groups
-- **Metrics**: Buffered by metric_name (NOT session), written to `otlp_metrics` table
+- **Traces**: Buffered by session_id, written to `traces` table with session-based row groups
+- **Logs**: Buffered independently by session_id, written to `logs` table with session-based row groups
+- **Metrics**: Buffered by metric_name (NOT session), written to `metrics` table
 - **Why separate?**: Unified buffer would cause Iceberg fragmentation - writing to separate tables from one buffer creates many small Parquet files
 **Alternatives Considered**:
 - Unified buffer for traces+logs (would cause file fragmentation and poor Iceberg compaction)

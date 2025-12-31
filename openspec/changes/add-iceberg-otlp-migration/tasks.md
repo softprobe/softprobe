@@ -1,16 +1,16 @@
 ## 0. Foundation (Completed)
 - [x] 0.1 Implement OTLP `/v1/traces` endpoint with session buffering
-- [x] 0.2 Create Iceberg table schema for traces storage (`otlp_traces`)
+- [x] 0.2 Create Iceberg table schema for traces storage (`traces`)
 - [x] 0.3 Implement multi-app row-group batching and Parquet writer
 
 ## 1. OTLP Logs and Metrics APIs
 - [x] 1.1 Implement OTLP `/v1/logs` endpoint accepting LogRecords
 - [x] 1.2 Create separate log buffer (independent from traces buffer to avoid fragmentation)
-- [x] 1.3 Create Iceberg table schema for logs (`otlp_logs`) with session-based partitioning
-- [x] 1.4 Implement flush logic for logs buffer to `otlp_logs` table
-- [ ] 1.5 Implement OTLP `/v1/metrics` endpoint accepting Metrics
-- [ ] 1.6 Add separate metrics buffering (NOT session-based, organized by metric_name)
-- [ ] 1.7 Create Iceberg table schema for metrics with metric_name partitioning (experimental)
+- [x] 1.3 Create Iceberg table schema for logs (`logs`) with session-based partitioning
+- [x] 1.4 Implement flush logic for logs buffer to `logs` table
+- [x] 1.5 Implement OTLP `/v1/metrics` endpoint accepting Metrics
+- [x] 1.6 Add separate metrics buffering (NOT session-based, organized by metric_name)
+- [x] 1.7 Create Iceberg table schema for metrics with metric_name partitioning (experimental)
 
 ## 2. Query APIs and Session Management
 - [ ] 2.1 Implement query API for retrieving sessions by ID using direct Iceberg scans

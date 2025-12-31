@@ -83,7 +83,7 @@ log    | log-session-9e6... | NULL      | NULL     | Test log message 1...      
 ### ✅ Severity Analysis
 ```sql
 SELECT severity_text, COUNT(*) as log_count
-FROM otlp_logs
+FROM logs
 GROUP BY severity_text
 ORDER BY log_count DESC;
 ```
@@ -95,7 +95,7 @@ SELECT
     COUNT(*) as correlated_logs,
     COUNT(DISTINCT trace_id) as unique_traces,
     COUNT(DISTINCT span_id) as unique_spans
-FROM otlp_logs
+FROM logs
 WHERE trace_id IS NOT NULL;
 ```
 **Result**: 1,000 correlated logs, 1,000 unique traces, 1,000 unique spans
@@ -103,7 +103,7 @@ WHERE trace_id IS NOT NULL;
 ### ✅ Partition Distribution
 ```sql
 SELECT record_date, COUNT(*) as log_count
-FROM otlp_logs
+FROM logs
 GROUP BY record_date
 ORDER BY record_date DESC;
 ```
@@ -116,14 +116,14 @@ SELECT
     snapshot_id,
     timestamp_ms,
     manifest_list
-FROM iceberg_snapshots('s3://warehouse/default/otlp_logs');
+FROM iceberg_snapshots('s3://warehouse/default/logs');
 ```
 **Result**: Shows snapshot ID, timestamp, and manifest location
 
 ### ✅ Iceberg Metadata
 ```sql
 SELECT content, file_path
-FROM iceberg_metadata('s3://warehouse/default/otlp_logs')
+FROM iceberg_metadata('s3://warehouse/default/logs')
 LIMIT 3;
 ```
 **Result**: Shows Parquet file locations in S3
@@ -150,11 +150,11 @@ SET unsafe_enable_version_guessing=true;
 
 ### Table Paths
 ```sql
-CREATE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 ```
 ✅ S3 paths work correctly with `iceberg_scan()` function
 
@@ -210,8 +210,8 @@ SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths
 ## Issues Found and Fixed
 
 ### 1. ❌→✅ REST API URL Format (FIXED)
-**Problem**: Originally used REST API URLs like `http://localhost:8181/v1/namespaces/default/tables/otlp_traces`
-**Fix**: Changed to S3 paths: `s3://warehouse/default/otlp_traces`
+**Problem**: Originally used REST API URLs like `http://localhost:8181/v1/namespaces/default/tables/traces`
+**Fix**: Changed to S3 paths: `s3://warehouse/default/traces`
 **Reason**: DuckDB `iceberg_scan()` expects S3/storage paths, not REST endpoints
 
 ### 2. ❌→✅ iceberg_snapshots Column Names (FIXED)

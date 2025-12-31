@@ -39,7 +39,7 @@ async fn start_test_server() -> String {
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
     
     // Create router
-    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
     
     // Bind to a random available port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -212,7 +212,7 @@ async fn test_ready_endpoint() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_json_endpoint_success() {
+async fn test_traces_json_endpoint_success() {
     let base_url = start_test_server().await;
     let client = Client::new();
     let sid = format!("it-{}", Uuid::new_v4());
@@ -243,7 +243,7 @@ async fn test_otlp_traces_json_endpoint_success() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_protobuf_endpoint_success() {
+async fn test_traces_protobuf_endpoint_success() {
     let base_url = start_test_server().await;
     let client = Client::new();
     let otlp_request = create_test_otlp_request();
@@ -268,7 +268,7 @@ async fn test_otlp_traces_protobuf_endpoint_success() {
 
 
 #[tokio::test]
-async fn test_otlp_traces_json_endpoint_multiple_spans() {
+async fn test_traces_json_endpoint_multiple_spans() {
     let base_url = start_test_server().await;
     let client = Client::new();
     
@@ -318,7 +318,7 @@ async fn test_otlp_traces_json_endpoint_multiple_spans() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_json_endpoint_empty_request() {
+async fn test_traces_json_endpoint_empty_request() {
     let base_url = start_test_server().await;
     let client = Client::new();
     
@@ -343,7 +343,7 @@ async fn test_otlp_traces_json_endpoint_empty_request() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_json_endpoint_invalid_json() {
+async fn test_traces_json_endpoint_invalid_json() {
     let base_url = start_test_server().await;
     let client = Client::new();
 
@@ -359,7 +359,7 @@ async fn test_otlp_traces_json_endpoint_invalid_json() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_with_missing_app_id() {
+async fn test_traces_with_missing_app_id() {
     let base_url = start_test_server().await;
     let client = Client::new();
     
@@ -393,7 +393,7 @@ async fn test_otlp_traces_with_missing_app_id() {
 }
 
 #[tokio::test]
-async fn test_otlp_traces_session_grouping() {
+async fn test_traces_session_grouping() {
     let base_url = start_test_server().await;
     let client = Client::new();
     
@@ -491,7 +491,7 @@ async fn test_parquet_output_written_and_closed() {
     let storage = storage::create_storage(&config).await.unwrap();
     let query_engine = query::create_query_engine(&config).await.unwrap();
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
-    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -569,13 +569,13 @@ async fn test_parquet_output_written_and_closed() {
         .await
         .unwrap();
     
-    let table_ident = TableIdent::from_strs(["default", "otlp_traces"])
-        .or_else(|_| TableIdent::from_strs(["otlp_traces"]))
+    let table_ident = TableIdent::from_strs(["default", "traces"])
+        .or_else(|_| TableIdent::from_strs(["traces"]))
         .unwrap();
     let table = match catalog.load_table(&table_ident).await {
         Ok(t) => t,
         Err(e) => {
-            panic!("Table 'otlp_traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/otlp_traces.sql. Error: {}", e);
+            panic!("Table 'traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/traces.sql. Error: {}", e);
         }
     };
     
@@ -634,7 +634,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     config.s3.secret_access_key = Some("minioadmin".to_string());
     config.storage.s3_region = "us-east-1".to_string();
     // Use the default table; we filter results to our sessions to avoid data pollution
-    let table_name = "otlp_traces".to_string();
+    let table_name = "traces".to_string();
     config.span_buffering.flush_interval_seconds = 1; // flush after 1s
     config.span_buffering.max_buffer_spans = 1; // flush after a single span
     config.iceberg.force_close_after_append = true; // Force immediate commits
@@ -642,7 +642,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     let storage = storage::create_storage(&config).await.unwrap();
     let query_engine = query::create_query_engine(&config).await.unwrap();
     let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
-    let app = api::create_router(storage, query_engine, Some(span_buffer), None).await.unwrap();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -726,7 +726,7 @@ async fn test_multi_sessions_are_written_and_queryable() {
     let table = match catalog.load_table(&table_ident).await {
         Ok(t) => t,
         Err(e) => {
-            panic!("Table 'otlp_traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/otlp_traces.sql. Error: {}", e);
+            panic!("Table 'traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/traces.sql. Error: {}", e);
         }
     };
     

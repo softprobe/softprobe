@@ -313,8 +313,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             .expect("load catalog")
     };
 
-    // Use the otlp_traces table (refactored architecture has separate tables for spans and logs)
-    let table_ident = TableIdent::from_strs(["default", "otlp_traces"])
+    // Use the traces table (refactored architecture has separate tables for spans and logs)
+    let table_ident = TableIdent::from_strs(["default", "traces"])
         .expect("table ident");
 
     // Performance tracking: measure table load time
@@ -464,7 +464,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     let total_logs = num_sessions * logs_per_session;
 
     // Act: write all sessions in one batch (creates 1 file with multiple row groups)
-    println!("🧪 Writing {} sessions ({} total logs) to Iceberg otlp_logs table...", num_sessions, total_logs);
+    println!("🧪 Writing {} sessions ({} total logs) to Iceberg logs table...", num_sessions, total_logs);
     let write_timer = Timer::start(&format!("Multi-Session Log Write ({} sessions)", num_sessions));
     writer.write_log_batches(all_session_batches).await.expect("multi-session log write should succeed");
     let write_duration = write_timer.stop();
@@ -517,17 +517,17 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
             .expect("load catalog")
     };
 
-    // Use the otlp_logs table (refactored architecture has separate tables for spans and logs)
-    let table_ident = TableIdent::from_strs(["default", "otlp_logs"])
+    // Use the logs table (refactored architecture has separate tables for spans and logs)
+    let table_ident = TableIdent::from_strs(["default", "logs"])
         .expect("table ident");
 
     // Performance tracking: measure table load time
-    let load_timer = Timer::start("Table Load (otlp_logs)");
+    let load_timer = Timer::start("Table Load (logs)");
     let table = catalog.load_table(&table_ident).await.expect("load table");
     let load_duration = load_timer.stop();
 
     // Report table metadata loading performance
-    let load_metrics = PerformanceMetrics::new("Table Load (otlp_logs)")
+    let load_metrics = PerformanceMetrics::new("Table Load (logs)")
         .with_duration(load_duration);
     load_metrics.print_report();
     load_metrics.assert_performance_target(1000, "Table load time");
@@ -591,4 +591,205 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 
     println!("\n✅ All {} log sessions verified with perfect selectivity (100%)", num_sessions);
     println!("✅ Row group per session design validated for logs: each session query scans only its own row group");
+}
+
+#[tokio::test]
+async fn test_iceberg_writer_bulk_metric_roundtrip() {
+    use iceberg_catalog_rest::RestCatalogBuilder;
+    use iceberg_catalog_rest::{REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE};
+    use iceberg::{Catalog, CatalogBuilder, TableIdent};
+    use iceberg::expr::Reference;
+    use iceberg::spec::Datum;
+    use arrow::array::{Array, StringArray, Float64Array};
+    use futures::StreamExt;
+    use softprobe_otlp_backend::models::Metric;
+
+    let config = load_test_config();
+    let writer = softprobe_otlp_backend::storage::iceberg::IcebergWriter::new(&config).await
+        .expect("writer init");
+
+    // Create multiple metric names with data points to test metric_name-based row groups
+    let num_metric_names = 5;
+    let data_points_per_metric = 1000;
+    let now = Utc::now();
+
+    let mut all_metric_batches = Vec::new();
+    let mut metric_names = Vec::new();
+
+    for metric_idx in 0..num_metric_names {
+        // Use UUID to ensure unique metric names across test runs
+        let metric_name = format!("test.metric.{}.{}", metric_idx, uuid::Uuid::new_v4());
+        metric_names.push(metric_name.clone());
+
+        let mut metric_data_points = Vec::new();
+        for i in 0..data_points_per_metric {
+            let mut attributes = HashMap::new();
+            attributes.insert("data_point.index".to_string(), i.to_string());
+            attributes.insert("host".to_string(), format!("host-{}", i % 3)); // 3 different hosts
+            attributes.insert("region".to_string(), format!("region-{}", i % 2)); // 2 different regions
+
+            let mut resource_attributes = HashMap::new();
+            resource_attributes.insert("service.name".to_string(), format!("service-{}", metric_idx));
+            resource_attributes.insert("service.version".to_string(), "1.0.0".to_string());
+
+            // Vary metric values
+            let value = 100.0 + (i as f64 * 0.5) + (metric_idx as f64 * 10.0);
+
+            metric_data_points.push(Metric {
+                metric_name: metric_name.clone(),
+                description: format!("Test metric {} description", metric_idx),
+                unit: if metric_idx % 2 == 0 { "ms" } else { "bytes" }.to_string(),
+                metric_type: if metric_idx % 3 == 0 { "gauge" } else if metric_idx % 3 == 1 { "sum" } else { "histogram" }.to_string(),
+                timestamp: now + chrono::Duration::milliseconds((metric_idx * 1000 + i) as i64),
+                value,
+                attributes,
+                resource_attributes,
+            });
+        }
+        all_metric_batches.push(metric_data_points);
+    }
+
+    let total_metrics = num_metric_names * data_points_per_metric;
+
+    // Act: write all metric batches in one write (creates 1 file with multiple row groups)
+    println!("🧪 Writing {} metric names ({} total data points) to Iceberg metrics table...", num_metric_names, total_metrics);
+    let write_timer = Timer::start(&format!("Multi-Metric Write ({} metric names)", num_metric_names));
+    writer.write_metric_batches(all_metric_batches).await.expect("multi-metric write should succeed");
+    let write_duration = write_timer.stop();
+
+    // Report write performance
+    let write_metrics = PerformanceMetrics::new(&format!("Multi-Metric Write ({} metric names, {} data points)", num_metric_names, total_metrics))
+        .with_duration(write_duration)
+        .with_rows(total_metrics);
+    write_metrics.print_report();
+    // Target: should be faster than writing metrics individually
+    write_metrics.assert_performance_target(5000, "Multi-metric write time");
+
+    println!("✅ Write completed, querying back each metric name to verify row group isolation...");
+
+    // Assert: query back via REST catalog scan
+    let mut props = std::collections::HashMap::new();
+    props.insert(REST_CATALOG_PROP_URI.to_string(), config.iceberg.catalog_uri.clone());
+    let warehouse = std::env::var("ICEBERG_WAREHOUSE")
+        .unwrap_or_else(|_| config.iceberg.warehouse.clone());
+    props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse);
+
+    // Add bearer token if present
+    if let Some(ref token) = config.iceberg.catalog_token {
+        props.insert("token".to_string(), token.clone());
+    }
+
+    if let Some(ep) = std::env::var("S3_ENDPOINT").ok().or(config.s3.endpoint.clone()) {
+        props.insert("s3.endpoint".to_string(), ep);
+    }
+    if let Some(ak) = std::env::var("S3_ACCESS_KEY").ok().or(config.s3.access_key_id.clone()) {
+        props.insert("s3.access-key-id".to_string(), ak);
+    }
+    if let Some(sk) = std::env::var("S3_SECRET_KEY").ok().or(config.s3.secret_access_key.clone()) {
+        props.insert("s3.secret-access-key".to_string(), sk);
+    }
+    props.insert("s3.region".to_string(), config.storage.s3_region.clone());
+
+    // For testing/development with TLS interception, use custom client
+    let catalog = if std::env::var("ICEBERG_DISABLE_TLS_VALIDATION").is_ok() {
+        let http_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("build http client");
+        RestCatalogBuilder::default()
+            .with_client(http_client)
+            .load("rest", props).await
+            .expect("load catalog")
+    } else {
+        RestCatalogBuilder::default().load("rest", props).await
+            .expect("load catalog")
+    };
+
+    // Use the metrics table
+    let table_ident = TableIdent::from_strs(["default", "metrics"])
+        .expect("table ident");
+
+    // Performance tracking: measure table load time
+    let load_timer = Timer::start("Table Load (metrics)");
+    let table = catalog.load_table(&table_ident).await.expect("load table");
+    let load_duration = load_timer.stop();
+
+    // Report table metadata loading performance
+    let load_metrics = PerformanceMetrics::new("Table Load (metrics)")
+        .with_duration(load_duration);
+    load_metrics.print_report();
+    load_metrics.assert_performance_target(1000, "Table load time");
+
+    // Query each metric name individually to verify row group isolation
+    let mut total_query_duration = std::time::Duration::ZERO;
+    let mut all_selectivities = Vec::new();
+
+    for (metric_idx, metric_name) in metric_names.iter().enumerate() {
+        println!("\n🔍 Querying metric {}/{}: {}", metric_idx + 1, num_metric_names, metric_name);
+
+        let predicate = Reference::new("metric_name").equal_to(Datum::string(metric_name));
+        let scan = table.scan()
+            .with_filter(predicate)
+            .build()
+            .expect("scan build");
+
+        let query_timer = Timer::start(&format!("Query metric {}", metric_idx + 1));
+        let mut arrow_stream = scan.to_arrow().await.expect("arrow stream");
+
+        let mut found = 0usize;
+        let mut rows_scanned = 0usize;
+        let mut values_sum = 0.0;
+
+        while let Some(batch_result) = arrow_stream.next().await {
+            let batch = batch_result.expect("batch ok");
+            rows_scanned += batch.num_rows();
+
+            // Verify metric_name matches
+            if let Some((name_idx, _)) = batch.schema().fields().iter().enumerate().find(|(_, f)| f.name() == "metric_name") {
+                let col = batch.column(name_idx);
+                let arr = col.as_any().downcast_ref::<StringArray>().expect("string arr");
+                
+                // Also get values to verify correctness
+                if let Some((val_idx, _)) = batch.schema().fields().iter().enumerate().find(|(_, f)| f.name() == "value") {
+                    let val_col = batch.column(val_idx);
+                    let val_arr = val_col.as_any().downcast_ref::<Float64Array>().expect("float64 arr");
+                    
+                    for i in 0..arr.len() {
+                        if arr.value(i) == metric_name.as_str() {
+                            found += 1;
+                            values_sum += val_arr.value(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        let query_duration = query_timer.stop();
+        total_query_duration += query_duration;
+
+        let selectivity = (found as f64 / rows_scanned.max(1) as f64) * 100.0;
+        all_selectivities.push(selectivity);
+
+        println!("  ✓ Found {} data points, scanned {} rows (selectivity: {:.1}%)", found, rows_scanned, selectivity);
+        println!("  ✓ Sum of values: {:.2}", values_sum);
+
+        assert_eq!(found, data_points_per_metric,
+                   "Expected exactly {} data points for metric {}, found {}",
+                   data_points_per_metric, metric_name, found);
+
+        // Verify perfect selectivity (100% = only scanned the target row group)
+        assert_eq!(found, rows_scanned,
+                   "Expected perfect selectivity (100%), but scanned {} rows and matched {} rows",
+                   rows_scanned, found);
+    }
+
+    println!("\n📊 Multi-Metric Query Performance Summary:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("⏱️  Total query time ({} metric names): {:?}", num_metric_names, total_query_duration);
+    println!("⏱️  Average per metric: {:?}", total_query_duration / num_metric_names as u32);
+    println!("📊 Selectivity: {:.1}% (all metrics)", all_selectivities.iter().sum::<f64>() / all_selectivities.len() as f64);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    println!("\n✅ All {} metric names verified with perfect selectivity (100%)", num_metric_names);
+    println!("✅ Row group per metric_name design validated: each metric query scans only its own row group");
 }

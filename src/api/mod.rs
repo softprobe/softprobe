@@ -3,7 +3,7 @@ pub mod query;
 pub mod health;
 
 use axum::{routing::{get, post}, Router};
-use crate::storage::{Storage, SpanBuffer, LogBuffer};
+use crate::storage::{Storage, SpanBuffer, LogBuffer, MetricBuffer};
 use crate::query::QueryEngine;
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ pub struct AppState {
     pub query_engine: Arc<QueryEngine>,
     pub span_buffer: Option<Arc<SpanBuffer>>,
     pub log_buffer: Option<Arc<LogBuffer>>,
+    pub metric_buffer: Option<Arc<MetricBuffer>>,
 }
 
 pub async fn create_router(
@@ -21,20 +22,23 @@ pub async fn create_router(
     query_engine: QueryEngine,
     span_buffer: Option<SpanBuffer>,
     log_buffer: Option<LogBuffer>,
+    metric_buffer: Option<MetricBuffer>,
 ) -> anyhow::Result<Router> {
     let state = AppState {
         storage: Arc::new(storage),
         query_engine: Arc::new(query_engine),
         span_buffer: span_buffer.map(Arc::new),
         log_buffer: log_buffer.map(Arc::new),
+        metric_buffer: metric_buffer.map(Arc::new),
     };
 
     // OTLP standard endpoints
     let router: Router = Router::new()
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
-        .route("/v1/traces", post(ingestion::traces::ingest_otlp_traces))
-        .route("/v1/logs", post(ingestion::logs::ingest_otlp_logs))
+        .route("/v1/traces", post(ingestion::traces::ingest_traces))
+        .route("/v1/logs", post(ingestion::logs::ingest_logs))
+        .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/query", post(query::query_recordings))
         .route("/retrieve", post(query::retrieve_payloads))
         .route("/v1/query/session/{session_id}", get(query::query_session_by_id))

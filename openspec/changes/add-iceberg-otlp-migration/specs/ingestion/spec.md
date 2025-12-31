@@ -38,11 +38,11 @@ The system SHALL buffer traces and logs together by `session_id`, flushing as co
 
 #### Scenario: Group traces and logs by session
 - **WHEN** spans and log records arrive with the same `session_id` attribute
-- **THEN** they are buffered together and flushed simultaneously to `otlp_traces` and `otlp_logs` tables
+- **THEN** they are buffered together and flushed simultaneously to `traces` and `logs` tables
 
 #### Scenario: Coordinated flush for session
 - **WHEN** a session buffer is flushed
-- **THEN** traces are written to `otlp_traces` and logs to `otlp_logs` in the same commit operation
+- **THEN** traces are written to `traces` and logs to `logs` in the same commit operation
 
 ### Requirement: Separate Metrics Buffering
 The system SHALL buffer metrics separately from traces/logs since metrics are aggregations, NOT session-correlated.

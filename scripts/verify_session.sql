@@ -16,11 +16,11 @@ SET s3_url_style='path';
 SET unsafe_enable_version_guessing=true;
 
 -- Create views for Iceberg tables (using S3 paths)
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
 -- Create a macro to verify a session
 CREATE OR REPLACE MACRO verify_session(sid) AS TABLE
@@ -33,7 +33,7 @@ WITH traces AS (
         message_type as content,
         timestamp,
         record_date
-    FROM otlp_traces
+    FROM traces
     WHERE session_id = sid
 ),
 logs AS (
@@ -45,7 +45,7 @@ logs AS (
         body as content,
         timestamp,
         record_date
-    FROM otlp_logs
+    FROM logs
     WHERE session_id = sid
 )
 SELECT * FROM traces

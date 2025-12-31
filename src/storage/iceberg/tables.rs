@@ -10,7 +10,7 @@ pub struct TraceTable;
 
 impl TraceTable {
     pub fn table_name() -> &'static str {
-        "otlp_traces"
+        "traces"
     }
 
     pub fn schema() -> IcebergSchema {
@@ -157,7 +157,7 @@ pub struct OtlpLogsTable;
 
 impl OtlpLogsTable {
     pub fn table_name() -> &'static str {
-        "otlp_logs"
+        "logs"
     }
 
     pub fn schema() -> IcebergSchema {
@@ -267,6 +267,116 @@ impl OtlpLogsTable {
                 "0.01".to_string(),
             );
         }
+
+        properties
+    }
+}
+
+/// OTLP metrics table - stores OTLP metric data points
+pub struct OtlpMetricsTable;
+
+impl OtlpMetricsTable {
+    pub fn table_name() -> &'static str {
+        "metrics"
+    }
+
+    pub fn schema() -> IcebergSchema {
+        IcebergSchema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                // Metric identity
+                NestedField::required(1, "metric_name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(2, "description", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(3, "unit", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(4, "metric_type", Type::Primitive(PrimitiveType::String)).into(),
+
+                // Timestamp and value
+                NestedField::required(5, "timestamp", Type::Primitive(PrimitiveType::Timestamptz)).into(),
+                NestedField::required(6, "value", Type::Primitive(PrimitiveType::Double)).into(),
+
+                // Attributes MAP<STRING, STRING>
+                NestedField::optional(
+                    7,
+                    "attributes",
+                    Type::Map(
+                        MapType::new(
+                            NestedField::required(9, "key", Type::Primitive(PrimitiveType::String)).into(),
+                            NestedField::optional(10, "value", Type::Primitive(PrimitiveType::String)).into(),
+                        )
+                    ),
+                ).into(),
+
+                // Resource attributes MAP<STRING, STRING>
+                NestedField::optional(
+                    8,
+                    "resource_attributes",
+                    Type::Map(
+                        MapType::new(
+                            NestedField::required(11, "key", Type::Primitive(PrimitiveType::String)).into(),
+                            NestedField::optional(12, "value", Type::Primitive(PrimitiveType::String)).into(),
+                        )
+                    ),
+                ).into(),
+
+                // Partition Key
+                NestedField::required(13, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
+            ])
+            .build()
+            .unwrap()
+    }
+
+    pub fn partition_spec(schema: &IcebergSchema) -> anyhow::Result<PartitionSpec> {
+        let partition_field = UnboundPartitionField {
+            source_id: 13, // record_date field ID
+            field_id: Some(1000),
+            transform: iceberg::spec::Transform::Identity,
+            name: "record_date".to_string(),
+        };
+        PartitionSpec::builder(schema.clone())
+            .with_spec_id(0)
+            .add_unbound_field(partition_field)?
+            .build()
+            .map_err(Into::into)
+    }
+
+    pub fn sort_order(schema: &IcebergSchema) -> anyhow::Result<SortOrder> {
+        SortOrder::builder()
+            .with_order_id(1)
+            .with_fields(vec![
+                iceberg::spec::SortField::builder()
+                    .source_id(1) // metric_name
+                    .direction(iceberg::spec::SortDirection::Ascending)
+                    .null_order(iceberg::spec::NullOrder::First)
+                    .transform(iceberg::spec::Transform::Identity)
+                    .build(),
+                iceberg::spec::SortField::builder()
+                    .source_id(5) // timestamp
+                    .direction(iceberg::spec::SortDirection::Ascending)
+                    .null_order(iceberg::spec::NullOrder::First)
+                    .transform(iceberg::spec::Transform::Identity)
+                    .build(),
+            ])
+            .build(schema)
+            .map_err(Into::into)
+    }
+
+    pub fn table_properties() -> HashMap<String, String> {
+        let mut properties = HashMap::new();
+        properties.insert("write.format.default".to_string(), "parquet".to_string());
+        properties.insert("format-version".to_string(), "2".to_string());
+        properties.insert("write.target-file-size-bytes".to_string(), "134217728".to_string());
+        properties.insert("write.parquet.compression-codec".to_string(), "zstd".to_string());
+        properties.insert("write.parquet.compression-level".to_string(), "3".to_string());
+
+        // Bloom filter for metric_name
+        properties.insert(
+            "write.parquet.bloom-filter-enabled.metric_name".to_string(),
+            "true".to_string(),
+        );
+        properties.insert(
+            "write.parquet.bloom-filter-fpp.metric_name".to_string(),
+            "0.01".to_string(),
+        );
 
         properties
     }

@@ -16,7 +16,7 @@ The system SHALL support retrieving complete sessions including all signal types
 
 #### Scenario: Retrieve complete session
 - **WHEN** a client queries by `session_id`
-- **THEN** the system returns traces from `otlp_traces`, logs from `otlp_logs`, and metrics from `otlp_metrics` for that session
+- **THEN** the system returns traces from `traces`, logs from `logs`, and metrics from `metrics` for that session
 
 #### Scenario: Session existence check
 - **WHEN** a client queries by `session_id`
@@ -75,7 +75,7 @@ The system SHALL support querying specific signal types or all signal types for 
 
 #### Scenario: Query traces only
 - **WHEN** a client requests only traces for a session
-- **THEN** the system retrieves data only from `otlp_traces` table
+- **THEN** the system retrieves data only from `traces` table
 
 #### Scenario: Query all signal types
 - **WHEN** a client requests all telemetry for a session

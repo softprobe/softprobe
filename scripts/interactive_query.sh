@@ -25,29 +25,32 @@ SET unsafe_enable_version_guessing=true;
 .print 'Loading Iceberg tables...'
 
 -- Create views for Iceberg tables (using S3 paths)
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
--- Create convenient aliases
-CREATE OR REPLACE VIEW traces AS SELECT * FROM otlp_traces;
-CREATE OR REPLACE VIEW logs AS SELECT * FROM otlp_logs;
+CREATE OR REPLACE VIEW metrics AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/metrics', allow_moved_paths := true);
 
 .print ''
 .print 'Available views:'
-.print '  - traces (otlp_traces)'
-.print '  - logs (otlp_logs)'
+.print '  - traces'
+.print '  - logs'
+.print '  - metrics'
 .print ''
 .print 'Useful commands:'
 .print '  DESCRIBE traces;'
 .print '  DESCRIBE logs;'
+.print '  DESCRIBE metrics;'
 .print ''
 .print 'Example queries:'
 .print '  SELECT COUNT(*) FROM traces;'
 .print '  SELECT * FROM logs ORDER BY timestamp DESC LIMIT 10;'
 .print '  SELECT session_id, COUNT(*) FROM traces GROUP BY session_id;'
+.print '  SELECT metric_name, COUNT(*) FROM metrics GROUP BY metric_name;'
+.print '  SELECT * FROM metrics WHERE metric_name = '\''cpu.usage'\'' ORDER BY timestamp DESC LIMIT 10;'
 .print ''
 .print '================================================'
 .print ''

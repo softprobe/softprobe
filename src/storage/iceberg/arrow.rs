@@ -1,4 +1,4 @@
-use crate::models::{Span, Log};
+use crate::models::{Span, Log, Metric};
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, StringArray, Int32Array, TimestampMicrosecondArray, Date32Array,
@@ -8,7 +8,7 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, trace, info};
 use chrono::NaiveDate;
 use iceberg::spec::Schema as IcebergSchema;
 
@@ -18,10 +18,10 @@ pub fn spans_to_record_batch(spans: &[Span], iceberg_schema: &IcebergSchema) -> 
     let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
 
     let num_spans = spans.len();
-    info!("Converting {} spans to Arrow RecordBatch", num_spans);
-    info!("Arrow schema field count: {}", arrow_schema.fields().len());
+    debug!("Converting {} spans to Arrow RecordBatch", num_spans);
+    trace!("Arrow schema field count: {}", arrow_schema.fields().len());
     for (i, f) in arrow_schema.fields().iter().enumerate() {
-        info!("Field[{}]: {} : {:?}", i, f.name(), f.data_type());
+        trace!("Field[{}]: {} : {:?}", i, f.name(), f.data_type());
     }
 
     // Extract field definitions from schema to preserve field IDs
@@ -160,7 +160,7 @@ pub fn spans_to_record_batch(spans: &[Span], iceberg_schema: &IcebergSchema) -> 
         ],
     )?;
 
-    info!("Created Arrow RecordBatch with {} rows", record_batch.num_rows());
+    debug!("Created Arrow RecordBatch with {} rows for spans", record_batch.num_rows());
     Ok(record_batch)
 }
 
@@ -327,8 +327,8 @@ fn build_events_array(spans: &[Span], events_field: &arrow::datatypes::FieldRef)
 pub fn logs_to_record_batch(logs: &[Log], iceberg_schema: &IcebergSchema) -> Result<RecordBatch> {
     let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
 
-    info!("Converting {} logs to Arrow RecordBatch", logs.len());
-    info!("Arrow schema field count: {}", arrow_schema.fields().len());
+    debug!("Converting {} logs to Arrow RecordBatch", logs.len());
+    trace!("Arrow schema field count: {}", arrow_schema.fields().len());
 
     // Extract field definitions from schema to preserve field IDs
     let attributes_field = Arc::new(arrow_schema.field_with_name("attributes")
@@ -436,12 +436,169 @@ pub fn logs_to_record_batch(logs: &[Log], iceberg_schema: &IcebergSchema) -> Res
         ],
     )?;
 
-    info!("Created Arrow RecordBatch with {} rows", record_batch.num_rows());
+    debug!("Created Arrow RecordBatch with {} rows for logs", record_batch.num_rows());
     Ok(record_batch)
 }
 
 /// Build a MAP<STRING, STRING> array for log attributes
 fn build_log_map_array(
+    maps: &[&std::collections::HashMap<String, String>],
+    map_field: &arrow::datatypes::FieldRef
+) -> Result<ArrayRef> {
+    use arrow::datatypes::DataType;
+
+    let mut all_keys = Vec::new();
+    let mut all_values = Vec::new();
+    let mut offsets = vec![0i32];
+    let mut current_offset = 0i32;
+
+    for map in maps {
+        for (key, value) in map.iter() {
+            all_keys.push(key.as_str());
+            all_values.push(value.as_str());
+            current_offset += 1;
+        }
+        offsets.push(current_offset);
+    }
+
+    let keys_array: ArrayRef = Arc::new(StringArray::from(all_keys));
+    let values_array: ArrayRef = Arc::new(StringArray::from(all_values));
+
+    let map_data_type = map_field.data_type();
+    let (entries_field, _) = if let DataType::Map(f, _) = map_data_type {
+        (f.clone(), true)
+    } else {
+        return Err(anyhow::anyhow!("Expected Map type for map field"));
+    };
+
+    let struct_fields = if let DataType::Struct(fields) = entries_field.data_type() {
+        fields.clone()
+    } else {
+        return Err(anyhow::anyhow!("Expected Struct type in Map entries"));
+    };
+
+    let entries_struct = StructArray::new(
+        struct_fields,
+        vec![keys_array, values_array],
+        None,
+    );
+
+    let offsets_buffer = OffsetBuffer::new(offsets.into());
+
+    let map_array = MapArray::try_new(
+        entries_field,
+        offsets_buffer,
+        entries_struct,
+        None,
+        false,
+    )?;
+
+    Ok(Arc::new(map_array))
+}
+
+/// Convert Metric batch to Arrow RecordBatch using Iceberg table schema
+pub fn metrics_to_record_batch(metrics: &[Metric], iceberg_schema: &IcebergSchema) -> Result<RecordBatch> {
+    // Convert Iceberg schema to Arrow schema
+    let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
+
+    let num_metrics = metrics.len();
+    debug!("Converting {} metrics to Arrow RecordBatch", num_metrics);
+
+    // Validate all metrics have the same partition key (date)
+    if num_metrics > 0 {
+        let first_date = metrics[0].timestamp.date_naive();
+        for metric in metrics.iter().skip(1) {
+            let metric_date = metric.timestamp.date_naive();
+            if metric_date != first_date {
+                return Err(anyhow::anyhow!(
+                    "All metrics in batch must have same record_date. Found {} and {}",
+                    first_date, metric_date
+                ));
+            }
+        }
+    }
+
+    // Extract field definitions from schema to preserve field IDs
+    let attributes_field = Arc::new(arrow_schema.field_with_name("attributes")
+        .map_err(|e| anyhow::anyhow!("attributes field not found in schema: {}", e))?.clone());
+
+    let resource_attributes_field = Arc::new(arrow_schema.field_with_name("resource_attributes")
+        .map_err(|e| anyhow::anyhow!("resource_attributes field not found in schema: {}", e))?.clone());
+
+    // Build arrays for each column
+    let metric_names: ArrayRef = Arc::new(StringArray::from(
+        metrics.iter().map(|m| m.metric_name.as_str()).collect::<Vec<_>>()
+    ));
+
+    let descriptions: ArrayRef = Arc::new(StringArray::from(
+        metrics.iter().map(|m| m.description.as_str()).collect::<Vec<_>>()
+    ));
+
+    let units: ArrayRef = Arc::new(StringArray::from(
+        metrics.iter().map(|m| m.unit.as_str()).collect::<Vec<_>>()
+    ));
+
+    let metric_types: ArrayRef = Arc::new(StringArray::from(
+        metrics.iter().map(|m| m.metric_type.as_str()).collect::<Vec<_>>()
+    ));
+
+    // Convert timestamps to microseconds since epoch (TIMESTAMPTZ)
+    let timestamps: ArrayRef = Arc::new(
+        TimestampMicrosecondArray::from(
+            metrics.iter()
+                .map(|m| m.timestamp.timestamp_micros())
+                .collect::<Vec<_>>()
+        ).with_timezone_utc()
+    );
+
+    // Convert values to Float64Array
+    use arrow::array::Float64Array;
+    let values: ArrayRef = Arc::new(Float64Array::from(
+        metrics.iter().map(|m| m.value).collect::<Vec<_>>()
+    ));
+
+    // Build attributes MAP<STRING, STRING>
+    let attributes_maps: Vec<&std::collections::HashMap<String, String>> =
+        metrics.iter().map(|m| &m.attributes).collect();
+    let attributes_array = build_metric_map_array(&attributes_maps, &attributes_field)?;
+
+    // Build resource_attributes MAP<STRING, STRING>
+    let resource_attributes_maps: Vec<&std::collections::HashMap<String, String>> =
+        metrics.iter().map(|m| &m.resource_attributes).collect();
+    let resource_attributes_array = build_metric_map_array(&resource_attributes_maps, &resource_attributes_field)?;
+
+    // Convert dates to days since epoch (Date32)
+    let record_dates: ArrayRef = Arc::new(Date32Array::from(
+        metrics.iter()
+            .map(|m| {
+                let date = m.timestamp.date_naive();
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                date.signed_duration_since(epoch).num_days() as i32
+            })
+            .collect::<Vec<_>>()
+    ));
+
+    // Create RecordBatch with columns matching Iceberg schema order
+    let record_batch = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![
+            metric_names,
+            descriptions,
+            units,
+            metric_types,
+            timestamps,
+            values,
+            attributes_array,
+            resource_attributes_array,
+            record_dates,
+        ],
+    )?;
+
+    Ok(record_batch)
+}
+
+/// Build a MAP<STRING, STRING> array for metric attributes
+fn build_metric_map_array(
     maps: &[&std::collections::HashMap<String, String>],
     map_field: &arrow::datatypes::FieldRef
 ) -> Result<ArrayRef> {

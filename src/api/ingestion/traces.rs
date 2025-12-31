@@ -11,13 +11,13 @@ use tracing::{error, info, warn};
 use anyhow::Result;
 
 /// OTLP /v1/traces JSON handler with proper parsing
-pub async fn ingest_otlp_traces_json(
+pub async fn ingest_traces_json(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Json<IngestResponse> {
     let body_size = body.len();
     match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
-        Ok(request) => match process_otlp_traces(state, request, body_size).await {
+        Ok(request) => match process_traces(state, request, body_size).await {
             Ok(count) => Json(IngestResponse {
                 success: true,
                 ingested_count: count,
@@ -44,13 +44,13 @@ pub async fn ingest_otlp_traces_json(
 }
 
 /// OTLP /v1/traces protobuf handler
-pub async fn ingest_otlp_traces_protobuf(
+pub async fn ingest_traces_protobuf(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Json<IngestResponse> {
     let body_size = body.len();
     match prost::Message::decode(body.as_ref()) {
-        Ok(request) => match process_otlp_traces(state, request, body_size).await {
+        Ok(request) => match process_traces(state, request, body_size).await {
             Ok(count) => Json(IngestResponse {
                 success: true,
                 ingested_count: count,
@@ -77,7 +77,7 @@ pub async fn ingest_otlp_traces_protobuf(
 }
 
 /// Unified OTLP /v1/traces handler that switches on Content-Type
-pub async fn ingest_otlp_traces(
+pub async fn ingest_traces(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -93,7 +93,7 @@ pub async fn ingest_otlp_traces(
     // Protobuf
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
-            Ok(request) => match process_otlp_traces(state, request, body_size).await {
+            Ok(request) => match process_traces(state, request, body_size).await {
                 Ok(count) => Json(IngestResponse {
                     success: true,
                     ingested_count: count,
@@ -116,7 +116,7 @@ pub async fn ingest_otlp_traces(
     } else {
         // Default to JSON
         match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
-            Ok(request) => match process_otlp_traces(state, request, body_size).await {
+            Ok(request) => match process_traces(state, request, body_size).await {
                 Ok(count) => Json(IngestResponse {
                     success: true,
                     ingested_count: count,
@@ -137,7 +137,7 @@ pub async fn ingest_otlp_traces(
 }
 
 /// Core OTLP processing logic
-async fn process_otlp_traces(
+async fn process_traces(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,

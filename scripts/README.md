@@ -34,15 +34,15 @@ SET s3_url_style='path';
 SET unsafe_enable_version_guessing=true;
 
 -- Create views using iceberg_scan function with S3 paths
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
 -- Now query using simple view names
-SELECT COUNT(*) FROM otlp_traces;
-SELECT COUNT(*) FROM otlp_logs;
+SELECT COUNT(*) FROM traces;
+SELECT COUNT(*) FROM logs;
 ```
 
 ### Key Points
@@ -64,21 +64,21 @@ SELECT COUNT(*) FROM otlp_logs;
 
 ### Count Data
 ```sql
-SELECT COUNT(*) FROM otlp_traces;
-SELECT COUNT(*) FROM otlp_logs;
+SELECT COUNT(*) FROM traces;
+SELECT COUNT(*) FROM logs;
 ```
 
 ### Recent Data
 ```sql
-SELECT * FROM otlp_traces ORDER BY timestamp DESC LIMIT 10;
-SELECT * FROM otlp_logs ORDER BY timestamp DESC LIMIT 10;
+SELECT * FROM traces ORDER BY timestamp DESC LIMIT 10;
+SELECT * FROM logs ORDER BY timestamp DESC LIMIT 10;
 ```
 
 ### Session Analysis
 ```sql
 -- Sessions with most spans
 SELECT session_id, COUNT(*) as span_count
-FROM otlp_traces
+FROM traces
 GROUP BY session_id
 ORDER BY span_count DESC
 LIMIT 10;
@@ -88,8 +88,8 @@ SELECT
     t.session_id,
     COUNT(DISTINCT t.span_id) as spans,
     COUNT(DISTINCT l.body) as logs
-FROM otlp_traces t
-LEFT JOIN otlp_logs l ON t.session_id = l.session_id
+FROM traces t
+LEFT JOIN logs l ON t.session_id = l.session_id
 GROUP BY t.session_id
 HAVING logs > 0
 ORDER BY spans + logs DESC;
@@ -109,8 +109,8 @@ SELECT * FROM verify_session('your-session-id');
 ### "Unknown parameter 'uri'" or "Catalog does not exist"
 **Fix**: Use `iceberg_scan()` function with S3 paths instead of `CREATE SECRET` or `ATTACH` syntax:
 ```sql
-CREATE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 ```
 
 ### "No version was provided"

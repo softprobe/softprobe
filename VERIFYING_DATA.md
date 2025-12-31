@@ -87,29 +87,29 @@ SET s3_url_style='path';
 SET unsafe_enable_version_guessing=true;
 
 -- Create views for Iceberg tables using S3 paths
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
 -- Now you can query using simple view names
-SELECT COUNT(*) FROM otlp_traces;
-SELECT COUNT(*) FROM otlp_logs;
+SELECT COUNT(*) FROM traces;
+SELECT COUNT(*) FROM logs;
 ```
 
 ### Verify Traces Table
 
 ```sql
 -- First, create the view (if not already done)
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
 -- Table schema
-DESCRIBE otlp_traces;
+DESCRIBE traces;
 
 -- Count total spans
-SELECT COUNT(*) FROM otlp_traces;
+SELECT COUNT(*) FROM traces;
 
 -- Recent spans
 SELECT
@@ -117,7 +117,7 @@ SELECT
     trace_id,
     message_type,
     timestamp
-FROM otlp_traces
+FROM traces
 ORDER BY timestamp DESC
 LIMIT 10;
 
@@ -125,7 +125,7 @@ LIMIT 10;
 SELECT
     session_id,
     COUNT(*) as span_count
-FROM otlp_traces
+FROM traces
 GROUP BY session_id
 ORDER BY span_count DESC;
 ```
@@ -134,14 +134,14 @@ ORDER BY span_count DESC;
 
 ```sql
 -- First, create the view (if not already done)
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
 -- Table schema
-DESCRIBE otlp_logs;
+DESCRIBE logs;
 
 -- Count total logs
-SELECT COUNT(*) FROM otlp_logs;
+SELECT COUNT(*) FROM logs;
 
 -- Recent logs
 SELECT
@@ -149,7 +149,7 @@ SELECT
     severity_text,
     body,
     timestamp
-FROM otlp_logs
+FROM logs
 ORDER BY timestamp DESC
 LIMIT 10;
 
@@ -157,7 +157,7 @@ LIMIT 10;
 SELECT
     severity_text,
     COUNT(*) as log_count
-FROM otlp_logs
+FROM logs
 GROUP BY severity_text
 ORDER BY log_count DESC;
 ```
@@ -170,8 +170,8 @@ SELECT
     t.session_id,
     COUNT(DISTINCT t.span_id) as span_count,
     COUNT(DISTINCT l.body) as log_count
-FROM otlp_traces t
-LEFT JOIN otlp_logs l
+FROM traces t
+LEFT JOIN logs l
     ON t.session_id = l.session_id
 GROUP BY t.session_id
 HAVING log_count > 0
@@ -197,7 +197,7 @@ SELECT
     COUNT(*) as correlated_logs,
     COUNT(DISTINCT trace_id) as unique_traces,
     COUNT(DISTINCT span_id) as unique_spans
-FROM otlp_logs
+FROM logs
 WHERE trace_id IS NOT NULL;
 
 -- Find logs for a specific trace
@@ -207,8 +207,8 @@ SELECT
     l.severity_text,
     l.body,
     t.message_type as related_span
-FROM otlp_logs l
-LEFT JOIN otlp_traces t
+FROM logs l
+LEFT JOIN traces t
     ON l.trace_id = t.trace_id
 WHERE l.trace_id = 'your-trace-id-here'
 ORDER BY l.timestamp;
@@ -223,7 +223,7 @@ ORDER BY l.timestamp;
 SELECT
     record_date,
     COUNT(*) as span_count
-FROM otlp_traces
+FROM traces
 GROUP BY record_date
 ORDER BY record_date DESC;
 
@@ -231,7 +231,7 @@ ORDER BY record_date DESC;
 SELECT
     record_date,
     COUNT(*) as log_count
-FROM otlp_logs
+FROM logs
 GROUP BY record_date
 ORDER BY record_date DESC;
 ```
@@ -245,17 +245,17 @@ SELECT
     snapshot_id,
     timestamp_ms,
     manifest_list
-FROM iceberg_snapshots('s3://warehouse/default/otlp_traces');
+FROM iceberg_snapshots('s3://warehouse/default/traces');
 
 SELECT
     sequence_number,
     snapshot_id,
     timestamp_ms,
     manifest_list
-FROM iceberg_snapshots('s3://warehouse/default/otlp_logs');
+FROM iceberg_snapshots('s3://warehouse/default/logs');
 
 -- Show detailed table metadata
-SELECT * FROM iceberg_metadata('s3://warehouse/default/otlp_traces');
+SELECT * FROM iceberg_metadata('s3://warehouse/default/traces');
 ```
 
 ## Testing Data Ingestion
@@ -338,7 +338,7 @@ Or query interactively:
 
 ### "Table not found" error
 
-**Problem**: `iceberg_catalog.default.otlp_traces` doesn't exist
+**Problem**: `iceberg_catalog.default.traces` doesn't exist
 
 **Solutions**:
 1. Check if Iceberg REST catalog is running: `curl http://localhost:8181/v1/config`
@@ -382,7 +382,7 @@ WITH session_data AS (
         span_id,
         message_type as content,
         timestamp
-    FROM otlp_traces
+    FROM traces
     WHERE session_id = 'your-session-id'
 
     UNION ALL
@@ -394,7 +394,7 @@ WITH session_data AS (
         span_id,
         CONCAT(severity_text, ': ', body) as content,
         timestamp
-    FROM otlp_logs
+    FROM logs
     WHERE session_id = 'your-session-id'
 )
 SELECT * FROM session_data
@@ -411,7 +411,7 @@ SELECT
     message_type,
     status_code,
     status_message
-FROM otlp_traces
+FROM traces
 WHERE status_code = 'ERROR'
 ORDER BY timestamp DESC
 LIMIT 20;
@@ -422,7 +422,7 @@ SELECT
     severity_text,
     body,
     timestamp
-FROM otlp_logs
+FROM logs
 WHERE severity_number >= 17  -- ERROR or higher
 ORDER BY timestamp DESC
 LIMIT 20;
@@ -437,7 +437,7 @@ SELECT
     COUNT(*) as count,
     AVG(EXTRACT(EPOCH FROM (end_timestamp - timestamp))) as avg_duration_secs,
     MAX(EXTRACT(EPOCH FROM (end_timestamp - timestamp))) as max_duration_secs
-FROM otlp_traces
+FROM traces
 WHERE end_timestamp IS NOT NULL
 GROUP BY message_type
 ORDER BY avg_duration_secs DESC;

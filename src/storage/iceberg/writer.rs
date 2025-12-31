@@ -11,7 +11,7 @@ use iceberg::{
 };
 use iceberg_catalog_rest::RestCatalog;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use chrono::NaiveDate;
 
 /// Generic writer for Iceberg tables
@@ -151,7 +151,7 @@ impl TableWriter {
         // Write each batch as a separate row group
         for (batch_idx, batch_records) in batches.iter().enumerate() {
             let record_batch = to_record_batch(batch_records, table.metadata().current_schema())?;
-            info!("Writing row group {}/{} with {} records",
+            debug!("Writing row group {}/{} with {} records",
                   batch_idx + 1, batches.len(), batch_records.len());
             data_file_writer.write(record_batch).await?;
         }
@@ -199,7 +199,7 @@ fn extract_partition_value(batch: &RecordBatch) -> Result<Struct> {
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let record_date = epoch + chrono::Duration::days(days_since_epoch as i64);
 
-    info!("Computed partition value: record_date={} (days since epoch: {})",
+    debug!("Computed partition value: record_date={} (days since epoch: {})",
           record_date, days_since_epoch);
 
     // Create partition value: Struct with Literal::date()

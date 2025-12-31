@@ -25,20 +25,20 @@ SET unsafe_enable_version_guessing=true;
 
 -- Create views for easier querying (using iceberg_scan function with S3 paths)
 -- Note: The metadata location comes from the Iceberg REST catalog
-CREATE OR REPLACE VIEW otlp_traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_traces', allow_moved_paths := true);
+CREATE OR REPLACE VIEW traces AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
 
-CREATE OR REPLACE VIEW otlp_logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/otlp_logs', allow_moved_paths := true);
+CREATE OR REPLACE VIEW logs AS
+SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
 
 -- Show table metadata
 .print '--- Table Info ---'
-DESCRIBE otlp_traces;
+DESCRIBE traces;
 
 -- Count total spans
 .print ''
 .print '--- Total Spans ---'
-SELECT COUNT(*) as total_spans FROM otlp_traces;
+SELECT COUNT(*) as total_spans FROM traces;
 
 -- Count by session
 .print ''
@@ -48,7 +48,7 @@ SELECT
     COUNT(*) as span_count,
     MIN(timestamp) as first_span,
     MAX(timestamp) as last_span
-FROM otlp_traces
+FROM traces
 GROUP BY session_id
 ORDER BY span_count DESC
 LIMIT 10;
@@ -59,7 +59,7 @@ LIMIT 10;
 SELECT
     app_id,
     COUNT(*) as span_count
-FROM otlp_traces
+FROM traces
 GROUP BY app_id
 ORDER BY span_count DESC;
 
@@ -73,7 +73,7 @@ SELECT
     message_type,
     timestamp,
     record_date
-FROM otlp_traces
+FROM traces
 ORDER BY timestamp DESC
 LIMIT 10;
 
@@ -83,7 +83,7 @@ LIMIT 10;
 SELECT
     record_date,
     COUNT(*) as span_count
-FROM otlp_traces
+FROM traces
 GROUP BY record_date
 ORDER BY record_date DESC;
 
@@ -97,12 +97,12 @@ ORDER BY record_date DESC;
 
 -- Show table metadata
 .print '--- Table Info ---'
-DESCRIBE otlp_logs;
+DESCRIBE logs;
 
 -- Count total logs
 .print ''
 .print '--- Total Logs ---'
-SELECT COUNT(*) as total_logs FROM otlp_logs;
+SELECT COUNT(*) as total_logs FROM logs;
 
 -- Count by session
 .print ''
@@ -112,7 +112,7 @@ SELECT
     COUNT(*) as log_count,
     MIN(timestamp) as first_log,
     MAX(timestamp) as last_log
-FROM otlp_logs
+FROM logs
 GROUP BY session_id
 ORDER BY log_count DESC
 LIMIT 10;
@@ -123,7 +123,7 @@ LIMIT 10;
 SELECT
     severity_text,
     COUNT(*) as log_count
-FROM otlp_logs
+FROM logs
 GROUP BY severity_text
 ORDER BY log_count DESC;
 
@@ -137,7 +137,7 @@ SELECT
     timestamp,
     trace_id,
     span_id
-FROM otlp_logs
+FROM logs
 ORDER BY timestamp DESC
 LIMIT 10;
 
@@ -147,7 +147,7 @@ LIMIT 10;
 SELECT
     COUNT(*) as correlated_logs,
     COUNT(DISTINCT trace_id) as unique_traces
-FROM otlp_logs
+FROM logs
 WHERE trace_id IS NOT NULL;
 
 -- ============================================================================
@@ -164,8 +164,8 @@ SELECT
     COALESCE(t.session_id, l.session_id) as session_id,
     COUNT(DISTINCT t.span_id) as span_count,
     COUNT(DISTINCT l.body) as log_count
-FROM otlp_traces t
-FULL OUTER JOIN otlp_logs l
+FROM traces t
+FULL OUTER JOIN logs l
     ON t.session_id = l.session_id
 WHERE COALESCE(t.session_id, l.session_id) IS NOT NULL
 GROUP BY COALESCE(t.session_id, l.session_id)
