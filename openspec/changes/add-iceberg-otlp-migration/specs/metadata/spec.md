@@ -1,30 +1,68 @@
 ## ADDED Requirements
 
-### Requirement: Real-Time Metadata ETL
-The system SHALL run a near-real-time ETL that reads new Iceberg Parquet files and extracts business metadata only.
+### Requirement: Iceberg Manifest-Based Query Optimization
+The system SHALL leverage Iceberg manifest files for efficient query planning and file pruning.
 
-#### Scenario: Extract metadata on new data
-- **WHEN** a new Iceberg snapshot with Parquet files is available
-- **THEN** the ETL reads the files via catalog and emits per-span business metadata without payload bodies or file pointers
+#### Scenario: Manifest-level file pruning
+- **WHEN** a query specifies predicates (session_id, time range, attributes)
+- **THEN** the Iceberg query engine uses manifest files to eliminate data files that don't match predicates
 
-### Requirement: ClickHouse Metadata Tables
-The system SHALL populate `session_metadata`, `recording_events`, `recording_ops_minute`, and `recording_tag_counts` tables for fast metadata queries.
+#### Scenario: Partition-level elimination
+- **WHEN** a query filters by date range
+- **THEN** Iceberg eliminates entire partitions (days) that fall outside the range using partition metadata
 
-#### Scenario: Populate recording_events with business metadata only
-- **WHEN** metadata is extracted for a span
-- **THEN** a row is written containing ONLY business fields (trace_id, session_id, app_id, timestamp, status_code) and NO Iceberg internal paths
+### Requirement: Partition Statistics for Efficient Filtering
+The system SHALL use Iceberg partition statistics to minimize data scanning.
 
-### Requirement: Session Metadata in ClickHouse
-The system SHALL maintain a ClickHouse `session_metadata` table with session-level summaries.
+#### Scenario: Date partition pruning
+- **WHEN** querying for sessions within a specific date range
+- **THEN** only Parquet files within matching date partitions are scanned
 
-#### Scenario: Session summary recorded
-- **WHEN** a session is processed
-- **THEN** session_metadata records session_id, app_id, start/end timestamps, message_count, and size_bytes (NO file pointers)
+#### Scenario: Partition metadata caching
+- **WHEN** repeatedly querying the same time range
+- **THEN** partition metadata is cached to avoid redundant manifest reads
 
-### Requirement: No Storage of Iceberg Internal Paths
-The system SHALL NOT store Iceberg file paths, row group indices, or row indices in ClickHouse.
+### Requirement: Row Group Statistics for Predicate Pushdown
+The system SHALL use Parquet row group min/max statistics for efficient data filtering.
 
-#### Scenario: Query uses Iceberg scan API
-- **WHEN** full span data is needed
-- **THEN** the query client uses Iceberg scan API with predicates (session_id, trace_id, timestamp) to retrieve data, letting Iceberg manage file discovery
+#### Scenario: Session ID row group filtering
+- **WHEN** querying by specific session_id
+- **THEN** only row groups with matching session_id min/max ranges are read from Parquet files
+
+#### Scenario: Timestamp-based row group pruning
+- **WHEN** querying with fine-grained time filters
+- **THEN** row group statistics eliminate groups outside the time range
+
+### Requirement: Snapshot Isolation for Consistent Reads
+The system SHALL use Iceberg snapshot isolation to provide consistent query results.
+
+#### Scenario: Consistent session view
+- **WHEN** reading a session across multiple Iceberg tables (traces, logs)
+- **THEN** the same snapshot ID is used for both tables to ensure time-consistent data
+
+#### Scenario: Snapshot-based time travel
+- **WHEN** querying historical data
+- **THEN** Iceberg snapshots allow querying data as it existed at a specific point in time
+
+### Requirement: Manifest File Structure
+The system SHALL organize Iceberg metadata using manifest files for scalability.
+
+#### Scenario: Manifest list organization
+- **WHEN** Iceberg commits new data
+- **THEN** a manifest list references multiple manifest files, each containing metadata for a set of data files
+
+#### Scenario: Incremental manifest updates
+- **WHEN** new sessions are written
+- **THEN** only new manifest files are created (not rewriting entire metadata)
+
+### Requirement: No External Metadata Store
+The system SHALL NOT use external databases or indexes for metadata - all metadata is managed by Iceberg.
+
+#### Scenario: Query without external dependency
+- **WHEN** executing a query
+- **THEN** all metadata (partition stats, file locations, row group statistics) comes from Iceberg catalog and manifest files
+
+#### Scenario: Self-contained metadata
+- **WHEN** moving or replicating the Iceberg catalog
+- **THEN** all query capabilities are preserved without external synchronization
 

@@ -1,108 +1,94 @@
 # Project Context
 
 ## Purpose
-SoftProbe is a record-and-replay testing platform that captures real application interactions and enables automated testing through replay mechanisms. The platform provides:
+This is a standalone OpenTelemetry-compatible collector with Apache Iceberg storage backend. The project provides:
 
-- **Recording**: Java agents instrument applications to capture live traffic, API calls, and dependencies (mock data)
-- **Storage**: Centralized repository for recorded interactions with efficient querying and retrieval
-- **Replay**: Automated execution of recorded interactions against target applications for regression testing
-- **Comparison**: Advanced JSON comparison engine for validating actual vs expected responses
-- **Analytics**: AI-powered analysis of session data and testing patterns
+- **OTLP Ingestion**: Standard OpenTelemetry Protocol endpoints for traces, logs, and metrics
+- **Iceberg Storage**: Scalable data lake storage for telemetry data with efficient querying
+- **Session Management**: Session-aware buffering and batching for optimal storage efficiency
+- **Query API**: Fast retrieval of telemetry data with metadata filtering and payload access
+- **Analytics**: DuckDB-powered analytical queries on Iceberg data
 
 ## Tech Stack
 
-### Backend Services (Java)
-- **Java 21** with Spring Boot 3.4.3
-- **Maven** for build management and multi-module project structure
-- **MongoDB** for primary data storage (with migration to Apache Iceberg planned)
-- **Redis** for caching and active session management
-
-### OTLP Backend (Rust), yet to be implemented
-- **Rust** with Axum web framework for high-performance data ingestion
-- **Apache Iceberg** for scalable data lake storage
-- **DuckDB** for analytical queries on recorded data
-- **Parquet** format for efficient storage and compression
-- **AWS S3/Oracle Object Storage** for payload storage
-
-### Agent Technology (Java)
-- **Java Agent** instrumentation for bytecode manipulation
-- **Dubbo**, **Spring**, **Servlet** framework instrumentation
-- **SPI (Service Provider Interface)** for extensible plugin architecture
+### OTLP Collector (Rust)
+- **Rust 1.70+** with Axum web framework for high-performance data ingestion
+- **Apache Iceberg 0.7** for scalable data lake storage with built-in metadata
+- **DuckDB** for analytical queries on telemetry data
+- **Parquet** format with Zstd compression for efficient storage
+- **AWS S3/MinIO/Cloudflare R2** for object storage backend
 
 ## Project Conventions
 
 ### Code Style
-- **Java**: Uses Lombok for boilerplate reduction, follows standard Spring Boot conventions
 - **Rust**: Standard rustfmt formatting with cargo clippy for linting
-- **Python**: PEP 8 compliance with type hints
-- **Naming**: kebab-case for services/modules, camelCase for Java, snake_case for Rust/Python
+- **Naming**: snake_case for Rust modules and functions, PascalCase for types
+- **Error Handling**: anyhow for application errors, thiserror for library errors
+- **Async**: Tokio runtime for all async operations
 
 ### Architecture Patterns
-- **Microservices**: Independent services for storage, replay orchestration, and API management
-- **Agent-based Recording**: Lightweight instrumentation with minimal application overhead
-- **Event-driven**: Asynchronous communication via HTTP APIs
-- **Data Lake Architecture**: Separation of metadata (fast queries) and payloads (batch storage)
-- **Comparison Engine**: Configurable JSON diffing with exclusion/inclusion rules
+- **OTLP Standard Compliance**: Full OpenTelemetry Protocol specification support
+- **Session-aware Buffering**: Intelligent batching based on session boundaries for traces/logs
+- **Data Lake Architecture**: Iceberg tables with built-in metadata (manifests, partition stats)
+- **Multi-app Row Groups**: Efficient Parquet organization for cross-application queries
+- **RESTful Query API**: Standard HTTP endpoints for data retrieval
 
 ### Testing Strategy
-- **Unit Tests**: JUnit 5 for Java services, cargo test for Rust, pytest for Python
-- **Integration Tests**: Node.js-based API testing in dedicated integration-tests module
-- **Record-and-Replay**: Self-testing using the platform's own capabilities
-- **Build Flag**: Use `-DskipTests` for faster builds during development
+- **Unit Tests**: Cargo test for component-level testing
+- **Integration Tests**: Docker-based testing with MinIO/Iceberg/Trino
+- **Test Targets**: `make test-quick` (unit), `make test-local` (integration)
+- **CI/CD**: Automated testing on pull requests
 
 ### Git Workflow
 - **Main Branch**: `main` for production releases
-- **Feature Branches**: Descriptive names (e.g., `bill/pingan`)
-- **Multi-module Build**: Maven reactor build across all components
-- **Docker Support**: Containerized services with build.sh automation
+- **Feature Branches**: Descriptive names with context
+- **Cargo Workspace**: Single-crate project with optional features
+- **Docker Support**: Containerized deployment with docker-compose
 
 ## Domain Context
 
 ### Core Concepts
-- **SpMocker**: Recorded interaction data including request, response, and all dependency mocks
-- **MainEntry**: Primary recorded interaction serving as test case entry point
-- **MockItem**: Individual mock data for database calls, external APIs, or other dependencies
-- **Record ID**: Unique identifier for original recorded interactions
-- **Replay ID**: Unique identifier for replay test executions
-- **Comparison Rules**: Configurable logic for validating response differences
-- **Session Metadata**: User interaction tracking with visitor analytics
+- **OTLP Trace**: OpenTelemetry trace data with spans, events, and attributes
+- **OTLP Log**: OpenTelemetry log records with severity, body, and attributes
+- **OTLP Metric**: OpenTelemetry metric data points (gauge, sum, histogram) - aggregations
+- **Session**: Logical grouping of related traces/logs (NOT metrics - metrics are aggregations)
+- **Session ID**: Unique identifier for correlating traces and logs within a session
+- **Raw Storage**: Iceberg tables storing complete OTLP payloads in Parquet
+- **Iceberg Metadata**: Built-in manifests, partition stats, and row group statistics for query optimization
 
-### Recording Process
-1. **Java Agent** instruments target application at runtime
-2. **Traffic Capture** intercepts HTTP requests, database calls, external API interactions
-3. **Mock Generation** creates deterministic mock data for all dependencies
-4. **Data Upload** sends SpMocker objects to storage service via batch APIs
-5. **Indexing** organizes recorded data by application, operation, and time
+### Ingestion Flow
+1. **OTLP Endpoint** receives traces/logs/metrics via POST `/v1/traces`, `/v1/logs`, `/v1/metrics`
+2. **Session Buffering** groups traces and logs by session_id; metrics buffered separately
+3. **Batch Writing** flushes sessions to Iceberg: coordinated writes for traces/logs, separate for metrics
+4. **Iceberg Commit** creates snapshots with manifest files containing partition/row-group statistics
+5. **Compaction** background process optimizes Parquet files for query performance
 
-### Replay Process
-1. **Test Planning** configures replay parameters, target environment, and comparison rules
-2. **Data Retrieval** fetches recorded interactions and loads mock data into cache
-3. **Request Execution** sends original requests to target application under test
-4. **Response Capture** collects actual responses from target application
-5. **Comparison** validates actual vs expected using configurable diff engine
-6. **Reporting** provides detailed analysis of test results and failures
+### Query Flow
+1. **Direct Iceberg Query** with predicates (session_id, time range, attributes)
+2. **Manifest Pruning** Iceberg eliminates irrelevant files using partition and row-group statistics
+3. **Payload Access** reads Parquet row groups with efficient predicate pushdown
+4. **Result Assembly** returns traces/logs/metrics in OTLP format or JSON
 
 ## Important Constraints
 
 ### Technical Constraints
-- **Agent Performance**: Must maintain <5% application overhead during recording
-- **Data Scale**: Handle billions of recorded interactions efficiently
-- **Real-time Requirements**: Sub-second response times for replay operations
-- **Backward Compatibility**: Support Java 8+ applications for agent deployment
-- **Memory Efficiency**: Optimal handling of large request/response payloads
+- **OTLP Compliance**: Must implement OpenTelemetry Protocol v1.0+ specification
+- **Data Scale**: Handle high-throughput telemetry ingestion (10k+ spans/sec per instance)
+- **Storage Efficiency**: Target >85% storage cost reduction vs. traditional TSDB
+- **Memory Efficiency**: Efficient buffering and batching without excessive memory usage
 
-### Business Constraints
-- **Multi-tenancy**: Isolated data and configurations per organization
-- **Data Retention**: Configurable TTL policies for recorded data lifecycle
-- **Cost Optimization**: Efficient storage tiering (hot metadata, cold payloads)
-- **Accuracy Requirements**: High-fidelity replay with deterministic results
+### Operational Constraints
+- **Horizontal Scalability**: Support multiple collector instances with consistent hashing
+- **Data Retention**: Configurable TTL policies for Iceberg table lifecycle
+- **Cost Optimization**: Efficient Parquet compression and partition strategies
 
 ## External Dependencies
 
-### Cloud Infrastructure
-- **AWS S3**: Alternative/backup storage provider, or MinIO for on-premis
+### Storage Infrastructure
+- **Object Storage**: S3-compatible API (AWS S3, MinIO, Cloudflare R2)
+- **Iceberg Catalog**: REST catalog or Hive Metastore for table management
 
 ### Development Dependencies
-- **Maven Central**: Java dependency resolution
-- **Docker Hub**: Container image hosting
+- **Cargo**: Rust dependency resolution and build tool
+- **Docker**: Container runtime for local testing and deployment
 - **GitHub**: Source code repository and CI/CD integration

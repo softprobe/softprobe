@@ -1,116 +1,93 @@
 ## ADDED Requirements
 
-### Requirement: Direct Metadata & Payload Access
-Java applications SHALL query ClickHouse for metadata filtering and use Iceberg scan API with predicates for full data retrieval (read-only) using a shared client module.
+### Requirement: Query API Endpoints
+The system SHALL expose HTTP query endpoints for retrieving telemetry data by session, time range, and attributes.
 
-#### Scenario: Query by record_id (trace_id)
-- **WHEN** a client queries by `trace_id` and `app_id`
-- **THEN** the Java client verifies existence in `recording_events`, then uses Iceberg scan API with predicates (trace_id, app_id) to retrieve full span data
+#### Scenario: Query session by ID
+- **WHEN** a client sends GET `/v1/query/session/{session_id}`
+- **THEN** the system returns all traces, logs, and metrics for that session from Iceberg
 
-#### Scenario: Session retrieval
+#### Scenario: Query by time range and filters
+- **WHEN** a client sends POST `/query` with time range and attribute filters
+- **THEN** the system performs direct Iceberg scan with predicates to retrieve matching telemetry
+
+### Requirement: Session-Based Retrieval
+The system SHALL support retrieving complete sessions including all signal types (traces, logs, metrics) in a single query.
+
+#### Scenario: Retrieve complete session
 - **WHEN** a client queries by `session_id`
-- **THEN** the Java client loads session summary from ClickHouse `session_metadata`, then uses Iceberg scan API with predicates (session_id, timestamp range) to retrieve all spans
+- **THEN** the system returns traces from `otlp_traces`, logs from `otlp_logs`, and metrics from `otlp_metrics` for that session
 
-### Requirement: Performance Targets
-The system SHALL meet P95 <100ms for metadata lookups and <1s for full span retrieval via Iceberg under nominal load.
+#### Scenario: Session existence check
+- **WHEN** a client queries by `session_id`
+- **THEN** the system uses Iceberg predicate scan to verify session exists before full retrieval
 
-#### Scenario: Metadata lookup within targets
-- **WHEN** querying `recording_events` by `trace_id`
-- **THEN** P95 latency is <100ms for ClickHouse metadata query
+### Requirement: Query Optimization via Iceberg Metadata
+The system SHALL leverage Iceberg's built-in metadata for efficient query execution.
 
-#### Scenario: Iceberg scan efficiency
-- **WHEN** querying Iceberg with predicates (session_id or trace_id)
-- **THEN** Iceberg prunes 90%+ of files using manifest statistics and P95 latency for full data retrieval is <1s
+#### Scenario: Partition elimination
+- **WHEN** querying with time range filters
+- **THEN** Iceberg eliminates entire date partitions outside the range
 
-### Requirement: Caching Strategy
-The Java query client SHALL cache metadata query results and optionally cache hot span data.
+#### Scenario: Manifest-level pruning
+- **WHEN** querying Iceberg with session_id or attribute predicates
+- **THEN** Iceberg uses manifest files to eliminate data files that don't match predicates
 
-#### Scenario: Metadata cache hit
-- **WHEN** a recently queried trace_id or session is requested again
-- **THEN** metadata is served from ClickHouse query cache (5 min TTL) without re-querying
+#### Scenario: Row group statistics
+- **WHEN** scanning Parquet files
+- **THEN** row group min/max statistics filter out irrelevant row groups before reading data
 
-#### Scenario: Span data cache (optional)
-- **WHEN** hot span data is cached client-side
-- **THEN** full data can be served without Iceberg scan for recently accessed spans (<1 hour)
+### Requirement: Attribute-Based Filtering
+The system SHALL support filtering by resource attributes and span/log/metric attributes using Iceberg predicate pushdown.
 
-### Requirement: Query Guarantees (Essential)
-The system SHALL provide deterministic ordering, stable cursor-based pagination, and a consistent session read.
+#### Scenario: Filter by application ID
+- **WHEN** a client filters by `resource.attributes["service.name"]`
+- **THEN** the system uses Iceberg predicates to scan only matching data
 
-#### Scenario: Deterministic ordering
-- **WHEN** results are returned for any list query
-- **THEN** they are ordered by `timestamp ASC, trace_id ASC, span_id ASC` deterministically
+#### Scenario: Filter by custom attributes
+- **WHEN** a client filters by custom span/log/metric attributes
+- **THEN** the system applies predicates at Iceberg scan level with Parquet column filtering
 
-#### Scenario: Stable cursor pagination
-- **WHEN** a client paginates through results with a cursor
-- **THEN** no item is skipped or duplicated across pages and the cursor encodes the last `(timestamp, trace_id, span_id)`
+### Requirement: Time-Range Queries
+The system SHALL support efficient time-range queries using partition elimination and metadata indexes.
 
-#### Scenario: Consistent session read
-- **WHEN** reading by `session_id`
-- **THEN** the system returns a consistent snapshot of the session row group without partial/interleaved reads
+#### Scenario: Query by time range
+- **WHEN** a client queries telemetry between start_time and end_time
+- **THEN** the system uses Iceberg day partitions to eliminate irrelevant files
 
-### Requirement: Query by session_id
-The solution SHALL support reading all spans for a given `session_id` via Iceberg scan API with session_id predicate.
+#### Scenario: Recent data access
+- **WHEN** a client queries recent data (last 24 hours)
+- **THEN** the query accesses minimal partitions (1-2 days) via partition pruning
 
-#### Scenario: Fetch by session_id
-- **WHEN** a client queries by `session_id` (and optional `app_id`)
-- **THEN** the Java client returns all spans using Iceberg scan with predicates; Iceberg finds files efficiently via manifest statistics
+### Requirement: Pagination Support
+The system SHALL support cursor-based pagination for large result sets.
 
-### Requirement: Core filters (appId, time range, operationName, recordEnvironment, categoryType)
-The system SHALL support core filters via ClickHouse metadata with Iceberg scan API for full data retrieval.
+#### Scenario: Paginated results
+- **WHEN** a client requests paginated results with a page size
+- **THEN** the system returns results with a cursor for fetching the next page
 
-#### Scenario: Filter by appId + time range + operationName
-- **WHEN** a client filters by `appId`, `beginTime/endTime`, and `operationName`
-- **THEN** the system filters in ClickHouse `recording_events`, then uses Iceberg scan with predicates to retrieve matching full spans
+#### Scenario: Stable pagination
+- **WHEN** a client uses a cursor to fetch the next page
+- **THEN** no items are skipped or duplicated across pages
 
-#### Scenario: Filter by environment and categoryType
-- **WHEN** a client includes `recordEnvironment` and `categoryType`
-- **THEN** the system applies these filters in ClickHouse metadata, then retrieves full data via Iceberg scan
+### Requirement: Multi-Signal Type Queries
+The system SHALL support querying specific signal types or all signal types for a session.
 
-### Requirement: Tag filtering (equals)
-The system SHALL support equality filters on tags (e.g., `tags.key = value`) using ClickHouse tag metadata and Iceberg scan.
+#### Scenario: Query traces only
+- **WHEN** a client requests only traces for a session
+- **THEN** the system retrieves data only from `otlp_traces` table
 
-#### Scenario: Filter by tag equality
-- **WHEN** a client filters by `tags.geo = 'us-east'`
-- **THEN** the system finds candidate trace_ids via ClickHouse tag metadata, then uses Iceberg scan with trace_id predicates to retrieve full spans
+#### Scenario: Query all signal types
+- **WHEN** a client requests all telemetry for a session
+- **THEN** the system retrieves and correlates data from all three tables (traces, logs, metrics)
 
-### Requirement: Version filtering
-The system SHALL support filtering by `recordVersion` for compatibility and analysis.
+### Requirement: Payload Retrieval
+The system SHALL provide an endpoint for retrieving raw payloads by specific identifiers.
 
-#### Scenario: Filter by recordVersion
-- **WHEN** a client filters by `recordVersion`
-- **THEN** results are constrained to spans with the specified version via metadata filters
+#### Scenario: Retrieve by trace_id
+- **WHEN** a client requests traces by `trace_id`
+- **THEN** the system scans Iceberg with trace_id predicate and returns matching spans
 
-### Requirement: App/time-range browsing
-The system SHALL support browsing by `appId` and time range with stable ordering and pagination.
-
-#### Scenario: Paginated, time-ordered results
-- **WHEN** a client lists spans for an `appId` between `beginTime` and `endTime`
-- **THEN** results are ordered by timestamp and paginated; the system uses Iceberg scan with app_id and timestamp predicates for efficient retrieval
-
-### Requirement: Aggregated operation counts
-The system SHALL provide operation count analytics using ClickHouse `recording_ops_minute` without reading Iceberg raw spans.
-
-#### Scenario: Count by appId and operationName
-- **WHEN** a client requests counts by `appId`, `operationName`, and time buckets
-- **THEN** the system queries ClickHouse `recording_ops_minute` and returns pre-aggregated counts (no Iceberg access needed)
-
-### Requirement: Error-only filtering
-The system SHALL support filtering spans by error status via ClickHouse metadata and Iceberg scan.
-
-#### Scenario: Filter errors in a time window
-- **WHEN** a client filters for `status_code = 'ERROR'` within a time range
-- **THEN** the system filters in ClickHouse `recording_events`, then uses Iceberg scan with predicates to retrieve full error span data
-
-### Requirement: Full scan with pruning
-The system SHALL support full scans for analytical workloads with partition and row-group pruning.
-
-#### Scenario: Analytical scan
-- **WHEN** a client runs a full-scan query with predicates
-- **THEN** the system prunes by `record_date` and uses row-group min/max statistics to limit I/O
-
-### Requirement: Multi-tenancy filters
-The system SHALL support optional filters by `organization_id` and `tenant_id` where present in metadata.
-
-#### Scenario: Filter by tenant
-- **WHEN** a client includes `tenant_id`
-- **THEN** the system restricts results accordingly using metadata filters
+#### Scenario: Retrieve by session_id list
+- **WHEN** a client provides multiple session_ids
+- **THEN** the system batches Iceberg queries and returns telemetry for all sessions

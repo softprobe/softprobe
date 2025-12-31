@@ -3,27 +3,11 @@ networks:
     driver: bridge
 
 services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    container_name: clickhouse
-    ports:
-      - "8123:8123"   # HTTP
-      - "9000:9000"   # Native
-    environment:
-      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-    networks:
-      - backend_net
-
   minio:
     image: minio/minio:latest
     container_name: minio
     ports:
-      - "9002:9000"   # API (moved to avoid conflict with ClickHouse)
+      - "9002:9000"   # API
       - "9001:9001"   # Console
     environment:
       - MINIO_ROOT_USER=minioadmin
@@ -67,37 +51,9 @@ services:
       retries: 10
 
 
-  etl-worker:
-    build: ./etl-worker
-    container_name: etl-worker
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      iceberg-rest:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    environment:
-      - CLICKHOUSE_HOST=clickhouse
-      - ICEBERG_CATALOG_URI=http://iceberg-rest:8181
-      - ICEBERG_WAREHOUSE=s3://warehouse/
-      - S3_ENDPOINT=http://minio:9000
-      - S3_ACCESS_KEY=minioadmin
-      - S3_SECRET_KEY=minioadmin
-      - AWS_REGION=us-east-1
-    volumes:
-      - ./warehouse:/warehouse
-      - ./etl-worker/config.yaml:/app/config.yaml
-      - ./scripts:/app/scripts:ro
-    networks:
-      - backend_net
-    ports:
-      - "8080:8080"  # Prometheus metrics (etl-worker)
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # etl-worker: REMOVED - No longer using ClickHouse ETL
+  # Direct Iceberg queries via otlp-backend are sufficient
+  # See docs/design.md for architecture details
 
   otlp-backend:
     build: ./softprobe-otlp-backend

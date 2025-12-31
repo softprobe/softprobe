@@ -1,17 +1,20 @@
 ## Why
-MongoDB-based storage for recording/replay data does not scale efficiently for high-volume workloads. It results in high costs, degraded query performance, and limited analytics. We need a scalable, OpenTelemetry-compatible pipeline that stores raw data in Apache Iceberg while serving fast queries from metadata indexes.
+Build a standalone OpenTelemetry-compatible collector with Apache Iceberg storage backend. This provides a scalable, cost-effective alternative to traditional time-series databases while maintaining full OTLP protocol compliance for traces, logs, and metrics.
 
 ## What Changes
-- Introduce OTLP ingestion via a Rust service exposing `/v1/traces` and session-aware buffering
-- Write raw spans to an Iceberg `raw_sessions` table (Parquet, multi-app row groups)
-- Add real-time ETL to populate ClickHouse metadata tables and an Iceberg `session_metadata` table
-- Enable Java applications to query ClickHouse metadata and Iceberg payloads directly (shared client library) instead of a centralized Rust query router
-- Maintain compatibility for existing MongoDB query parameters (greenfield deployment; no dual-write)
+- Implement complete OTLP v1 ingestion API: `/v1/traces`, `/v1/logs`, `/v1/metrics`
+- Add session-aware buffering: unified for traces/logs, separate for metrics (aggregations)
+- Write telemetry data to Iceberg tables (separate tables for traces, logs, metrics)
+- Provide query APIs using direct Iceberg scans with predicate pushdown
+- Support multi-app row groups in Parquet for efficient cross-application queries
+- Leverage Iceberg's built-in metadata (manifests, partition stats) for query optimization
 
 ## Impact
-- Affected specs: `ingestion`, `storage`, `metadata`, `query`, `compatibility`
-- Affected code: Rust OTLP ingestion (`softprobe-otlp-backend`), Java services (`sp-storage`, direct query module), ETL jobs (Flink/Spark), ClickHouse schemas, Iceberg tables
+- New specs: `ingestion` (OTLP traces/logs/metrics), `storage` (Iceberg tables), `metadata` (Iceberg built-in metadata), `query` (retrieval APIs)
+- Affected code: Rust OTLP collector ([src/api/](../../../src/api/)), storage layer ([src/storage/](../../../src/storage/)), query engine ([src/query/](../../../src/query/)), Iceberg table definitions
 
 ## Notes
-- Greenfield deployment: no dual-write or phased traffic migration in scope
-- Targets: <100ms P95 metadata queries, <500ms P95 session queries, >85% storage cost reduction
+- Full OTLP protocol compliance for interoperability with standard OTel SDKs
+- Target: 10k+ spans/sec throughput per collector instance
+- Support multiple object storage backends: S3, MinIO, Cloudflare R2
+- Metrics storage in Iceberg is experimental (time-series aggregations may require different storage)
