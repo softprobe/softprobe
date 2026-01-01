@@ -80,8 +80,19 @@ impl TraceTable {
                 NestedField::optional(14, "status_code", Type::Primitive(PrimitiveType::String)).into(),
                 NestedField::optional(15, "status_message", Type::Primitive(PrimitiveType::String)).into(),
 
-                // Partition Key
-                NestedField::required(16, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
+                // HTTP Bodies (extracted from span events)
+                // These columns are populated by parsing the 'events' array for 'http.request' and 'http.response' events
+                // Field IDs 25-32 chosen to avoid conflicts with nested field IDs (17-24)
+                NestedField::optional(25, "http_request_method", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(26, "http_request_path", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(27, "http_request_headers", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(28, "http_request_body", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(29, "http_response_status_code", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(30, "http_response_headers", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(31, "http_response_body", Type::Primitive(PrimitiveType::String)).into(),
+
+                // Partition Key (comes last in declaration order to match Arrow schema)
+                NestedField::required(32, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
             ])
             .build()
             .unwrap()
@@ -89,7 +100,7 @@ impl TraceTable {
 
     pub fn partition_spec(schema: &IcebergSchema) -> anyhow::Result<PartitionSpec> {
         let partition_field = UnboundPartitionField {
-            source_id: 16, // record_date field ID
+            source_id: 32, // record_date field ID
             field_id: Some(1000),
             transform: iceberg::spec::Transform::Identity,
             name: "record_date".to_string(),

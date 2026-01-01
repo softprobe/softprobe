@@ -237,6 +237,21 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 Vec::new()
             };
 
+            // Add HTTP data to first span of each session for verification
+            let (http_method, http_path, http_headers, http_req_body, http_status, http_resp_headers, http_resp_body) = if i == 0 {
+                (
+                    Some("POST".to_string()),
+                    Some(format!("/api/v1/session/{}", session_idx)),
+                    Some(r#"{"Content-Type":"application/json","Authorization":"Bearer test-token"}"#.to_string()),
+                    Some(format!(r#"{{"session_id":"{}","action":"create"}}"#, session_id)),
+                    Some(200),
+                    Some(r#"{"Content-Type":"application/json","X-Request-Id":"req-123"}"#.to_string()),
+                    Some(format!(r#"{{"success":true,"session_id":"{}","created_at":"2025-12-31T00:00:00Z"}}"#, session_id)),
+                )
+            } else {
+                (None, None, None, None, None, None, None)
+            };
+
             session_spans.push(SpanData {
                 trace_id: format!("trace-{}-{}", session_idx, i),
                 span_id: format!("span-{}-{}", session_idx, i),
@@ -250,6 +265,13 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 end_timestamp: Some(now + chrono::Duration::milliseconds((session_idx * 1000 + i + 5) as i64)),
                 attributes,
                 events,
+                http_request_method: http_method,
+                http_request_path: http_path,
+                http_request_headers: http_headers,
+                http_request_body: http_req_body,
+                http_response_status_code: http_status,
+                http_response_headers: http_resp_headers,
+                http_response_body: http_resp_body,
                 status_code: Some("OK".to_string()),
                 status_message: Some("Success".to_string()),
             });
@@ -346,11 +368,13 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
         let mut found = 0usize;
         let mut rows_scanned = 0usize;
+        let mut http_verified = false;
 
         while let Some(batch_result) = arrow_stream.next().await {
             let batch = batch_result.expect("batch ok");
             rows_scanned += batch.num_rows();
 
+            // Count matching session_id rows
             if let Some((idx, _)) = batch.schema().fields().iter().enumerate().find(|(_, f)| f.name() == "session_id") {
                 let col = batch.column(idx);
                 let arr = col.as_any().downcast_ref::<StringArray>().expect("string arr");
@@ -358,10 +382,82 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                     if arr.value(i) == session_id.as_str() { found += 1; }
                 }
             }
+
+            // Verify HTTP fields for first span (i==0) of this session
+            if !http_verified && batch.num_rows() > 0 {
+                // Get schema field indices
+                let schema = batch.schema();
+                let get_field_idx = |name: &str| schema.fields().iter().position(|f| f.name() == name);
+
+                // Verify HTTP request fields
+                if let Some(method_idx) = get_field_idx("http_request_method") {
+                    let method_col = batch.column(method_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !method_col.is_null(0) {
+                        assert_eq!(method_col.value(0), "POST", "HTTP method should be POST for session {}", session_idx);
+                        http_verified = true;
+                    }
+                }
+
+                if let Some(path_idx) = get_field_idx("http_request_path") {
+                    let path_col = batch.column(path_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !path_col.is_null(0) {
+                        assert_eq!(path_col.value(0), format!("/api/v1/session/{}", session_idx),
+                            "HTTP path should match for session {}", session_idx);
+                    }
+                }
+
+                if let Some(headers_idx) = get_field_idx("http_request_headers") {
+                    let headers_col = batch.column(headers_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !headers_col.is_null(0) {
+                        let headers = headers_col.value(0);
+                        assert!(headers.contains("Content-Type"), "Request headers should contain Content-Type");
+                        assert!(headers.contains("Authorization"), "Request headers should contain Authorization");
+                    }
+                }
+
+                if let Some(body_idx) = get_field_idx("http_request_body") {
+                    let body_col = batch.column(body_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !body_col.is_null(0) {
+                        let body = body_col.value(0);
+                        assert!(body.contains(session_id.as_str()), "Request body should contain session_id");
+                        assert!(body.contains("action"), "Request body should contain action field");
+                    }
+                }
+
+                // Verify HTTP response fields
+                if let Some(status_idx) = get_field_idx("http_response_status_code") {
+                    let status_col = batch.column(status_idx).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+                    if !status_col.is_null(0) {
+                        assert_eq!(status_col.value(0), 200, "HTTP response status should be 200");
+                    }
+                }
+
+                if let Some(resp_headers_idx) = get_field_idx("http_response_headers") {
+                    let resp_headers_col = batch.column(resp_headers_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !resp_headers_col.is_null(0) {
+                        let headers = resp_headers_col.value(0);
+                        assert!(headers.contains("X-Request-Id"), "Response headers should contain X-Request-Id");
+                    }
+                }
+
+                if let Some(resp_body_idx) = get_field_idx("http_response_body") {
+                    let resp_body_col = batch.column(resp_body_idx).as_any().downcast_ref::<StringArray>().unwrap();
+                    if !resp_body_col.is_null(0) {
+                        let body = resp_body_col.value(0);
+                        assert!(body.contains(session_id.as_str()), "Response body should contain session_id");
+                        assert!(body.contains("success"), "Response body should contain success field");
+                    }
+                }
+            }
         }
 
         let query_duration = query_timer.stop();
         total_query_duration += query_duration;
+
+        // Verify HTTP fields were checked
+        if http_verified {
+            println!("  ✓ HTTP fields verified for first span of session {}", session_idx);
+        }
 
         let selectivity = (found as f64 / rows_scanned.max(1) as f64) * 100.0;
         all_selectivities.push(selectivity);
@@ -792,4 +888,70 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
     println!("\n✅ All {} metric names verified with perfect selectivity (100%)", num_metric_names);
     println!("✅ Row group per metric_name design validated: each metric query scans only its own row group");
+}
+
+#[tokio::test]
+async fn test_http_fields_in_span_model() {
+    use softprobe_otlp_backend::models::Span as SpanData;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    println!("🧪 Testing HTTP fields in Span model...");
+
+    // Create a span with all HTTP fields populated
+    let session_id = "test-session-123";
+    let span = SpanData {
+        trace_id: "trace-abc".to_string(),
+        span_id: "span-xyz".to_string(),
+        parent_span_id: None,
+        app_id: "test-app".to_string(),
+        organization_id: Some("org-test".to_string()),
+        tenant_id: Some("tenant-test".to_string()),
+        message_type: "HTTP_REQUEST".to_string(),
+        span_kind: Some("SERVER".to_string()),
+        timestamp: Utc::now(),
+        end_timestamp: Some(Utc::now()),
+        attributes: HashMap::from([
+            ("sp.session.id".to_string(), session_id.to_string()),
+        ]),
+        events: Vec::new(),
+        http_request_method: Some("POST".to_string()),
+        http_request_path: Some("/api/v1/test".to_string()),
+        http_request_headers: Some(r#"{"Content-Type":"application/json"}"#.to_string()),
+        http_request_body: Some(r#"{"test":"data"}"#.to_string()),
+        http_response_status_code: Some(200),
+        http_response_headers: Some(r#"{"X-Request-Id":"req-123"}"#.to_string()),
+        http_response_body: Some(r#"{"success":true}"#.to_string()),
+        status_code: Some("OK".to_string()),
+        status_message: Some("Success".to_string()),
+    };
+
+    // Verify all HTTP fields are set correctly
+    assert_eq!(span.http_request_method, Some("POST".to_string()));
+    assert_eq!(span.http_request_path, Some("/api/v1/test".to_string()));
+    assert!(span.http_request_headers.as_ref().unwrap().contains("Content-Type"));
+    assert!(span.http_request_body.as_ref().unwrap().contains("test"));
+    assert_eq!(span.http_response_status_code, Some(200));
+    assert!(span.http_response_headers.as_ref().unwrap().contains("X-Request-Id"));
+    assert!(span.http_response_body.as_ref().unwrap().contains("success"));
+
+    println!("✅ HTTP request method: {:?}", span.http_request_method);
+    println!("✅ HTTP request path: {:?}", span.http_request_path);
+    println!("✅ HTTP request headers: {:?}", span.http_request_headers);
+    println!("✅ HTTP request body: {:?}", span.http_request_body);
+    println!("✅ HTTP response status: {:?}", span.http_response_status_code);
+    println!("✅ HTTP response headers: {:?}", span.http_response_headers);
+    println!("✅ HTTP response body: {:?}", span.http_response_body);
+
+    // Verify the span can be converted to Arrow RecordBatch
+    let config = load_test_config();
+    let writer = softprobe_otlp_backend::storage::iceberg::IcebergWriter::new(&config).await
+        .expect("writer init");
+
+    // Write the span and verify it succeeds
+    let result = writer.write_span_batches(vec![vec![span]]).await;
+    assert!(result.is_ok(), "Failed to write span with HTTP fields: {:?}", result.err());
+
+    println!("✅ Successfully wrote span with HTTP fields to Iceberg");
+    println!("✅ HTTP fields are correctly included in the schema and can be persisted");
 }

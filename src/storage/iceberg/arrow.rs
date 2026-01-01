@@ -8,7 +8,7 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use tracing::{debug, trace, info};
+use tracing::{debug, trace};
 use chrono::NaiveDate;
 use iceberg::spec::Schema as IcebergSchema;
 
@@ -103,6 +103,49 @@ pub fn spans_to_record_batch(spans: &[Span], iceberg_schema: &IcebergSchema) -> 
     // Build events LIST<STRUCT> for each span
     let events_array = build_events_array(spans, &events_field)?;
 
+    // HTTP body fields (extracted from span events by extract_http_data_from_events())
+    let http_request_methods: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_request_method.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
+    let http_request_paths: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_request_path.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
+    let http_request_headers: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_request_headers.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
+    let http_request_bodies: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_request_body.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
+    let http_response_status_codes: ArrayRef = Arc::new(Int32Array::from(
+        spans.iter()
+            .map(|s| s.http_response_status_code)
+            .collect::<Vec<_>>()
+    ));
+
+    let http_response_headers: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_response_headers.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
+    let http_response_bodies: ArrayRef = Arc::new(StringArray::from(
+        spans.iter()
+            .map(|s| s.http_response_body.as_deref())
+            .collect::<Vec<_>>()
+    ));
+
     let status_codes: ArrayRef = Arc::new(StringArray::from(
         spans.iter()
             .map(|s| s.status_code.as_deref())
@@ -156,6 +199,13 @@ pub fn spans_to_record_batch(spans: &[Span], iceberg_schema: &IcebergSchema) -> 
             events_array,
             status_codes,
             status_messages,
+            http_request_methods,
+            http_request_paths,
+            http_request_headers,
+            http_request_bodies,
+            http_response_status_codes,
+            http_response_headers,
+            http_response_bodies,
             record_dates,
         ],
     )?;

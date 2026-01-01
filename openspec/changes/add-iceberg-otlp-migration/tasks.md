@@ -74,31 +74,31 @@ span.setAttribute('http.response.status_code', 201);
 
 **Implementation Tasks**:
 
-- [ ] 5.1 Update `traces` table schema to extract HTTP data:
+- [x] 5.1 Update `traces` table schema to extract HTTP data:
   - Extract `http.request` event → `http_request_body`, `http_request_headers` columns
   - Extract `http.response` event → `http_response_body`, `http_response_headers` columns
   - Extract standard span attributes → `http_request_method`, `http_request_path`, `http_response_status_code`
   - Keep business attributes (`sp.*`) in `attributes` MAP for search
 
-- [ ] 5.2 Implement ingestion pipeline changes:
+- [x] 5.2 Implement ingestion pipeline changes:
   - Parse span events array, find `http.request` and `http.response` events
   - Extract event attributes → HTTP body columns
   - Validate bodies stored as STRING (Parquet ZSTD compression)
   - Ensure `attributes` MAP captures all `sp.*` attributes
 
-- [ ] 5.3 Update Arrow conversion to handle event extraction:
+- [x] 5.3 Update Arrow conversion to handle event extraction:
   - Event parsing logic: `events.find(e => e.name === 'http.request')`
   - Proper field IDs for HTTP body columns in Iceberg schema
   - Test Parquet ZSTD compression on realistic JSON bodies
 
-- [ ] 5.4 Create unified instrumentation documentation:
+- [x] 5.4 Create unified instrumentation documentation:
   - **JavaScript/TypeScript example**: Show both `span.addEvent()` and `span.setAttribute()`
   - **Python example**: OpenTelemetry Python SDK with events + attributes
-  - **Java example** (optional): Java SDK instrumentation pattern
+  - **Java example**: Java SDK instrumentation pattern
   - **Convention guide**: Explain separation (events for bodies, attributes for search)
   - Document `sp.*` naming convention: `sp.user.id`, `sp.order.id`, `sp.email`, `sp.pnr`
 
-- [ ] 5.5 Validate existing ingestion code:
+- [x] 5.5 Validate existing ingestion code:
   - Confirm `attributes` MAP properly stores user-provided `sp.*` attributes
   - Confirm `events` ARRAY is correctly parsed and stored
   - No code changes needed if already working

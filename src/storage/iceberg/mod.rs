@@ -66,7 +66,7 @@ impl IcebergWriter {
     /// Write span batches to traces table
     /// Each batch becomes a separate row group for session isolation
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
-        self.spans_writer.write_batches(batches, arrow::spans_to_record_batch).await
+        self.spans_writer.write_batches(batches, Span::to_record_batch).await
     }
 
     /// Write log batches to logs table
