@@ -5,41 +5,64 @@
 **Status**: Active
 **Project Type**: Standalone OTLP Collector
 
+> **See Also**: [Softprobe Business Vision & Strategic Goals](goals.md) - Understand the broader business context and long-term vision for this project.
+
 ---
 
 ## 1. Executive Summary
 
 ### Overview
 
-This is a standalone OpenTelemetry-compatible collector that stores traces, logs, and metrics in Apache Iceberg tables. The system provides:
+This is a standalone OpenTelemetry-compatible collector that **extends OTLP to capture and store full HTTP request/response bodies** in an efficient, open-source data lake. Unlike traditional observability backends, this system treats telemetry data as a comprehensive data warehouse that serves two critical purposes:
 
-- **OTLP Protocol Compliance**: Standard `/v1/traces`, `/v1/logs`, `/v1/metrics` endpoints
-- **Iceberg Storage**: Scalable data lake with built-in metadata for efficient queries
+1. **Business Case Troubleshooting**: AI agents and engineers can access complete session context (full HTTP payloads) to debug complex business logic failures
+2. **ETL Pipeline Source**: Full payloads serve as the source of truth for data analytics, business intelligence, and ad-hoc data exploration
+
+The system provides:
+
+- **Extended OTLP Protocol**: Captures full HTTP request/response bodies alongside standard telemetry
+- **Separated Storage Architecture**: Metadata (spans, attributes) and bodies stored separately for efficient access patterns
+- **Business Attribute Indexing**: Search sessions by business identifiers (user ID, order ID, confirmation code) without scanning payloads
+- **Iceberg Data Lake**: Open-source, vendor-neutral storage enabling SQL queries and analytics
 - **Session Management**: Session-aware buffering for traces and logs (NOT metrics)
-- **Direct Queries**: No external metadata index - leverages Iceberg's built-in capabilities
+
+### Primary Goal
+
+**THE SINGLE MOST IMPORTANT GOAL**: Store complete HTTP request/response bodies in an efficient, open-source data lake that can be:
+- Queried for troubleshooting via business metadata (user ID, order ID, etc.) WITHOUT reading bodies
+- Accessed by AI agents to analyze full session context when troubleshooting hard business cases
+- Used as the source for ETL pipelines and ad-hoc data analytics
+
+Bodies are stored separately from metadata to avoid expensive read/write operations during routine queries.
 
 ### Key Design Principles
 
-1. **Simplicity over Complexity**: Direct Iceberg queries, no ETL pipeline
-2. **OTLP Standard Compliance**: Interoperable with standard OpenTelemetry SDKs
-3. **Session-Based Organization**: Traces and logs grouped by session for investigation
-4. **Metrics are Different**: Metrics are aggregations, NOT session-correlated
+1. **Complete Data Capture**: Store full HTTP payloads, not just metadata
+2. **Separated Storage**: Metadata and bodies stored separately for efficient access
+3. **Business-Centric Search**: Index by business attributes (order ID, user ID) for fast session lookup
+4. **Open Source & Vendor Neutral**: Iceberg-based data lake, no proprietary storage
+5. **OTLP Extension**: Build on OpenTelemetry standards, add body capture
+6. **Dual Purpose**: Troubleshooting tool AND analytics data warehouse
 
 ### Goals and Non-Goals
 
 **Goals**:
-- Complete OTLP v1 API implementation (traces, logs, metrics)
-- Apache Iceberg storage with efficient Parquet organization
-- Direct Iceberg queries leveraging built-in metadata
+- **PRIMARY**: Capture and store full HTTP request/response bodies in efficient, separated storage
+- **PRIMARY**: Enable search by business attributes (user ID, order ID, PNR, etc.) without reading bodies
+- **PRIMARY**: Provide complete session context for AI-powered troubleshooting
+- **PRIMARY**: Serve as ETL source for business analytics and ad-hoc data exploration
+- Complete OTLP v1 API implementation with body capture extensions
+- Apache Iceberg storage with metadata/body separation
+- Business attribute extraction and indexing from HTTP payloads
 - Session management for traces and logs (coordinated buffering and storage)
 - Horizontal scalability with consistent hashing
 
 **Non-Goals**:
 - OTLP exporter functionality (collector is ingestion-only)
-- Data transformation or sampling (stores raw telemetry as received)
-- Java integration (standalone Rust service)
-- External metadata indexing layer (using Iceberg's built-in capabilities)
 - Real-time streaming queries (batch-oriented query model)
+- Java integration (standalone Rust service)
+- Sampling or data reduction (stores EVERYTHING)
+- External metadata indexing layer (using Iceberg's built-in capabilities)
 
 ---
 
@@ -129,36 +152,150 @@ This is a standalone OpenTelemetry-compatible collector that stores traces, logs
 
 ---
 
-## 4. Iceberg Storage Schema
+## 4. Storage Platform Decision
 
-### 4.1 Table: traces
+### 4.0 Table Format: Iceberg vs Delta Lake vs Hudi
+
+**Decision**: ✅ **Apache Iceberg**
+
+**Rationale** (See [Storage Design Analysis](storage_design.md#is-iceberg-the-right-foundation)):
+
+| Criterion | Iceberg | Delta Lake | Winner |
+|-----------|---------|------------|--------|
+| Vendor Neutrality | ✅ Apache Foundation | ⚠️ Databricks-centric | **Iceberg** |
+| Multi-Engine Support | ✅ Spark, Trino, Dremio, Flink, DuckDB | ⚠️ Databricks-first | **Iceberg** |
+| Rust Ecosystem | ✅ iceberg-rust 0.7+ | ❌ No official support | **Iceberg** |
+| Query Performance (OLAP) | ⚠️ 1.7x slower (TPC-DS) | ✅ Fastest | **Delta** |
+| Session Lookups | ✅ Partition pruning + row groups | ✅ Good | **Tie** |
+| Open Specification | ✅ Fully open | ⚠️ Databricks influence | **Iceberg** |
+
+**Performance Consideration**: Iceberg is 1.7x slower than Delta Lake in TPC-DS OLAP benchmarks, but this doesn't reflect our workload:
+- Our queries: Session lookups (`WHERE session_id = 'xxx'`) + batch ETL
+- Iceberg's optimizations (partition pruning, row group stats, bloom filters) excel at session-based queries
+- Network I/O from object storage dominates ETL queries, not Parquet decode time
+
+**Trade-off Accepted**: Vendor neutrality and multi-engine support outweigh 1.7x OLAP performance tax.
+
+**When We'd Reconsider**:
+- Session lookup latency >1s AND all optimization attempts fail
+- Customer demand for Databricks-native integration
+- iceberg-rust library becomes unmaintained
+
+### 4.0.1 Object Storage: Cloud-Neutral S3-Compatible
+
+**Decision**: ✅ **S3-Compatible Storage (Customer Choice)**
+
+**Supported Backends**:
+- **AWS S3** - Industry standard, existing infrastructure
+- **Cloudflare R2** - Zero egress, cost-optimized
+- **Google Cloud Storage** - GCP customers
+- **MinIO** - Self-hosted, compliance/on-prem
+- **Any S3-compatible provider** - Wasabi, etc.
+
+**Cost Analysis** (Example: 100TB data + 50TB monthly egress):
+
+| Provider | Storage/GB | Egress/GB | Monthly Cost |
+|----------|------------|-----------|--------------|
+| AWS S3 | $0.023 | $0.09 | **$6,800** |
+| Cloudflare R2 | $0.015 | **$0** | **$1,500** |
+| Google Cloud Storage | $0.020 | $0.12 | **$8,300** |
+| MinIO (self-hosted) | Variable | $0 | Infrastructure cost |
+
+**Strategic Rationale**:
+- **Cloud neutrality**: Works with customer's existing infrastructure
+- **Customer choice**: "Bring your own storage" reduces lock-in
+- **Cost awareness**: Document cost implications, let customers decide
+- **Self-hosted option**: MinIO for compliance/sovereignty requirements
+- **S3-compatible**: Single implementation, multiple deployment options
+
+**Recommendation** (not requirement):
+- High egress workloads benefit from zero-egress providers (R2, Wasabi) or self-hosted (MinIO)
+
+---
+
+## 5. Iceberg Storage Schema
+
+### 5.1 Table: traces
 
 **Partition**: `date` (day-based)
 **Sort Order**: `session_id, trace_id, timestamp`
 **Row Groups**: One row group per session_id
 
+**Design Decision** (See [Storage Design](storage_design.md#executive-decision--analysis)):
+- ✅ **HTTP bodies stored as STRING columns** in traces table (columnar separation via Parquet)
+- ✅ **Business attributes** via user-provided `sp.*` convention in attributes MAP
+- ✅ **Cloudflare R2 storage** for zero-egress cost advantage
+
 ```
 CREATE TABLE traces (
+  -- Identifiers
   trace_id STRING,
   span_id STRING,
   parent_span_id STRING,
   session_id STRING,
-  name STRING,
-  kind STRING,
-  start_timestamp TIMESTAMP,
-  end_timestamp TIMESTAMP,
+
+  -- Application context
+  app_id STRING,
+  organization_id STRING,
+  tenant_id STRING,
+
+  -- Span metadata
+  message_type STRING,
+  span_kind STRING,
+  timestamp TIMESTAMPTZ,
+  end_timestamp TIMESTAMPTZ,
+
+  -- Attributes (includes user-provided sp.* business identifiers)
+  attributes MAP<STRING, STRING>,
+
+  -- Events (metadata only, NOT full bodies)
+  events ARRAY<STRUCT<
+    name STRING,
+    timestamp TIMESTAMPTZ,
+    attributes MAP<STRING, STRING>
+  >>,
+
+  -- HTTP Bodies (stored as STRING, Parquet ZSTD compressed)
+  -- Columnar format ensures these are NOT read during metadata-only queries
+  http_request_method STRING,
+  http_request_path STRING,
+  http_request_headers STRING,    -- JSON string
+  http_request_body STRING,        -- Full body (Parquet compressed)
+  http_response_status_code INT,
+  http_response_headers STRING,    -- JSON string
+  http_response_body STRING,       -- Full body (Parquet compressed)
+
+  -- Status
   status_code STRING,
   status_message STRING,
-  attributes MAP<STRING, STRING>,
-  events ARRAY<STRUCT<...>>,
-  links ARRAY<STRUCT<...>>,
-  resource_attributes MAP<STRING, STRING>,
-  date DATE  -- partition key
+
+  -- Partition key
+  record_date DATE
 )
-PARTITIONED BY (date)
+PARTITIONED BY (record_date)
+SORT BY (session_id, trace_id, timestamp)
 ```
 
-### 4.2 Table: logs
+**Key Design Rationale**:
+
+1. **Columnar Separation**: Parquet's columnar format provides automatic I/O separation
+   - Query: `SELECT session_id FROM traces WHERE attributes['sp.user.id'] = 'user-123'`
+   - Only reads: session_id, attributes columns (NOT http_request_body, http_response_body)
+
+2. **User-Provided Business Attributes**: `sp.*` convention in attributes MAP
+   - Example: `attributes['sp.user.id'] = 'user-123'`
+   - Example: `attributes['sp.order.id'] = 'ORD-456'`
+   - Users instrument their code to add business context
+
+3. **Bodies as STRING**: Let Parquet ZSTD compression handle it
+   - No application-level compression needed
+   - DuckDB can query JSON directly: `json_extract(http_request_body, '$.orderId')`
+
+4. **Future Migration Path**: If columnar separation proves insufficient
+   - Phase 2: Move bodies to separate `http_payloads` table
+   - But start simple and validate performance first
+
+### 5.2 Table: logs
 
 **Partition**: `date` (day-based)
 **Sort Order**: `session_id, timestamp`
@@ -179,7 +316,7 @@ CREATE TABLE logs (
 PARTITIONED BY (date)
 ```
 
-### 4.3 Table: metrics (Experimental)
+### 5.3 Table: metrics (Experimental)
 
 **Partition**: `date, metric_name` (NOT session-based)
 **Sort Order**: `metric_name, timestamp`
@@ -203,9 +340,9 @@ PARTITIONED BY (date, metric_name)
 
 ---
 
-## 5. Query Strategy
+## 6. Query Strategy
 
-### 5.1 Direct Iceberg Queries
+### 6.1 Direct Iceberg Queries
 
 **No External Metadata Index**: Queries leverage Iceberg's built-in metadata.
 
@@ -216,7 +353,7 @@ PARTITIONED BY (date, metric_name)
 4. **Row group statistics** (min/max) filter out irrelevant row groups
 5. Read matching Parquet data
 
-### 5.2 Session Retrieval
+### 6.2 Session Retrieval
 
 ```rust
 GET /v1/query/session/{session_id}
@@ -235,7 +372,7 @@ let logs = iceberg_table("logs")
 // Merge by timestamp and return unified view
 ```
 
-### 5.3 Time-Range Queries
+### 6.3 Time-Range Queries
 
 ```rust
 POST /query with {
@@ -250,7 +387,7 @@ POST /query with {
 // 3. Applies predicate pushdown for service_name
 ```
 
-### 5.4 Query Optimization
+### 6.4 Query Optimization
 
 **Iceberg Built-in Optimizations**:
 - **Manifest Pruning**: Manifest files track column min/max per data file
@@ -386,6 +523,8 @@ See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for curr
 
 ## 10. References
 
+- **Business Vision**: [Softprobe Strategic Goals](goals.md) - Long-term vision and business context
+- **Storage Design**: [HTTP Body Storage & Business Attribute Indexing](storage_design.md) - Detailed design options
 - **OpenTelemetry Protocol**: https://opentelemetry.io/docs/specs/otlp/
 - **Apache Iceberg**: https://iceberg.apache.org/docs/latest/
 - **Iceberg Rust**: https://github.com/apache/iceberg-rust
