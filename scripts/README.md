@@ -1,15 +1,15 @@
-# DuckDB Iceberg Verification Scripts
+# Scripts
 
-Quick reference for verifying Iceberg data with DuckDB.
+Most workflows are exposed via Makefile targets; scripts are thin helpers.
 
 ## Quick Start
 
 ```bash
 # Automated verification (recommended)
-./scripts/verify_quick.sh
+make verify-e2e
 
 # Interactive session
-./scripts/interactive_query.sh
+make duckdb-shell
 
 # Run SQL file
 duckdb < scripts/verify_iceberg.sql
@@ -56,8 +56,10 @@ SELECT COUNT(*) FROM logs;
 
 - **verify_iceberg.sql** - Comprehensive verification queries
 - **verify_session.sql** - Session-specific queries with macro
-- **verify_quick.sh** - Automated verification script
-- **interactive_query.sh** - Interactive DuckDB session launcher
+- **interactive_query.sh** - Interactive DuckDB session launcher (used by `make duckdb-shell`)
+- **demo_session_queries.sh** - Sample session queries (used by `make demo-session`)
+- **verify_e2e.sh** - End-to-end verification (used by `make verify-e2e`)
+- **drop_all_tables.sh** - Reset Iceberg tables (used by `make drop-tables`)
 - **README.md** - This file
 
 ## Example Queries

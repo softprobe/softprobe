@@ -1,8 +1,16 @@
 use crate::config::Config;
 use anyhow::Result;
+use serde_json::Value;
 
 pub struct DuckDBQueryEngine {
     _config: Config,
+}
+
+/// Query result containing columns and rows
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub row_count: usize,
 }
 
 impl DuckDBQueryEngine {
@@ -17,7 +25,25 @@ impl DuckDBQueryEngine {
             _config: config.clone(),
         })
     }
-    
+
+    /// Execute arbitrary SQL query and return results as JSON
+    /// Used by Grafana SQL API endpoint
+    pub async fn execute_query(&self, _query: &str) -> Result<QueryResult> {
+        // TODO: Implement DuckDB query execution
+        // For now, return mock data to demonstrate the API
+        tracing::warn!("DuckDB query execution not yet implemented, returning mock data");
+
+        // Mock response for demonstration
+        Ok(QueryResult {
+            columns: vec!["session_id".to_string(), "count".to_string()],
+            rows: vec![
+                vec![Value::String("session-1".to_string()), Value::Number(10.into())],
+                vec![Value::String("session-2".to_string()), Value::Number(25.into())],
+            ],
+            row_count: 2,
+        })
+    }
+
     pub async fn query_metadata(&self, _query: &str, _params: &[&dyn std::any::Any]) -> Result<Vec<crate::api::query::RecordingMetadata>> {
         // TODO: Execute DuckDB query on Iceberg table (Phase 1.2)
         // - Use iceberg_scan() function

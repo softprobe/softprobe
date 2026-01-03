@@ -5,29 +5,41 @@ use anyhow::Result;
 
 /// Log domain model - unified representation across all layers
 /// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
+///
+/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
+/// Field order matches Iceberg field IDs for consistency
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Log {
-    // Session context
+    // Field 1: session_id (OPTIONAL in Iceberg)
+    // Extracted from log attributes (session.id or session_id) or resource attributes
     pub session_id: Option<String>,
 
-    // Timestamps
+    // Field 2-3: Timestamps
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub observed_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 
-    // Severity
+    // Field 4-5: Severity
     pub severity_number: i32,
     pub severity_text: String,
 
-    // Log content
+    // Field 6: Log content
     pub body: String,
 
-    // Attributes
+    // Field 7: Attributes MAP<STRING, STRING>
+    // Log-level attributes from OTLP LogRecord
     pub attributes: HashMap<String, String>,
+
+    // Field 8: Resource attributes MAP<STRING, STRING>
+    // Service-level attributes (service.name, host.name, etc.)
     pub resource_attributes: HashMap<String, String>,
 
-    // Trace correlation
+    // Field 9-10: Trace correlation
+    // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+
+    // Field 15: record_date (partition key - computed, not stored in struct)
+    // Derived from timestamp at write time in arrow.rs
 }
 
 impl Bufferable for Log {
@@ -36,14 +48,17 @@ impl Bufferable for Log {
     }
 
     fn grouping_key(&self) -> String {
+        // Use session_id if available, otherwise "unknown"
         self.session_id
             .clone()
             .unwrap_or_else(|| "unknown".to_string())
     }
 
     fn compare_for_sort(&self, other: &Self) -> Ordering {
-        self.timestamp.cmp(&other.timestamp)
-            .then_with(|| self.severity_number.cmp(&other.severity_number))
+        // Sort by session_id first, then timestamp
+        // This matches Iceberg sort order (field 1, 2)
+        self.session_id.cmp(&other.session_id)
+            .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {

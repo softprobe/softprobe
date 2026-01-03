@@ -14,7 +14,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress setup-local teardown-local clean build lint fmt check-fmt
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
 # Default target
 help:
@@ -38,12 +38,23 @@ help:
 	@echo "  make teardown-local  - Stop local test infrastructure"
 	@echo "  make check-local     - Verify local infrastructure is running"
 	@echo ""
+	@echo "Data & Verification:"
+	@echo "  make generate-telemetry - Generate demo OTLP data"
+	@echo "  make verify-e2e      - End-to-end verification (services + data)"
+	@echo "  make verify-quick    - Quick DuckDB verification"
+	@echo "  make demo-session    - Run session query demo"
+	@echo "  make duckdb-shell    - Launch DuckDB with Iceberg views"
+	@echo "  make drop-tables     - Drop Iceberg tables in REST catalog"
+	@echo ""
 	@echo "Development:"
 	@echo "  make build           - Build the project"
 	@echo "  make lint            - Run clippy lints"
 	@echo "  make fmt             - Format code"
 	@echo "  make check-fmt       - Check code formatting"
 	@echo "  make clean           - Clean build artifacts"
+	@echo ""
+	@echo "Script Helpers:"
+	@echo "  make help-scripts    - List script-backed targets"
 	@echo ""
 
 # Build targets
@@ -170,6 +181,34 @@ dev-check: check-fmt lint test-quick
 # Continuous Integration full check
 ci-full: check-fmt lint build test-ci
 	@echo "✅ CI checks completed!"
+
+# Data & verification helpers
+generate-telemetry:
+	@python3 scripts/generate_telemetry.py
+
+verify-e2e:
+	@./scripts/verify_e2e.sh
+
+verify-quick:
+	@./scripts/verify_quick.sh
+
+demo-session:
+	@./scripts/demo_session_queries.sh
+
+duckdb-shell:
+	@./scripts/interactive_query.sh
+
+drop-tables:
+	@./scripts/drop_all_tables.sh
+
+help-scripts:
+	@echo "Script-backed targets:"
+	@echo "  make generate-telemetry"
+	@echo "  make verify-e2e"
+	@echo "  make verify-quick"
+	@echo "  make demo-session"
+	@echo "  make duckdb-shell"
+	@echo "  make drop-tables"
 
 # GCP Deployment Testing
 test-gcp:

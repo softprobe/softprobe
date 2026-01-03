@@ -5,30 +5,46 @@ use anyhow::Result;
 
 /// Span domain model - unified representation across all layers
 /// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
+///
+/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
+/// Field order matches Iceberg field IDs for consistency
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Span {
-    // Primary identifiers
+    // Field 1: session_id (REQUIRED in Iceberg)
+    // Extracted from sp.session.id attribute or defaults to trace_id
+    pub session_id: String,
+
+    // Field 2-4: Primary identifiers
     pub trace_id: String,
     pub span_id: String,
     pub parent_span_id: Option<String>,
 
-    // Application context
+    // Field 5-7: Application context
     pub app_id: String,
     pub organization_id: Option<String>,
     pub tenant_id: Option<String>,
 
-    // Span metadata
+    // Field 8-11: Span metadata
     pub message_type: String,
     pub span_kind: Option<String>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub end_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 
-    // Complex data
+    // Field 12: Attributes MAP<STRING, STRING>
+    // Includes user-provided sp.* business attributes for search
     pub attributes: HashMap<String, String>,
+
+    // Field 13: Events ARRAY<STRUCT<name, timestamp, attributes>>
+    // Contains http.request and http.response events with full bodies
     pub events: Vec<SpanEvent>,
 
-    // HTTP data (extracted from span events)
-    // These are populated by extracting 'http.request' and 'http.response' events
+    // Field 14-15: Status
+    pub status_code: Option<String>,
+    pub status_message: Option<String>,
+
+    // Field 25-31: HTTP data (extracted from span events)
+    // These are populated by extract_http_data_from_events() method
+    // Stored separately from events for columnar I/O efficiency (per ADR-003)
     pub http_request_method: Option<String>,
     pub http_request_path: Option<String>,
     pub http_request_headers: Option<String>,
@@ -37,9 +53,8 @@ pub struct Span {
     pub http_response_headers: Option<String>,
     pub http_response_body: Option<String>,
 
-    // Status
-    pub status_code: Option<String>,
-    pub status_message: Option<String>,
+    // Field 32: record_date (partition key - computed, not stored in struct)
+    // Derived from timestamp at write time in arrow.rs
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -55,15 +70,15 @@ impl Bufferable for Span {
     }
 
     fn grouping_key(&self) -> String {
-        // Extract session_id from attributes, fallback to trace_id
-        self.attributes
-            .get("sp.session.id")
-            .cloned()
-            .unwrap_or_else(|| self.trace_id.clone())
+        // Use explicit session_id field (already populated from sp.session.id or trace_id)
+        self.session_id.clone()
     }
 
     fn compare_for_sort(&self, other: &Self) -> Ordering {
-        self.trace_id.cmp(&other.trace_id)
+        // Sort by session_id first, then trace_id, then timestamp
+        // This matches Iceberg sort order (field 1, 2, 10)
+        self.session_id.cmp(&other.session_id)
+            .then_with(|| self.trace_id.cmp(&other.trace_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
@@ -162,8 +177,18 @@ impl Span {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
+        let trace_id = hex::encode(&otlp_span.trace_id);
+
+        // Extract session_id from attributes (sp.session.id) or default to trace_id
+        // This must be done before creating the span since we need to look at attributes
+        let session_id = attributes
+            .get("sp.session.id")
+            .cloned()
+            .unwrap_or_else(|| trace_id.clone());
+
         let mut span = Self {
-            trace_id: hex::encode(&otlp_span.trace_id),
+            session_id,
+            trace_id,
             span_id: hex::encode(&otlp_span.span_id),
             parent_span_id: if otlp_span.parent_span_id.is_empty() {
                 None
@@ -187,7 +212,10 @@ impl Span {
             http_response_status_code: None,
             http_response_headers: None,
             http_response_body: None,
-            status_code: otlp_span.status.as_ref().map(|s| format!("{:?}", s.code())),
+            status_code: otlp_span
+                .status
+                .as_ref()
+                .map(|s| format!("{:?}", s.code()).to_uppercase()),
             status_message: otlp_span.status.as_ref().and_then(|s| {
                 if s.message.is_empty() {
                     None

@@ -342,60 +342,55 @@ PARTITIONED BY (date, metric_name)
 
 ## 6. Query Strategy
 
-### 6.1 Direct Iceberg Queries
+### 6.1 Grafana via DuckDB Plugin (Primary Query Interface)
 
-**No External Metadata Index**: Queries leverage Iceberg's built-in metadata.
+**Architecture**: Grafana DuckDB Plugin → DuckDB → Iceberg Extension → S3/R2
 
 **Query Path**:
-1. Client sends query with predicates (session_id, time_range, attributes)
-2. Iceberg uses **manifest files** to eliminate irrelevant data files
-3. **Partition pruning** eliminates entire date partitions
-4. **Row group statistics** (min/max) filter out irrelevant row groups
-5. Read matching Parquet data
+1. User creates dashboard in Grafana with SQL queries
+2. DuckDB plugin executes `iceberg_scan('s3://warehouse/traces')` queries
+3. DuckDB Iceberg extension leverages:
+   - **Manifest pruning**: Eliminate irrelevant data files
+   - **Partition pruning**: Date-based partition elimination
+   - **Row group statistics**: Fine-grained filtering via Parquet metadata
+4. Results streamed back to Grafana for visualization
 
-### 6.2 Session Retrieval
-
-```rust
-GET /v1/query/session/{session_id}
-
-// Parallel Iceberg scans:
-let traces = iceberg_table("traces")
-    .scan()
-    .filter(col("session_id").eq(session_id))
-    .collect();
-
-let logs = iceberg_table("logs")
-    .scan()
-    .filter(col("session_id").eq(session_id))
-    .collect();
-
-// Merge by timestamp and return unified view
+**Example Grafana Query**:
+```sql
+SELECT
+  time_bucket($__interval, timestamp) AS time,
+  COUNT(*) as request_count
+FROM iceberg_scan('s3://warehouse/traces')
+WHERE $__timeFilter(timestamp)
+  AND record_date >= DATE $__timeFrom
+  AND record_date <= DATE $__timeTo
+GROUP BY time
+ORDER BY time
 ```
 
-### 6.3 Time-Range Queries
+**Benefits**:
+- **No custom query API needed** - DuckDB plugin handles everything
+- **Grafana native features** - Time macros, variables, query inspector
+- **Direct Iceberg access** - No HTTP overhead
+- **Official maintained plugin** - Updates and bug fixes from MotherDuck
 
-```rust
-POST /query with {
-  start_time: "2025-01-30T00:00:00Z",
-  end_time: "2025-01-31T00:00:00Z",
-  service_name: "api-gateway"
-}
+**Documentation**: See [docs/grafana.md](grafana.md)
 
-// Iceberg automatically:
-// 1. Eliminates partitions outside date range (Jan 29, Feb 1+)
-// 2. Uses manifest files to find relevant data files
-// 3. Applies predicate pushdown for service_name
+### 6.2 Programmatic Access (Future)
+
+For programmatic access outside Grafana (e.g., Slack bots, CI/CD analytics):
+
+**Option 1: DuckDB CLI/SDK**
+```bash
+duckdb -c "SELECT COUNT(*) FROM iceberg_scan('s3://warehouse/traces') WHERE session_id = 'xxx'"
 ```
 
-### 6.4 Query Optimization
+**Option 2: Custom REST API** (if needed)
+- Implement `/api/query` endpoint
+- Add authentication, rate limiting
+- Use DuckDB Rust bindings
 
-**Iceberg Built-in Optimizations**:
-- **Manifest Pruning**: Manifest files track column min/max per data file
-- **Partition Elimination**: Date partitioning eliminates entire days
-- **Row Group Statistics**: Parquet row group min/max for fine-grained filtering
-- **Predicate Pushdown**: Filters applied at storage layer
-
-**Trade-off**: Potentially slower queries vs. ClickHouse, but simpler architecture.
+**Current Status**: Not implemented - Grafana plugin satisfies all current query needs
 
 ---
 

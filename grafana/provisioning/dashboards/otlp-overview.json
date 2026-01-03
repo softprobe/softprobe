@@ -1,0 +1,350 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "motherduck-duckdb-datasource",
+        "uid": "OTLP Data Lake"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "motherduck-duckdb-datasource",
+            "uid": "otlp-data-lake"
+          },
+          "refId": "A",
+          "rawSql": "SET unsafe_enable_version_guessing=true; SET s3_endpoint=\"minio:9000\"; SET s3_access_key_id=\"minioadmin\"; SET s3_secret_access_key=\"minioadmin\"; SET s3_url_style=\"path\"; SET s3_use_ssl=false; SELECT\n  time_bucket('1m', timestamp) AS time,\n  COUNT(*) / 60.0 as requests_per_sec\nFROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true)\nWHERE timestamp >= to_timestamp(CAST(${__from} AS BIGINT)/1000)\n  AND timestamp <= to_timestamp(CAST(${__to} AS BIGINT)/1000)\n  AND record_date >= CAST(to_timestamp(CAST(${__from} AS BIGINT)/1000) AS DATE)\n  AND record_date <= CAST(to_timestamp(CAST(${__to} AS BIGINT)/1000) AS DATE)\nGROUP BY time\nORDER BY time ASC",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "motherduck-duckdb-datasource",
+        "uid": "OTLP Data Lake"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "motherduck-duckdb-datasource",
+            "uid": "otlp-data-lake"
+          },
+          "refId": "A",
+          "rawSql": "SET unsafe_enable_version_guessing=true; SET s3_endpoint=\"minio:9000\"; SET s3_access_key_id=\"minioadmin\"; SET s3_secret_access_key=\"minioadmin\"; SET s3_url_style=\"path\"; SET s3_use_ssl=false; SELECT\n  time_bucket('1m', timestamp) AS time,\n  (COUNT(*) FILTER (WHERE status_code = 'ERROR') * 100.0 / NULLIF(COUNT(*), 0)) as error_rate\nFROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true)\nWHERE timestamp >= to_timestamp(CAST(${__from} AS BIGINT)/1000)\n  AND timestamp <= to_timestamp(CAST(${__to} AS BIGINT)/1000)\n  AND record_date >= CAST(to_timestamp(CAST(${__from} AS BIGINT)/1000) AS DATE)\n  AND record_date <= CAST(to_timestamp(CAST(${__to} AS BIGINT)/1000) AS DATE)\nGROUP BY time\nORDER BY time ASC",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Error Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "motherduck-duckdb-datasource",
+        "uid": "OTLP Data Lake"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "motherduck-duckdb-datasource",
+            "uid": "otlp-data-lake"
+          },
+          "refId": "A",
+          "rawSql": "SET unsafe_enable_version_guessing=true; SET s3_endpoint=\"minio:9000\"; SET s3_access_key_id=\"minioadmin\"; SET s3_secret_access_key=\"minioadmin\"; SET s3_url_style=\"path\"; SET s3_use_ssl=false; SELECT\n  http_request_path,\n  COUNT(*) as total_requests,\n  ROUND(AVG(EXTRACT(EPOCH FROM (end_timestamp - timestamp)) * 1000), 2) as avg_duration_ms,\n  COUNT(*) FILTER (WHERE status_code = 'ERROR') as errors\nFROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true)\nWHERE record_date >= CAST(to_timestamp(CAST(${__from} AS BIGINT)/1000) AS DATE)\n  AND record_date <= CAST(to_timestamp(CAST(${__to} AS BIGINT)/1000) AS DATE)\nGROUP BY http_request_path\nORDER BY total_requests DESC\nLIMIT 10",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Top Endpoints",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "motherduck-duckdb-datasource",
+        "uid": "OTLP Data Lake"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "motherduck-duckdb-datasource",
+            "uid": "otlp-data-lake"
+          },
+          "refId": "A",
+          "rawSql": "SET unsafe_enable_version_guessing=true; SET s3_endpoint=\"minio:9000\"; SET s3_access_key_id=\"minioadmin\"; SET s3_secret_access_key=\"minioadmin\"; SET s3_url_style=\"path\"; SET s3_use_ssl=false; SELECT\n  session_id as session_id,\n  COUNT(*) as request_count,\n  MIN(timestamp) as session_start,\n  MAX(timestamp) as session_end\nFROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true)\nWHERE record_date >= CAST(to_timestamp(CAST(${__from} AS BIGINT)/1000) AS DATE)\n  AND record_date <= CAST(to_timestamp(CAST(${__to} AS BIGINT)/1000) AS DATE)\nGROUP BY session_id\nORDER BY session_start ASC\nLIMIT 20",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Sessions",
+      "type": "table"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [
+    "otlp",
+    "telemetry"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "OTLP Overview",
+  "uid": "otlp-overview",
+  "version": 0,
+  "weekStart": ""
+}

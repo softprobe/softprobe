@@ -36,6 +36,7 @@ build/
 
 .DS_Store
 .venv/
+grafana/plugins/
 
 ### Spark ###
 spark/*.csv

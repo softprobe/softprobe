@@ -42,12 +42,12 @@ RUN useradd -m -u 1000 softprobe && \
 USER softprobe
 
 # Expose the service port
-EXPOSE 8080
+EXPOSE 4317
 
 # Set default environment variables
 ENV RUST_LOG=info
-ENV SERVER__PORT=8080
-ENV SERVER__HOST=0.0.0.0
+# ENV SERVER__PORT=8080
+# ENV SERVER__HOST=0.0.0.0
 
 # Run the binary
-ENTRYPOINT ["/app/softprobe-otlp-backend"]
+CMD ["/app/softprobe-otlp-backend", "--config", "/app/config.yaml"]

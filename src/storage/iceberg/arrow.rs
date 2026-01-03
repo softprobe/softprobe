@@ -32,11 +32,10 @@ pub fn spans_to_record_batch(spans: &[Span], iceberg_schema: &IcebergSchema) -> 
         .map_err(|e| anyhow::anyhow!("events field not found in schema: {}", e))?.clone());
 
     // Build arrays for each column
+    // Use explicit session_id field (already populated in Span model)
     let session_ids: ArrayRef = Arc::new(StringArray::from(
         spans.iter()
-            .map(|s| s.attributes.get("sp.session.id")
-                .map(|id| id.as_str())
-                .unwrap_or(s.trace_id.as_str()))
+            .map(|s| s.session_id.as_str())
             .collect::<Vec<_>>()
     ));
 

@@ -253,6 +253,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             };
 
             session_spans.push(SpanData {
+                session_id: session_id.clone(), // Explicit session_id field
                 trace_id: format!("trace-{}-{}", session_idx, i),
                 span_id: format!("span-{}-{}", session_idx, i),
                 parent_span_id: None,
@@ -901,6 +902,7 @@ async fn test_http_fields_in_span_model() {
     // Create a span with all HTTP fields populated
     let session_id = "test-session-123";
     let span = SpanData {
+        session_id: session_id.to_string(), // Explicit session_id field
         trace_id: "trace-abc".to_string(),
         span_id: "span-xyz".to_string(),
         parent_span_id: None,

@@ -13,7 +13,7 @@ This Rust service provides:
 
 ## Architecture
 
-See `docs/migration-to-iceberg-design.md` for detailed architecture documentation.
+See `docs/design.md` for detailed architecture documentation.
 
 ## Configuration
 
@@ -71,6 +71,48 @@ make test-quick      # Unit tests only (fast, no infrastructure)
 make test-local      # Integration tests with local MinIO
 make test-r2         # Integration tests with Cloudflare R2
 make test-all        # All tests
+```
+
+## Make Commands (Holistic View)
+
+### Core Development
+```bash
+make build
+make lint
+make fmt
+make check-fmt
+make clean
+```
+
+### Infrastructure
+```bash
+make setup-local
+make teardown-local
+make check-local
+```
+
+### Tests
+```bash
+make test-quick
+make test-local
+make test-r2
+make test-ci
+make test-all
+```
+
+### Data & Verification
+```bash
+make generate-telemetry
+make verify-e2e
+make demo-session
+make duckdb-shell
+make drop-tables
+```
+
+### Discoverability
+```bash
+make help
+make help-scripts
 ```
 
 ## API Endpoints
@@ -133,4 +175,3 @@ All implementation follows the design document:
 ## License
 
 Apache 2.0
-

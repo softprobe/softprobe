@@ -6,8 +6,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 /// Metric data model representing an OTLP metric data point
+///
+/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
+/// Field order matches Iceberg field IDs for consistency
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metric {
+    // Field 1-4: Metric identity
     /// Name of the metric (e.g., "http.server.duration")
     pub metric_name: String,
 
@@ -20,17 +24,25 @@ pub struct Metric {
     /// Type of metric: "gauge", "sum", "histogram", "summary"
     pub metric_type: String,
 
+    // Field 5-6: Timestamp and value
     /// Timestamp when the metric was recorded
     pub timestamp: DateTime<Utc>,
 
     /// Numeric value of the metric data point
     pub value: f64,
 
+    // Field 7: Attributes MAP<STRING, STRING>
     /// Additional attributes specific to this metric data point
+    /// (e.g., http.method, http.status_code, custom tags)
     pub attributes: HashMap<String, String>,
 
-    /// Resource attributes (e.g., service.name, host.name)
+    // Field 8: Resource attributes MAP<STRING, STRING>
+    /// Resource attributes identifying the metric source
+    /// (e.g., service.name, host.name, k8s.pod.name)
     pub resource_attributes: HashMap<String, String>,
+
+    // Field 13: record_date (partition key - computed, not stored in struct)
+    // Derived from timestamp at write time in arrow.rs
 }
 
 impl Metric {
@@ -299,6 +311,7 @@ impl Bufferable for Metric {
     }
 
     /// Sort by metric_name first, then timestamp
+    /// This matches Iceberg sort order (field 1, 5)
     fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.metric_name
             .cmp(&other.metric_name)

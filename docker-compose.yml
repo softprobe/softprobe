@@ -56,7 +56,7 @@ services:
   # See docs/design.md for architecture details
 
   otlp-backend:
-    build: ./softprobe-otlp-backend
+    build: .
     container_name: otlp-backend
     depends_on:
       iceberg-rest:
@@ -69,9 +69,32 @@ services:
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
     volumes:
-      - ./softprobe-otlp-backend/tests/config/test-docker.yaml:/app/config.yaml:ro
+      - ./tests/config/test-docker.yaml:/app/config.yaml:ro
     networks:
       - backend_net
     ports:
       - "4317:4317"  # OTLP gRPC
 
+
+  grafana:
+    image: grafana/grafana:10.4.0-ubuntu  # Ubuntu-based for glibc/libstdc++ compatibility
+    platform: linux/amd64  # Force x86_64 for DuckDB plugin compatibility
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=motherduck-duckdb-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/plugins:/var/lib/grafana/plugins
+      - grafana-storage:/var/lib/grafana
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+
+volumes:
+  grafana-storage:
