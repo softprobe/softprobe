@@ -13,6 +13,16 @@ NC='\033[0m'
 
 cd "$(dirname "$0")/.."
 
+CATALOG_URI="http://localhost:8181/catalog"
+WAREHOUSE="default"
+CONFIG_URL="${CATALOG_URI}/v1/config?warehouse=${WAREHOUSE}"
+PREFIX=$(curl -s "${CONFIG_URL}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["defaults"]["prefix"])')
+if [ -z "${PREFIX}" ]; then
+    echo -e "   ${RED}✗ Failed to resolve Lakekeeper catalog prefix${NC}"
+    exit 1
+fi
+CATALOG_PREFIX_URI="${CATALOG_URI}/v1/${PREFIX}"
+
 echo "1. Checking services..."
 echo "   - MinIO:"
 if docker-compose ps minio | grep -q "Up"; then
@@ -22,11 +32,11 @@ else
     exit 1
 fi
 
-echo "   - Iceberg REST:"
-if curl -sf http://localhost:8181/v1/config > /dev/null 2>&1; then
-    echo -e "   ${GREEN}✓ Iceberg REST ready${NC}"
+echo "   - Lakekeeper REST:"
+if curl -sf "${CONFIG_URL}" > /dev/null 2>&1; then
+    echo -e "   ${GREEN}✓ Lakekeeper REST ready${NC}"
 else
-    echo -e "   ${RED}✗ Iceberg REST not ready${NC}"
+    echo -e "   ${RED}✗ Lakekeeper REST not ready${NC}"
     exit 1
 fi
 
@@ -48,7 +58,7 @@ fi
 
 echo ""
 echo "2. Checking Iceberg tables..."
-TABLES=$(curl -s http://localhost:8181/v1/namespaces/default/tables | python3 -m json.tool | grep '"name"' | wc -l)
+TABLES=$(curl -s "${CATALOG_PREFIX_URI}/namespaces/default/tables" | python3 -m json.tool | grep '"name"' | wc -l)
 if [ "$TABLES" -ge 3 ]; then
     echo -e "   ${GREEN}✓ Found $TABLES tables (traces, logs, metrics)${NC}"
 else
@@ -59,7 +69,7 @@ fi
 echo ""
 echo "3. Checking data files..."
 docker-compose exec -T minio mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1
-TRACE_FILES=$(docker-compose exec -T minio mc find local/warehouse/default/traces --name '*.parquet' 2>/dev/null | wc -l)
+TRACE_FILES=$(docker-compose exec -T minio mc find local/warehouse/iceberg/default/traces --name '*.parquet' 2>/dev/null | wc -l)
 if [ "$TRACE_FILES" -gt 0 ]; then
     echo -e "   ${GREEN}✓ Found $TRACE_FILES trace Parquet files${NC}"
 else
@@ -69,7 +79,7 @@ fi
 
 echo ""
 echo "4. Downloading sample file for analysis..."
-FIRST_FILE=$(docker-compose exec -T minio mc find local/warehouse/default/traces --name '*.parquet' 2>/dev/null | head -1 | tr -d '\r')
+FIRST_FILE=$(docker-compose exec -T minio mc find local/warehouse/iceberg/default/traces --name '*.parquet' 2>/dev/null | head -1 | tr -d '\r')
 if [ -n "$FIRST_FILE" ]; then
     docker-compose exec -T minio mc cp "$FIRST_FILE" /tmp/verify_sample.parquet >/dev/null 2>&1
     docker-compose exec -T minio cat /tmp/verify_sample.parquet > /tmp/verify_sample_host.parquet

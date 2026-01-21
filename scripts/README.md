@@ -127,8 +127,8 @@ SET unsafe_enable_version_guessing=true;
 # MinIO
 curl http://localhost:9002/minio/health/live
 
-# Iceberg REST catalog
-curl http://localhost:8181/v1/config
+# Lakekeeper REST catalog
+curl "http://localhost:8181/catalog/v1/config?warehouse=default"
 ```
 
 ### Empty tables

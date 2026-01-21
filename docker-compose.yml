@@ -27,28 +27,67 @@ services:
           - warehouse.minio
 
 
-  iceberg-rest:
-    image: tabulario/iceberg-rest
-    container_name: iceberg-rest
-    ports:
-      - "8181:8181"
+  db:
+    image: postgres:17
+    container_name: lakekeeper-db
     environment:
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      - AWS_REGION=us-east-1
-      - CATALOG_WAREHOUSE=s3://warehouse/
-      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -p 5432 -d postgres"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend_net
+    volumes:
+      - lakekeeper-postgres:/var/lib/postgresql/data
+
+
+  migrate:
+    image: ${LAKEKEEPER_IMAGE:-vakamo/lakekeeper:latest}
+    container_name: lakekeeper-migrate
+    environment:
+      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
+      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@db:5432/postgres
+      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@db:5432/postgres
+      - RUST_LOG=info
+    command: ["migrate"]
     depends_on:
-      minio:
+      db:
         condition: service_healthy
     networks:
       - backend_net
+
+
+  lakekeeper:
+    image: ${LAKEKEEPER_IMAGE:-vakamo/lakekeeper:latest}
+    container_name: lakekeeper
+    ports:
+      - "8181:8181"
+    environment:
+      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
+      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@db:5432/postgres
+      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@db:5432/postgres
+      - RUST_LOG=info
+    command: ["serve"]
+    depends_on:
+      minio:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - backend_net
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8181 && echo -e 'GET /v1/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && cat <&3 | grep -q 'HTTP/1.1 200'"]
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 10
+      start_period: 5s
 
 
   # etl-worker: REMOVED - No longer using ClickHouse ETL
@@ -59,7 +98,7 @@ services:
     build: .
     container_name: otlp-backend
     depends_on:
-      iceberg-rest:
+      lakekeeper:
         condition: service_healthy
       minio:
         condition: service_healthy
@@ -98,3 +137,4 @@ services:
 
 volumes:
   grafana-storage:
+  lakekeeper-postgres:

@@ -410,6 +410,21 @@ duckdb -c "SELECT COUNT(*) FROM iceberg_scan('s3://warehouse/traces') WHERE sess
 - **Storage**: Iceberg scales to petabytes with S3-compatible object storage
 - **Query Fan-out**: Mitigated by partition pruning and row group statistics
 
+### 6.3 Storage Maintenance (Metadata + Data)
+
+**Problem**: Frequent commits generate many snapshots and manifest files (metadata bloat), and small Parquet files hurt read performance.
+
+**Approach**:
+- **Metadata maintenance**: Run scheduled Iceberg procedures to keep snapshot/manifest metadata compact.
+  - Expire old snapshots (keep recent N hours/days for rollback and time travel)
+  - Rewrite manifests to consolidate small manifest files
+  - Remove orphan files to clean up unreferenced data/metadata
+- **Data compaction**: Rewrite small Parquet files into target-sized files to reduce file counts and improve scan efficiency.
+
+**Notes**:
+- Maintenance runs asynchronously and does NOT change commit frequency or ingestion latency.
+- Maintenance cadence and retention policy are configurable per table (traces/logs/metrics).
+
 ---
 
 ## 7. Implementation Status
@@ -485,6 +500,17 @@ See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for curr
 - One file per session (too many small files, high S3 costs, poor compaction)
 - One file per app (inefficient for cross-application queries)
 **Implementation**: One row group per session_id within each Parquet file, enables efficient session-level filtering
+
+### Decision 6: Scheduled Iceberg Maintenance (Metadata + Data)
+
+**Choice**: Add scheduled maintenance jobs for Iceberg metadata (snapshots/manifests) and data file compaction.
+**Rationale**: Commit frequency cannot be reduced without adding ingestion delay, so metadata bloat must be handled by maintenance. Small Parquet files degrade query performance without compaction.
+**Alternatives Considered**:
+- Reduce commit frequency (adds ingestion delay)
+- External metadata index (adds operational complexity)
+**Implementation**:
+- Metadata maintenance: snapshot expiration, manifest rewrite, orphan file cleanup
+- Data maintenance: compaction to target file sizes (e.g., 64MB)
 
 ---
 

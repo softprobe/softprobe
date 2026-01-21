@@ -19,8 +19,14 @@ async fn start_test_server() -> String {
     let mut config = Config::default();
     // Use REST catalog for integration tests
     config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
     config.iceberg.force_close_after_append = true; // Force immediate commits for tests
+    config.ingest_engine.optimizer_interval_seconds = 1;
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
 
     // Ensure MinIO/S3 env for REST catalog (dev-compose defaults)
     std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
@@ -33,7 +39,13 @@ async fn start_test_server() -> String {
     let query_engine = query::create_query_engine(&config).await.unwrap();
 
     // Initialize metric buffer
-    let metric_buffer = storage::create_metric_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
+    let metric_buffer = storage::create_metric_buffer(
+        &config,
+        storage.iceberg_writer.clone(),
+        storage.ingest_engine.clone(),
+    )
+    .await
+    .unwrap();
 
     // Create router
     let app = api::create_router(storage, query_engine, None, None, Some(metric_buffer)).await.unwrap();

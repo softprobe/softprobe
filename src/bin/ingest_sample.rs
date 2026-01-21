@@ -4,9 +4,31 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 use prost::Message;
 use chrono::Utc;
+use softprobe_otlp_backend::config::Config;
+use softprobe_otlp_backend::compaction::executor::MaintenanceExecutor;
 
 #[tokio::main]
 async fn main() {
+    if std::env::var("MAINTENANCE_RUN_ONCE").ok().as_deref() == Some("1") {
+        let config = Config::load().expect("failed to load config");
+        let executor = MaintenanceExecutor::new(&config)
+            .await
+            .expect("failed to create maintenance executor");
+        let summary = executor.run_once().await.expect("maintenance run failed");
+        println!("maintenance_tables={}", summary.tables.len());
+        for table in summary.tables {
+            println!(
+                "table={} expired_snapshots={} compaction={:?} rewrite_manifests={:?} remove_orphans={:?}",
+                table.table,
+                table.metadata.expired_snapshots,
+                table.compaction.status,
+                table.rewrite_manifests.status,
+                table.remove_orphan_files.status
+            );
+        }
+        return;
+    }
+
     let trace_id = vec![1u8; 16];
     let span_id = vec![2u8; 8];
     let now = Utc::now();
@@ -42,5 +64,4 @@ async fn main() {
     let txt = resp.text().await.unwrap();
     println!("body={}", txt);
 }
-
 

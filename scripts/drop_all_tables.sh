@@ -8,8 +8,17 @@ echo "=== Dropping all Iceberg tables ==="
 echo ""
 
 # Configuration from docker-compose.yml
-CATALOG_URI="http://localhost:8181"
+CATALOG_URI="http://localhost:8181/catalog"
+WAREHOUSE="default"
 NAMESPACE="default"
+
+CONFIG_URL="${CATALOG_URI}/v1/config?warehouse=${WAREHOUSE}"
+PREFIX=$(curl -s "${CONFIG_URL}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["defaults"]["prefix"])')
+if [ -z "${PREFIX}" ]; then
+    echo "✗ Failed to resolve Lakekeeper catalog prefix"
+    exit 1
+fi
+CATALOG_PREFIX_URI="${CATALOG_URI}/v1/${PREFIX}"
 
 # Tables to drop (including old test tables)
 TABLES=("traces" "logs" "metrics" "otlp_traces" "otlp_logs" "otlp_metrics" "raw_sessions" "test_spans")
@@ -19,7 +28,7 @@ for table in "${TABLES[@]}"; do
 
     # Try to drop the table using the Iceberg REST catalog API
     http_code=$(curl -s -o /tmp/drop_response.txt -w "%{http_code}" -X DELETE \
-        "${CATALOG_URI}/v1/namespaces/${NAMESPACE}/tables/${table}" \
+        "${CATALOG_PREFIX_URI}/namespaces/${NAMESPACE}/tables/${table}" \
         -H "Content-Type: application/json")
 
     if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
@@ -40,5 +49,5 @@ echo "Verification: Listing all tables in namespace '${NAMESPACE}'"
 echo ""
 
 # List remaining tables
-list_response=$(curl -s "${CATALOG_URI}/v1/namespaces/${NAMESPACE}/tables")
+list_response=$(curl -s "${CATALOG_PREFIX_URI}/namespaces/${NAMESPACE}/tables")
 echo "$list_response" | jq '.' 2>/dev/null || echo "$list_response"

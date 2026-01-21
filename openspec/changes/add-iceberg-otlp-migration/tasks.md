@@ -27,6 +27,7 @@
 - [ ] 3.4 Performance tuning: flush triggers, batch sizes, concurrency limits
 - [ ] 3.5 Optimize Iceberg manifest pruning and row group statistics usage
 - [ ] 3.6 Add compaction jobs for long-term storage optimization
+- [ ] 3.7 Add Iceberg metadata maintenance jobs (snapshot expiration, manifest rewrite, orphan cleanup)
 
 ## 4. Validation and Testing
 - [ ] 4.1 Add integration tests for all three OTLP endpoints

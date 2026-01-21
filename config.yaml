@@ -13,6 +13,14 @@ span_buffering:
   max_buffer_spans: 10000
   flush_interval_seconds: 60
 
+ingest_engine:
+  enabled: true
+  wal_bucket: "warehouse"
+  wal_prefix: "wal"
+  cache_dir: "/tmp/ingest-cache"
+  optimizer_interval_seconds: 300
+  replay_wal_on_startup: false
+
 compaction:
   enabled: true
   min_files_to_compact: 5
@@ -33,9 +41,9 @@ s3:
 
 iceberg:
   catalog_type: "rest"
-  catalog_uri: "http://localhost:8181"
+  catalog_uri: "http://localhost:8181/catalog"
+  warehouse: "default"
   write_target_file_size_bytes: 67108864  # 64MB
   write_row_group_size_bytes: 134217728  # 128MB
   write_page_size_bytes: 1048576  # 1MB
   force_close_after_append: false
-

@@ -10,9 +10,9 @@ use tokio::sync::Mutex;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-/// Trait for data that can be buffered and flushed to Iceberg
+/// Trait for data that can be buffered and flushed to storage
 pub trait Bufferable: Clone + Send + Sync + 'static {
-    /// Get the partition key for Iceberg partitioning (e.g., date)
+    /// Get the partition key for partitioning (e.g., date)
     fn partition_key(&self) -> chrono::NaiveDate;
 
     /// Get the grouping key for row group organization
@@ -28,8 +28,10 @@ pub trait Bufferable: Clone + Send + Sync + 'static {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
-type FlushFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
-type FlushCallback<T> = dyn Fn(Vec<Vec<T>>) -> FlushFuture + Send + Sync;
+pub type FlushFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub type FlushCallback<T> = dyn Fn(Vec<Vec<T>>) -> FlushFuture + Send + Sync;
+pub type PreAddFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>>> + Send>>;
+pub type PreAddCallback<T> = dyn Fn(Vec<T>, usize) -> PreAddFuture<T> + Send + Sync;
 
 /// Generic buffer with size and time-based flushing
 pub struct SimpleBuffer<T: Bufferable> {
@@ -38,6 +40,7 @@ pub struct SimpleBuffer<T: Bufferable> {
     items: Arc<Mutex<Vec<T>>>,
     current_size_bytes: Arc<AtomicUsize>,
     last_flush: Arc<Mutex<Instant>>,
+    pre_add_callback: Option<Arc<PreAddCallback<T>>>,
     flush_callback: Arc<FlushCallback<T>>,
 }
 
@@ -45,6 +48,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
     pub fn new(
         name: String,
         config: SpanBufferConfig,
+        pre_add_callback: Option<Arc<PreAddCallback<T>>>,
         flush_callback: Arc<FlushCallback<T>>,
     ) -> Self {
         let buffer = Self {
@@ -53,6 +57,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
             items: Arc::new(Mutex::new(Vec::new())),
             current_size_bytes: Arc::new(AtomicUsize::new(0)),
             last_flush: Arc::new(Mutex::new(Instant::now())),
+            pre_add_callback,
             flush_callback,
         };
 
@@ -84,12 +89,23 @@ impl<T: Bufferable> SimpleBuffer<T> {
             items: self.items.clone(),
             current_size_bytes: self.current_size_bytes.clone(),
             last_flush: self.last_flush.clone(),
+            pre_add_callback: self.pre_add_callback.clone(),
             flush_callback: self.flush_callback.clone(),
         }
     }
 
     /// Add items from a request, tracking the request body size
-    pub async fn add_items(&self, mut items: Vec<T>, request_body_size: usize) -> Result<()> {
+    pub async fn add_items(&self, items: Vec<T>, request_body_size: usize) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let mut items = if let Some(pre_add_callback) = &self.pre_add_callback {
+            (pre_add_callback)(items, request_body_size).await?
+        } else {
+            items
+        };
+
         if items.is_empty() {
             return Ok(());
         }
@@ -148,7 +164,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
         Ok(())
     }
 
-    /// Flush all buffered items to Iceberg
+    /// Flush all buffered items to storage
     async fn flush(&self) -> Result<()> {
         let mut buffer = self.items.lock().await;
 
@@ -159,7 +175,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
         let item_count = buffer.len();
         let size_bytes = self.current_size_bytes.load(AtomicOrdering::Relaxed);
 
-        info!("[{}] Flushing {} items ({} bytes) to Iceberg", self.name, item_count, size_bytes);
+        info!("[{}] Flushing {} items ({} bytes) to storage", self.name, item_count, size_bytes);
 
         // Sort items for data locality: date -> grouping_key -> timestamp
         // Partitioning by date is critical: all items in a file must have the same partition
@@ -190,7 +206,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
 
         // Write each date group as a separate file (each file has one partition value)
         for (date, date_items) in date_groups {
-            info!("[{}] Writing {} items for date {} to Iceberg", self.name, date_items.len(), date);
+            info!("[{}] Writing {} items for date {} to storage", self.name, date_items.len(), date);
 
             // Group items by grouping_key for row group isolation
             // For traces/logs: one row group per session_id
@@ -213,7 +229,7 @@ impl<T: Bufferable> SimpleBuffer<T> {
             (self.flush_callback)(batches).await?;
         }
 
-        info!("[{}] Successfully flushed {} items to Iceberg", self.name, item_count);
+        info!("[{}] Successfully flushed {} items to storage", self.name, item_count);
         Ok(())
     }
 
@@ -317,6 +333,17 @@ impl<T: Bufferable> SimpleBuffer<T> {
             buffered_items: buffer.len(),
             buffered_bytes: self.current_size_bytes.load(AtomicOrdering::Relaxed),
         }
+    }
+
+    /// Snapshot buffered items for union-read queries
+    pub async fn snapshot_items(&self) -> Vec<T> {
+        let buffer = self.items.lock().await;
+        buffer.clone()
+    }
+
+    /// Get the last flush watermark for snapshot consistency
+    pub async fn flush_watermark(&self) -> Instant {
+        *self.last_flush.lock().await
     }
 
     /// Manually trigger flush (useful for testing)

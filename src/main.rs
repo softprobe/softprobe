@@ -15,6 +15,7 @@ pub mod storage;
 pub mod query;
 pub mod compaction;
 pub mod config;
+pub mod ingest_engine;
 
 use config::Config;
 
@@ -41,13 +42,33 @@ async fn main() -> anyhow::Result<()> {
     let query_engine = query::create_query_engine(&config).await?;
 
     // Initialize span buffer with Iceberg writer
-    let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await?;
+    let span_buffer = storage::create_span_buffer(
+        &config,
+        storage.iceberg_writer.clone(),
+        storage.ingest_engine.clone(),
+    )
+    .await?;
 
     // Initialize log buffer with Iceberg writer
-    let log_buffer = storage::create_log_buffer(&config, storage.iceberg_writer.clone()).await?;
+    let log_buffer = storage::create_log_buffer(
+        &config,
+        storage.iceberg_writer.clone(),
+        storage.ingest_engine.clone(),
+    )
+    .await?;
 
     // Initialize metric buffer with Iceberg writer
-    let metric_buffer = storage::create_metric_buffer(&config, storage.iceberg_writer.clone()).await?;
+    let metric_buffer = storage::create_metric_buffer(
+        &config,
+        storage.iceberg_writer.clone(),
+        storage.ingest_engine.clone(),
+    )
+    .await?;
+
+    // Start background maintenance jobs (metadata + compaction)
+    if let Some(_handle) = compaction::scheduler::start_maintenance_scheduler(&config).await? {
+        info!("Maintenance scheduler started");
+    }
 
     // Initialize API handlers
     let app = api::create_router(storage, query_engine, Some(span_buffer), Some(log_buffer), Some(metric_buffer)).await?.layer(

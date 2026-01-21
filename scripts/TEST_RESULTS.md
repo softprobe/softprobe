@@ -210,7 +210,7 @@ SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := t
 ## Issues Found and Fixed
 
 ### 1. ❌→✅ REST API URL Format (FIXED)
-**Problem**: Originally used REST API URLs like `http://localhost:8181/v1/namespaces/default/tables/traces`
+**Problem**: Originally used REST API URLs like `http://localhost:8181/catalog/v1/namespaces/default/tables/traces`
 **Fix**: Changed to S3 paths: `s3://warehouse/default/traces`
 **Reason**: DuckDB `iceberg_scan()` expects S3/storage paths, not REST endpoints
 

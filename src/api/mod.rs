@@ -41,8 +41,6 @@ pub async fn create_router(
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/query", post(query::query_recordings))
         .route("/retrieve", post(query::retrieve_payloads))
-        .route("/v1/query/session/{session_id}", get(query::query_session_by_id))
-        .route("/v1/query/debug/all", get(query::query_all_spans_debug))
         .with_state(state);
 
     Ok(router)

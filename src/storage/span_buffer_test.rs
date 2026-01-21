@@ -1,4 +1,5 @@
 use super::*;
+use super::buffer::FlushCallback;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -14,7 +15,7 @@ impl FlushTracker {
         }
     }
 
-    fn create_callback(&self) -> Arc<FlushCallback> {
+    fn create_callback(&self) -> Arc<FlushCallback<SpanData>> {
         let tracker = self.flushed_batches.clone();
         Arc::new(move |spans: Vec<SpanData>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let tracker = tracker.clone();
@@ -63,7 +64,7 @@ async fn test_buffer_flushes_on_span_count_limit() {
         flush_interval_seconds: 3600,  // 1 hour (won't trigger)
     };
 
-    let buffer = SimpleSpanBuffer::new(config, tracker.create_callback());
+    let buffer = SimpleSpanBuffer::new(config, None, tracker.create_callback());
 
     // Add 5 spans - should trigger flush
     let mut spans = vec![];
@@ -90,7 +91,7 @@ async fn test_buffer_flushes_on_size_limit() {
         flush_interval_seconds: 3600,  // 1 hour (won't trigger)
     };
 
-    let buffer = SimpleSpanBuffer::new(config, tracker.create_callback());
+    let buffer = SimpleSpanBuffer::new(config, None, tracker.create_callback());
 
     // Add spans with large body size
     let spans = vec![
@@ -117,7 +118,7 @@ async fn test_buffer_flushes_on_time_interval() {
         flush_interval_seconds: 1,     // 1 second
     };
 
-    let buffer = SimpleSpanBuffer::new(config, tracker.create_callback());
+    let buffer = SimpleSpanBuffer::new(config, None, tracker.create_callback());
 
     // Add a few spans
     let spans = vec![
@@ -154,7 +155,7 @@ async fn test_spans_sorted_by_session_and_trace() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // Add spans in mixed order
     let spans = vec![
@@ -195,7 +196,7 @@ async fn test_buffer_stats() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = SimpleSpanBuffer::new(config, tracker.create_callback());
+    let buffer = SimpleSpanBuffer::new(config, None, tracker.create_callback());
 
     // Initially empty
     let stats = buffer.stats().await;
@@ -225,7 +226,7 @@ async fn test_concurrent_adds_no_lost_spans() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = Arc::new(SimpleSpanBuffer::new(config, tracker.create_callback()));
+    let buffer = Arc::new(SimpleSpanBuffer::new(config, None, tracker.create_callback()));
 
     // Spawn 10 concurrent tasks, each adding 1 span
     let mut handles = vec![];
@@ -273,7 +274,7 @@ async fn test_concurrent_adds_batch_sizes() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = Arc::new(SimpleSpanBuffer::new(config, tracker.create_callback()));
+    let buffer = Arc::new(SimpleSpanBuffer::new(config, None, tracker.create_callback()));
 
     // Spawn 20 concurrent tasks (should result in 4 flushes of 5 spans each)
     let mut handles = vec![];
@@ -321,7 +322,7 @@ async fn test_rapid_sequential_adds() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = SimpleSpanBuffer::new(config, tracker.create_callback());
+    let buffer = SimpleSpanBuffer::new(config, None, tracker.create_callback());
 
     // Rapidly add 50 spans sequentially
     for i in 0..50 {
@@ -359,7 +360,7 @@ async fn test_mixed_concurrent_sequential_adds() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = Arc::new(SimpleSpanBuffer::new(config, tracker.create_callback()));
+    let buffer = Arc::new(SimpleSpanBuffer::new(config, None, tracker.create_callback()));
 
     // Start with some sequential adds
     for i in 0..5 {

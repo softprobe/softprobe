@@ -21,9 +21,21 @@ pub struct TableWriter {
     table_ident: TableIdent,
 }
 
+fn is_retryable_commit_error(error_msg: &str) -> bool {
+    error_msg.contains("CatalogCommitConflicts")
+        || error_msg.contains("commit conflict")
+        || error_msg.contains("commit state is unknown")
+        || error_msg.contains("commit state unknown")
+}
+
 impl TableWriter {
     pub fn new(catalog: Arc<RestCatalog>, table_ident: TableIdent) -> Self {
         Self { catalog, table_ident }
+    }
+
+    pub async fn current_schema(&self) -> Result<Arc<IcebergSchema>> {
+        let table = self.catalog.load_table(&self.table_ident).await?;
+        Ok(table.metadata().current_schema().clone())
     }
 
     /// Write multiple batches to a single Parquet file with row groups
@@ -66,7 +78,7 @@ impl TableWriter {
                 Err(e) => {
                     let error_msg = e.to_string();
 
-                    if error_msg.contains("CatalogCommitConflicts") || error_msg.contains("commit conflict") {
+                    if is_retryable_commit_error(&error_msg) {
                         if retry_count < MAX_RETRIES {
                             retry_count += 1;
                             let backoff_ms = INITIAL_BACKOFF_MS * (2_u64.pow(retry_count - 1));
@@ -80,6 +92,65 @@ impl TableWriter {
                         }
                     } else {
                         error!("Failed to write batches: {}", error_msg);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write multiple RecordBatches to a single Parquet file with row groups
+    /// Each RecordBatch becomes a separate row group in the file.
+    pub async fn write_record_batches(
+        &self,
+        record_batches: Vec<RecordBatch>,
+    ) -> Result<()> {
+        if record_batches.is_empty() {
+            return Ok(());
+        }
+
+        let total_records: usize = record_batches.iter().map(|b| b.num_rows()).sum();
+        let batch_count = record_batches.len();
+        info!(
+            "Writing {} record batches ({} total records) to single Parquet file with {} row groups",
+            batch_count, total_records, batch_count
+        );
+
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+        let mut retry_count = 0;
+
+        loop {
+            match self.write_record_batches_inner(&record_batches).await {
+                Ok(()) => {
+                    if retry_count > 0 {
+                        info!(
+                            "Successfully wrote {} record batches to Iceberg after {} retries",
+                            batch_count, retry_count
+                        );
+                    } else {
+                        info!("Successfully wrote {} record batches to Iceberg", batch_count);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if is_retryable_commit_error(&error_msg) {
+                        if retry_count < MAX_RETRIES {
+                            retry_count += 1;
+                            let backoff_ms = INITIAL_BACKOFF_MS * (2_u64.pow(retry_count - 1));
+                            info!(
+                                "Catalog commit conflict, retrying ({}/{}) after {}ms",
+                                retry_count, MAX_RETRIES, backoff_ms
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        } else {
+                            error!("Failed after {} retries due to commit conflicts", MAX_RETRIES);
+                            return Err(e);
+                        }
+                    } else {
+                        error!("Failed to write record batches: {}", error_msg);
                         return Err(e);
                     }
                 }
@@ -161,6 +232,68 @@ impl TableWriter {
         info!("Closed writer, created {} data file(s)", data_files.len());
 
         // Add the data files to the table through a transaction
+        let transaction = Transaction::new(&table);
+        let action = transaction.fast_append().add_data_files(data_files);
+        let transaction = action.apply(transaction)?;
+        transaction.commit(self.catalog.as_ref()).await?;
+
+        Ok(())
+    }
+
+    async fn write_record_batches_inner(
+        &self,
+        record_batches: &[RecordBatch],
+    ) -> Result<()> {
+        let table = self.catalog.load_table(&self.table_ident).await?;
+
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
+        let file_name_generator = DefaultFileNameGenerator::new(
+            format!("batch_{}", batch_id),
+            None,
+            DataFileFormat::Parquet,
+        );
+
+        use parquet::basic::Compression;
+        let writer_props = parquet::file::properties::WriterProperties::builder()
+            .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
+            .build();
+
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            writer_props,
+            table.metadata().current_schema().clone(),
+            None,
+            table.file_io().clone(),
+            location_generator,
+            file_name_generator,
+        );
+
+        let partition_spec_id = table.metadata().default_partition_spec_id();
+        let first_record_batch = record_batches
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No record batches to write"))?;
+        let partition_value = extract_partition_value(first_record_batch)?;
+
+        let data_file_writer_builder = DataFileWriterBuilder::new(
+            parquet_writer_builder,
+            Some(partition_value.clone()),
+            partition_spec_id,
+        );
+        let mut data_file_writer = data_file_writer_builder.build().await?;
+
+        for (batch_idx, record_batch) in record_batches.iter().enumerate() {
+            debug!(
+                "Writing row group {}/{} with {} records",
+                batch_idx + 1,
+                record_batches.len(),
+                record_batch.num_rows()
+            );
+            data_file_writer.write(record_batch.clone()).await?;
+        }
+
+        let data_files = data_file_writer.close().await?;
+        info!("Closed writer, created {} data file(s)", data_files.len());
+
         let transaction = Transaction::new(&table);
         let action = transaction.fast_append().add_data_files(data_files);
         let transaction = action.apply(transaction)?;

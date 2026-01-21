@@ -3,8 +3,9 @@ use crate::config::Config;
 
 pub mod duckdb;
 
+#[derive(Clone)]
 pub struct QueryEngine {
-    pub duckdb: Arc<duckdb::DuckDBQueryEngine>,
+    duckdb: Arc<duckdb::DuckDBQueryEngine>,
 }
 
 pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine> {
@@ -15,3 +16,8 @@ pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine>
     })
 }
 
+impl QueryEngine {
+    pub async fn execute_query(&self, query: &str) -> anyhow::Result<duckdb::QueryResult> {
+        self.duckdb.execute_query(query).await
+    }
+}

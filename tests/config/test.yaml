@@ -12,6 +12,14 @@ span_buffering:
   max_buffer_spans: 1  # Flush after 1 span for testing
   flush_interval_seconds: 1  # Flush every second
 
+ingest_engine:
+  enabled: true
+  wal_bucket: warehouse
+  wal_prefix: wal
+  cache_dir: /var/tmp/softprobe/duckdb
+  optimizer_interval_seconds: 2
+  replay_wal_on_startup: false
+
 compaction:
   enabled: false
   min_files_to_compact: 5
@@ -32,8 +40,8 @@ s3:
 
 iceberg:
   catalog_type: rest
-  catalog_uri: http://localhost:8181
-  warehouse: s3://warehouse/iceberg  # MinIO warehouse path
+  catalog_uri: http://localhost:8181/catalog
+  warehouse: default  # Lakekeeper warehouse name
   write_target_file_size_bytes: 67108864
   write_row_group_size_bytes: 134217728
   write_page_size_bytes: 1048576

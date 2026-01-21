@@ -2,6 +2,7 @@ use softprobe_otlp_backend::api;
 use softprobe_otlp_backend::config::Config;
 use softprobe_otlp_backend::storage;
 use softprobe_otlp_backend::query;
+use softprobe_otlp_backend::models::Span as ModelSpan;
 use reqwest::StatusCode;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -15,15 +16,20 @@ use prost::Message;
 use std::path::{PathBuf};
 use std::fs;
 use uuid::Uuid;
-use arrow::array::{Array, StringArray};
-use futures::stream::StreamExt;
+use tempfile::{tempdir, TempDir};
 
-async fn start_test_server() -> String {
+async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
     // Use REST catalog for integration tests
     config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
     config.iceberg.force_close_after_append = true; // Force immediate commits for tests
+    config.ingest_engine.optimizer_interval_seconds = 3600;
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
     
     // Ensure MinIO/S3 env for REST catalog (dev-compose defaults)
     std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
@@ -31,12 +37,12 @@ async fn start_test_server() -> String {
     std::env::set_var("S3_SECRET_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");
 
-    // Initialize storage components
-    let storage = storage::create_storage(&config).await.unwrap();
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    let storage::IngestPipeline { storage, span_buffer, .. } = pipeline;
     let query_engine = query::create_query_engine(&config).await.unwrap();
-    
-    // Initialize span buffer
-    let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
     
     // Create router
     let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
@@ -56,7 +62,7 @@ async fn start_test_server() -> String {
     // Give the server a moment to start
     tokio::time::sleep(Duration::from_millis(100)).await;
     
-    base_url
+    (base_url, cache_dir)
 }
 
 fn create_test_otlp_request() -> ExportTraceServiceRequest {
@@ -185,7 +191,7 @@ fn create_test_otlp_request() -> ExportTraceServiceRequest {
 
 #[tokio::test]
 async fn test_health_endpoint() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let response = client
@@ -199,7 +205,7 @@ async fn test_health_endpoint() {
 
 #[tokio::test]
 async fn test_ready_endpoint() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let response = client
@@ -213,7 +219,7 @@ async fn test_ready_endpoint() {
 
 #[tokio::test]
 async fn test_traces_json_endpoint_success() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     let sid = format!("it-{}", Uuid::new_v4());
     let mut otlp_request = create_test_otlp_request();
@@ -244,7 +250,7 @@ async fn test_traces_json_endpoint_success() {
 
 #[tokio::test]
 async fn test_traces_protobuf_endpoint_success() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     let otlp_request = create_test_otlp_request();
 
@@ -269,7 +275,7 @@ async fn test_traces_protobuf_endpoint_success() {
 
 #[tokio::test]
 async fn test_traces_json_endpoint_multiple_spans() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     
     // Create request with multiple spans
@@ -319,7 +325,7 @@ async fn test_traces_json_endpoint_multiple_spans() {
 
 #[tokio::test]
 async fn test_traces_json_endpoint_empty_request() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     
     let empty_request = ExportTraceServiceRequest {
@@ -344,7 +350,7 @@ async fn test_traces_json_endpoint_empty_request() {
 
 #[tokio::test]
 async fn test_traces_json_endpoint_invalid_json() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let response = client
@@ -360,7 +366,7 @@ async fn test_traces_json_endpoint_invalid_json() {
 
 #[tokio::test]
 async fn test_traces_with_missing_app_id() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     
     // Create request without sp.app.id
@@ -394,7 +400,7 @@ async fn test_traces_with_missing_app_id() {
 
 #[tokio::test]
 async fn test_traces_session_grouping() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
     
     // Create multiple spans with the same session ID
@@ -446,7 +452,7 @@ async fn test_traces_session_grouping() {
 
 #[tokio::test] 
 async fn test_endpoint_not_found() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let response = client
@@ -465,9 +471,8 @@ async fn test_parquet_output_written_and_closed() {
     let warehouse_dir = repo_root.join("warehouse/iceberg");
     fs::create_dir_all(&warehouse_dir).unwrap();
 
-    // Set environment variables for REST catalog warehouse mapping
-    std::env::set_var("ICEBERG_REST_WAREHOUSE_URI_PREFIX", "s3://warehouse/iceberg");
-    std::env::set_var("ICEBERG_WAREHOUSE", "s3://warehouse/iceberg");
+    // Set warehouse name for Lakekeeper REST catalog
+    std::env::set_var("ICEBERG_WAREHOUSE", "default");
     std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
     std::env::set_var("S3_ACCESS_KEY", "minioadmin");
     std::env::set_var("S3_SECRET_KEY", "minioadmin");
@@ -476,9 +481,9 @@ async fn test_parquet_output_written_and_closed() {
     // Start server with REST catalog configuration
     let mut config = Config::default();
     config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181".to_string();
-    // Ensure writer uses the same warehouse URI as scanner
-    config.iceberg.warehouse = "s3://warehouse/iceberg".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    // Ensure writer uses the same Lakekeeper warehouse name as scanner
+    config.iceberg.warehouse = "default".to_string();
     // Provide S3 settings for client-side file IO to MinIO
     config.s3.endpoint = Some("http://localhost:9002".to_string());
     config.s3.access_key_id = Some("minioadmin".to_string());
@@ -487,10 +492,15 @@ async fn test_parquet_output_written_and_closed() {
     config.span_buffering.flush_interval_seconds = 1; // flush after 1s
     config.span_buffering.max_buffer_spans = 1; // flush after a single span
     config.iceberg.force_close_after_append = true; // Force immediate commits
+    config.ingest_engine.optimizer_interval_seconds = 3600;
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
 
-    let storage = storage::create_storage(&config).await.unwrap();
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    let storage::IngestPipeline { storage, span_buffer, .. } = pipeline;
+    let ingest_engine = storage.ingest_engine.clone();
     let query_engine = query::create_query_engine(&config).await.unwrap();
-    let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
+    let query_engine_handle = query_engine.clone();
     let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -539,73 +549,44 @@ async fn test_parquet_output_written_and_closed() {
         .unwrap();
     assert_eq!(response2.status(), StatusCode::OK);
 
-    // Wait a bit longer for commits to complete (avoid flakiness)
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    
-    // Query the table via Iceberg catalog to validate data was committed
-    use std::collections::HashMap;
-    use iceberg::{Catalog, CatalogBuilder};
-    use iceberg_catalog_rest::{
-        REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
-    };
-    use iceberg::TableIdent;
-    
-    let catalog = RestCatalogBuilder::default()
-        .load(
-            "rest",
-            HashMap::from([
-                (REST_CATALOG_PROP_URI.to_string(), "http://localhost:8181".to_string()),
-                (
-                    REST_CATALOG_PROP_WAREHOUSE.to_string(),
-                    std::env::var("ICEBERG_REST_WAREHOUSE_URI_PREFIX")
-                        .unwrap_or_else(|_| "s3://warehouse/iceberg".to_string()),
-                ),
-                ("s3.endpoint".to_string(), std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".to_string())),
-                ("s3.access-key-id".to_string(), std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string())),
-                ("s3.secret-access-key".to_string(), std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string())),
-                ("s3.region".to_string(), std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string())),
-            ]),
-        )
-        .await
-        .unwrap();
-    
-    let table_ident = TableIdent::from_strs(["default", "traces"])
-        .or_else(|_| TableIdent::from_strs(["traces"]))
-        .unwrap();
-    let table = match catalog.load_table(&table_ident).await {
-        Ok(t) => t,
-        Err(e) => {
-            panic!("Table 'traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/traces.sql. Error: {}", e);
+    // Wait longer for optimizer commits to complete (avoid flakiness)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    if let Some(engine) = ingest_engine.as_ref() {
+        for _ in 0..5 {
+            engine.run_optimizer_once().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-    };
+    }
     
-    // Retry loop to handle eventual consistency in object store/REST catalog
+    // Query through DuckDB SQL to validate data was committed.
+    let escaped_sid = sid.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped_sid
+    );
     let mut found = false;
-    let mut total_rows = 0;
-    for _ in 0..10 {
-        let scan = table.scan().build().unwrap();
-        let mut arrow_stream = scan.to_arrow().await.unwrap();
-        found = false;
-        total_rows = 0;
-        while let Some(batch_result) = arrow_stream.next().await {
-            let batch = batch_result.unwrap();
-            total_rows += batch.num_rows();
-            // Find session_id column
-            let schema = batch.schema();
-            if let Some((idx, _)) = schema.fields().iter().enumerate().find(|(_, f)| f.name() == "session_id") {
-                let col = batch.column(idx);
-                let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
-                for i in 0..arr.len() {
-                    if arr.value(i) == sid { found = true; break; }
-                }
-            }
-            if found { break; }
+    let mut total_rows = 0i64;
+    for _ in 0..25 {
+        let result = query_engine_handle.execute_query(&sql).await.unwrap();
+        total_rows = result
+            .rows
+            .get(0)
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        if total_rows > 0 {
+            found = true;
+            break;
         }
-        if found { break; }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    assert!(found, "expected session_id '{}' to be present in table. Found {} rows total.", sid, total_rows);
+    assert!(
+        found,
+        "expected session_id '{}' to be present in table. Found {} rows total.",
+        sid,
+        total_rows
+    );
 }
 
 #[tokio::test]
@@ -615,9 +596,8 @@ async fn test_multi_sessions_are_written_and_queryable() {
     let warehouse_dir = repo_root.join("warehouse/iceberg");
     fs::create_dir_all(&warehouse_dir).unwrap();
 
-    // Set environment variables for REST catalog warehouse mapping
-    std::env::set_var("ICEBERG_REST_WAREHOUSE_URI_PREFIX", "s3://warehouse/iceberg");
-    std::env::set_var("ICEBERG_WAREHOUSE", "s3://warehouse/iceberg");
+    // Set warehouse name for Lakekeeper REST catalog
+    std::env::set_var("ICEBERG_WAREHOUSE", "default");
     std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
     std::env::set_var("S3_ACCESS_KEY", "minioadmin");
     std::env::set_var("S3_SECRET_KEY", "minioadmin");
@@ -626,22 +606,25 @@ async fn test_multi_sessions_are_written_and_queryable() {
     // Start server with REST catalog configuration
     let mut config = Config::default();
     config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181".to_string();
-    // Ensure writer uses same warehouse and S3 settings as scanner
-    config.iceberg.warehouse = "s3://warehouse/iceberg".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    // Ensure writer uses same Lakekeeper warehouse name and S3 settings as scanner
+    config.iceberg.warehouse = "default".to_string();
     config.s3.endpoint = Some("http://localhost:9002".to_string());
     config.s3.access_key_id = Some("minioadmin".to_string());
     config.s3.secret_access_key = Some("minioadmin".to_string());
     config.storage.s3_region = "us-east-1".to_string();
-    // Use the default table; we filter results to our sessions to avoid data pollution
-    let table_name = "traces".to_string();
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.span_buffering.flush_interval_seconds = 1; // flush after 1s
     config.span_buffering.max_buffer_spans = 1; // flush after a single span
     config.iceberg.force_close_after_append = true; // Force immediate commits
+    config.ingest_engine.optimizer_interval_seconds = 3600;
 
-    let storage = storage::create_storage(&config).await.unwrap();
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    let storage::IngestPipeline { storage, span_buffer, .. } = pipeline;
+    let ingest_engine = storage.ingest_engine.clone();
     let query_engine = query::create_query_engine(&config).await.unwrap();
-    let span_buffer = storage::create_span_buffer(&config, storage.iceberg_writer.clone()).await.unwrap();
+    let query_engine_handle = query_engine.clone();
     let app = api::create_router(storage, query_engine, Some(span_buffer), None, None).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -690,78 +673,417 @@ async fn test_multi_sessions_are_written_and_queryable() {
     assert_eq!(r3.status(), StatusCode::OK);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Wait a bit for commits to complete
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    // Query the table via Iceberg catalog to validate data was committed
-    use std::collections::HashMap;
-    use iceberg::{Catalog, CatalogBuilder};
-    use iceberg_catalog_rest::{
-        REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
-    };
-    use iceberg::TableIdent;
-    
-    let catalog = RestCatalogBuilder::default()
-        .load(
-            "rest",
-            HashMap::from([
-                (REST_CATALOG_PROP_URI.to_string(), "http://localhost:8181".to_string()),
-                (
-                    REST_CATALOG_PROP_WAREHOUSE.to_string(),
-                    std::env::var("ICEBERG_REST_WAREHOUSE_URI_PREFIX")
-                        .unwrap_or_else(|_| "s3://warehouse/iceberg".to_string()),
-                ),
-                ("s3.endpoint".to_string(), std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".to_string())),
-                ("s3.access-key-id".to_string(), std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string())),
-                ("s3.secret-access-key".to_string(), std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string())),
-                ("s3.region".to_string(), std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string())),
-            ]),
-        )
-        .await
-        .unwrap();
-    
-    let table_ident = TableIdent::from_strs(["default", table_name.as_str()])
-        .or_else(|_| TableIdent::from_strs([table_name.as_str()]))
-        .unwrap();
-    let table = match catalog.load_table(&table_ident).await {
-        Ok(t) => t,
-        Err(e) => {
-            panic!("Table 'traces' does not exist in REST catalog. Please create it using the DDL in schemas/iceberg/traces.sql. Error: {}", e);
+    // Wait for optimizer ticks to commit buffered batches
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    if let Some(engine) = ingest_engine.as_ref() {
+        for _ in 0..5 {
+            engine.run_optimizer_once().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-    };
+    }
     
-    // Retry and only count rows for our three generated sessions to avoid pre-existing data
-    let target_sessions: std::collections::HashSet<String> = std::collections::HashSet::from_iter([s1.clone(), s2.clone(), s3.clone()]);
-    let mut filtered_total_rows = 0usize;
-    let mut filtered_found_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Query via DuckDB SQL and only count rows for our three generated sessions.
+    let s1_escaped = s1.replace('\'', "''");
+    let s2_escaped = s2.replace('\'', "''");
+    let s3_escaped = s3.replace('\'', "''");
+    let sql = format!(
+        "SELECT session_id FROM union_spans WHERE session_id IN ('{}', '{}', '{}') GROUP BY session_id",
+        s1_escaped, s2_escaped, s3_escaped
+    );
+    let mut found_sessions = std::collections::HashSet::new();
     let mut success = false;
     for _ in 0..10 {
-        // Rebuild the scan each iteration to observe new commits
-        let scan = table.scan().build().unwrap();
-        filtered_total_rows = 0;
-        filtered_found_sessions.clear();
-        let mut arrow_stream = scan.to_arrow().await.unwrap();
-        while let Some(batch_result) = arrow_stream.next().await {
-            let batch = batch_result.unwrap();
-            // Find session_id column
-            let schema = batch.schema();
-            if let Some((idx, _)) = schema.fields().iter().enumerate().find(|(_, f)| f.name() == "session_id") {
-                let col = batch.column(idx);
-                let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
-                for i in 0..arr.len() {
-                    let sid = arr.value(i);
-                    if target_sessions.contains(sid) {
-                        filtered_total_rows += 1;
-                        filtered_found_sessions.insert(sid.to_string());
-                    }
-                }
+        let result = query_engine_handle.execute_query(&sql).await.unwrap();
+        found_sessions.clear();
+        for row in result.rows.iter() {
+            if let Some(session) = row.get(0).and_then(|value| value.as_str()) {
+                found_sessions.insert(session.to_string());
             }
         }
-        if filtered_total_rows == 3 && filtered_found_sessions.len() == 3 {
+        if found_sessions.len() == 3 {
             success = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(success, "Expected exactly 3 rows from 3 sessions, found {} rows and sessions {:?}. This may indicate test isolation issues or eventual consistency delays.", filtered_total_rows, filtered_found_sessions);
+    assert!(
+        success,
+        "Expected 3 sessions via SQL union view, found {:?}",
+        found_sessions
+    );
+}
+
+#[tokio::test]
+async fn test_union_read_sql_reads_flushed_span() {
+    let mut config = Config::default();
+    config.iceberg.catalog_type = "rest".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
+    config.ingest_engine.optimizer_interval_seconds = 60;
+    config.span_buffering.flush_interval_seconds = 1;
+    config.span_buffering.max_buffer_spans = 1;
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    let storage::IngestPipeline { storage, span_buffer, .. } = pipeline;
+    let query_engine = query::create_query_engine(&config).await.unwrap();
+    let query_engine_handle = query_engine.clone();
+    let app = api::create_router(storage, query_engine, Some(span_buffer), None, None)
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await.unwrap(); });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut otlp_request = create_test_otlp_request();
+    let session_id = format!("sql-flush-{}", Uuid::new_v4());
+    let expected_span_id = vec![0xaa; 8];
+    {
+        let span = &mut otlp_request.resource_spans[0].scope_spans[0].spans[0];
+        span.span_id = expected_span_id.clone();
+        if let Some(kv) = span.attributes.iter_mut().find(|kv| kv.key == "sp.session.id") {
+            kv.value = Some(AnyValue {
+                value: Some(any_value::Value::StringValue(session_id.clone())),
+            });
+        }
+    }
+
+    let client = Client::new();
+    let response = client
+        .post(&format!("{}/v1/traces", base_url))
+        .header("content-type", "application/json")
+        .json(&otlp_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        session_id.replace('\'', "''")
+    );
+    let result = query_engine_handle.execute_query(&sql).await.unwrap();
+    let count = result.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(count, 1, "Expected flushed span to be visible via SQL union view");
+}
+
+#[tokio::test]
+async fn test_duckdb_union_read_from_local_wal() {
+    let cache_dir = tempdir().unwrap();
+    let cache_path = cache_dir.path().to_path_buf();
+
+    std::env::set_var("ICEBERG_WAREHOUSE", "default");
+    std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
+    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
+    std::env::set_var("S3_SECRET_KEY", "minioadmin");
+    std::env::set_var("AWS_REGION", "us-east-1");
+
+    let mut config = Config::default();
+    config.iceberg.catalog_type = "rest".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
+    config.ingest_engine.cache_dir = Some(cache_path.to_string_lossy().to_string());
+    config.ingest_engine.enabled = true;
+
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    let query_engine = query::create_query_engine(&config).await.unwrap();
+
+    let session_id = format!("wal-duckdb-{}", Uuid::new_v4());
+    let now = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let span = ModelSpan {
+        session_id: session_id.clone(),
+        trace_id: "trace-wal-duckdb".to_string(),
+        span_id: "span-wal-duckdb".to_string(),
+        parent_span_id: None,
+        app_id: "app-wal-duckdb".to_string(),
+        organization_id: None,
+        tenant_id: None,
+        message_type: "span".to_string(),
+        span_kind: Some("server".to_string()),
+        timestamp: now,
+        end_timestamp: Some(now),
+        attributes: std::collections::HashMap::new(),
+        events: Vec::new(),
+        status_code: None,
+        status_message: None,
+        http_request_method: None,
+        http_request_path: None,
+        http_request_headers: None,
+        http_request_body: None,
+        http_response_status_code: None,
+        http_response_headers: None,
+        http_response_body: None,
+    };
+
+    pipeline.write_wal_spans(vec![span], 128).await.unwrap();
+
+    let escaped_session = session_id.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped_session
+    );
+    let result = query_engine.execute_query(&sql).await.unwrap();
+
+    assert_eq!(result.row_count, 1);
+    let count = result.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(count, 1, "Expected WAL-backed union_read to see 1 row");
+}
+
+#[tokio::test]
+async fn test_wal_replay_recovers_spans() {
+    std::env::set_var("ICEBERG_WAREHOUSE", "default");
+    std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
+    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
+    std::env::set_var("S3_SECRET_KEY", "minioadmin");
+    std::env::set_var("AWS_REGION", "us-east-1");
+
+    let mut config = Config::default();
+    config.iceberg.catalog_type = "rest".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
+    config.ingest_engine.optimizer_interval_seconds = 1;
+    config.ingest_engine.wal_prefix = format!("test-wal-{}", Uuid::new_v4().simple());
+    config.ingest_engine.enabled = true;
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+
+    let session_id = format!("replay-{}", Uuid::new_v4());
+    let now = chrono::Utc::now();
+    let span = ModelSpan {
+        session_id: session_id.clone(),
+        trace_id: "trace-replay".to_string(),
+        span_id: "span-replay".to_string(),
+        parent_span_id: None,
+        app_id: "app-replay".to_string(),
+        organization_id: None,
+        tenant_id: None,
+        message_type: "span".to_string(),
+        span_kind: Some("server".to_string()),
+        timestamp: now,
+        end_timestamp: Some(now),
+        attributes: std::collections::HashMap::new(),
+        events: Vec::new(),
+        status_code: None,
+        status_message: None,
+        http_request_method: None,
+        http_request_path: None,
+        http_request_headers: None,
+        http_request_body: None,
+        http_response_status_code: None,
+        http_response_headers: None,
+        http_response_body: None,
+    };
+
+    config.ingest_engine.replay_wal_on_startup = false;
+    let pipeline = storage::IngestPipeline::new(&config).await.unwrap();
+    pipeline.write_wal_spans(vec![span], 128).await.unwrap();
+    drop(pipeline);
+
+    config.ingest_engine.replay_wal_on_startup = true;
+    let storage = storage::create_storage(&config).await.unwrap();
+    if let Some(engine) = storage.ingest_engine.as_ref() {
+        engine.run_optimizer_once().await.unwrap();
+    }
+    let query_engine = query::create_query_engine(&config).await.unwrap();
+
+    let wal_count = storage
+        .ingest_engine
+        .as_ref()
+        .and_then(|engine| engine.list_wal_files("spans").ok())
+        .map(|files| files.len())
+        .unwrap_or(0);
+    assert!(wal_count >= 1, "Expected at least one WAL entry, found {}", wal_count);
+
+    let escaped_session = session_id.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped_session
+    );
+    let mut found = false;
+    for _ in 0..30 {
+        let result = query_engine.execute_query(&sql).await.unwrap();
+        let count = result
+            .rows
+            .get(0)
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        if count > 0 {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    assert!(found, "Expected WAL replay to commit session_id {}", session_id);
+}
+
+#[tokio::test]
+async fn test_metadata_maintenance_job_expires_snapshots() {
+    use std::collections::HashMap;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use iceberg::{Catalog, TableCreation, TableIdent};
+    use softprobe_otlp_backend::compaction::executor::{ActionStatus, CompactionStatus, MaintenanceExecutor};
+    use softprobe_otlp_backend::models::Span as ModelSpan;
+    use softprobe_otlp_backend::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
+
+    std::env::set_var("ICEBERG_WAREHOUSE", "default");
+    std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
+    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
+    std::env::set_var("S3_SECRET_KEY", "minioadmin");
+    std::env::set_var("AWS_REGION", "us-east-1");
+
+    let mut config = Config::default();
+    config.iceberg.catalog_type = "rest".to_string();
+    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
+    config.iceberg.warehouse = "default".to_string();
+    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.access_key_id = Some("minioadmin".to_string());
+    config.s3.secret_access_key = Some("minioadmin".to_string());
+    config.storage.s3_region = "us-east-1".to_string();
+    config.compaction.enabled = true;
+    config.compaction.min_files_to_compact = 1;
+    config.compaction.metadata_maintenance_enabled = true;
+    config.compaction.metadata_min_snapshots_to_keep = 1;
+    config.compaction.metadata_max_snapshot_age_seconds = 0;
+
+    let catalog = IcebergCatalog::new(&config).await.unwrap();
+    let namespace = iceberg::NamespaceIdent::from_strs(["default"]).unwrap();
+    let _ = catalog
+        .catalog()
+        .create_namespace(&namespace, HashMap::new())
+        .await;
+
+    let table_name = format!("traces_maintenance_{}", Uuid::new_v4().simple());
+    let table_ident = TableIdent::from_strs(["default", table_name.as_str()]).unwrap();
+
+    let schema = TraceTable::schema();
+    let partition_spec = TraceTable::partition_spec(&schema).unwrap();
+    let sort_order = TraceTable::sort_order(&schema).unwrap();
+    let properties = TraceTable::table_properties();
+    let creation = TableCreation::builder()
+        .name(table_name.clone())
+        .schema(schema)
+        .partition_spec(partition_spec)
+        .sort_order(sort_order)
+        .properties(properties)
+        .build();
+    catalog
+        .catalog()
+        .create_table(&namespace, creation)
+        .await
+        .unwrap();
+
+    let writer = TableWriter::new(catalog.catalog().clone(), table_ident.clone());
+    let base_time = Utc::now();
+    for offset in 0..3 {
+        let timestamp = base_time + ChronoDuration::seconds(offset);
+        let span = ModelSpan {
+            session_id: format!("maint-{}", offset),
+            trace_id: format!("trace-{}", offset),
+            span_id: format!("span-{}", offset),
+            parent_span_id: None,
+            app_id: "app-test".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "span".to_string(),
+            span_kind: Some("server".to_string()),
+            timestamp,
+            end_timestamp: Some(timestamp + ChronoDuration::seconds(1)),
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            status_code: Some("OK".to_string()),
+            status_message: None,
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+        };
+        writer
+            .write_batches(vec![vec![span]], ModelSpan::to_record_batch)
+            .await
+            .unwrap();
+    }
+
+    let table_before = catalog.catalog().load_table(&table_ident).await.unwrap();
+    let snapshot_count_before = table_before.metadata().snapshots().count();
+    assert!(
+        snapshot_count_before >= 3,
+        "Expected at least 3 snapshots, found {}",
+        snapshot_count_before
+    );
+
+    let executor = MaintenanceExecutor::new(&config).await.unwrap();
+    let summary = executor
+        .run_once_for_tables(&[table_ident.clone()])
+        .await
+        .unwrap();
+    let result = summary.tables.first().unwrap();
+    assert!(
+        result.metadata.expired_snapshots >= 2,
+        "Expected at least 2 snapshots expired, found {}",
+        result.metadata.expired_snapshots
+    );
+    assert!(
+        matches!(
+            result.compaction.status,
+            CompactionStatus::Completed | CompactionStatus::Unsupported
+        ),
+        "Unexpected compaction status"
+    );
+    assert!(
+        matches!(
+            result.rewrite_manifests.status,
+            ActionStatus::Completed | ActionStatus::Unsupported
+        ),
+        "Unexpected rewrite manifests status"
+    );
+    assert!(
+        matches!(
+            result.remove_orphan_files.status,
+            ActionStatus::Completed | ActionStatus::Unsupported
+        ),
+        "Unexpected remove orphan files status"
+    );
+
+    let mut remaining = snapshot_count_before;
+    for _ in 0..10 {
+        let table_after = catalog.catalog().load_table(&table_ident).await.unwrap();
+        remaining = table_after.metadata().snapshots().count();
+        if remaining <= config.compaction.metadata_min_snapshots_to_keep {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        remaining <= config.compaction.metadata_min_snapshots_to_keep,
+        "Expected snapshot count <= {}, found {}",
+        config.compaction.metadata_min_snapshots_to_keep,
+        remaining
+    );
+
+    let _ = catalog.catalog().drop_table(&table_ident).await;
 }

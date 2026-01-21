@@ -29,7 +29,7 @@ async fn test_multiple_sessions_sorted_correctly() {
         flush_interval_seconds: 3600,
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // Create 20 spans with 3 different session_ids, 2 trace_ids per session
     // Insert them in INTENTIONALLY UNSORTED order to verify sorting works
@@ -235,7 +235,7 @@ async fn test_1000_spans_same_session_triggers_flush() {
         flush_interval_seconds: 3600,         // 1 hour (won't trigger)
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // Send 1000 spans with THE SAME session_id
     let session_id = "test-session-fixed";
@@ -309,7 +309,7 @@ async fn test_1000_spans_different_sessions_no_premature_flush() {
         flush_interval_seconds: 3600,         // Won't trigger
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // Send 1000 spans with DIFFERENT session_ids (old problematic scenario)
     for i in 0..1000 {
@@ -367,7 +367,7 @@ async fn test_size_based_flush_with_request_body_tracking() {
         flush_interval_seconds: 3600, // Won't trigger
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // First batch: 3KB (under limit)
     let mut spans1 = vec![];
@@ -451,7 +451,7 @@ async fn test_time_based_flush() {
         flush_interval_seconds: 1, // 1 second - will trigger
     };
 
-    let buffer = SimpleSpanBuffer::new(config, callback);
+    let buffer = SimpleSpanBuffer::new(config, None, callback);
 
     // Add a few spans
     let mut spans = vec![];

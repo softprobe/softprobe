@@ -34,6 +34,15 @@ SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := t
 CREATE OR REPLACE VIEW metrics AS
 SELECT * FROM iceberg_scan('s3://warehouse/default/metrics', allow_moved_paths := true);
 
+-- 1. Create a helper to find the latest metadata file from S3
+CREATE OR REPLACE TEMP TABLE latest_meta AS 
+FROM glob('s3://warehouse/default/traces/metadata/*.metadata.json') 
+SELECT file_name ORDER BY file_name DESC LIMIT 1;
+
+-- 2. Create a macro so you can just type 'checkpoint_traces()'
+CREATE OR REPLACE MACRO checkpoint_traces() AS TABLE 
+SELECT * FROM iceberg_snapshots((SELECT file_name FROM latest_meta));
+
 .print ''
 .print 'Available views:'
 .print '  - traces'

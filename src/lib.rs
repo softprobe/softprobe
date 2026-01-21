@@ -4,3 +4,5 @@ pub mod models;
 pub mod storage;
 pub mod query;
 pub mod config;
+pub mod compaction;
+pub mod ingest_engine;

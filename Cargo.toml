@@ -20,6 +20,7 @@ futures = "0.3"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bytes = "1"
 
 # OpenTelemetry Protocol
 opentelemetry-proto = "0.7"
@@ -34,10 +35,10 @@ tonic = { version = "0.12", features = ["gzip"] }
 # Iceberg (optional integration via feature)
 iceberg = { version = "0.7", optional = true, features = ["storage-all"] }
 iceberg-catalog-rest = { version = "0.7", optional = true }
-object_store = { version = "0.9", optional = true }
+object_store = { version = "0.9", optional = true, features = ["aws"] }
 
-# DuckDB (optional for now)
-# duckdb = { version = "1.0", features = ["bundled"] }
+# DuckDB
+duckdb = { version = "1.0", features = ["bundled"] }
 
 # Configuration YAML
 serde_yaml = "0.9"
@@ -72,6 +73,8 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 dashmap = "5.5"  # Concurrent HashMap for caching
 once_cell = "1.19"
 hex = "0.4"
+base64 = "0.22"
+flate2 = "1.0"
 
 # HTTP client for binaries (upgraded to 0.12 to match iceberg-catalog-rest)
 reqwest = { version = "0.12", features = ["json"] }
@@ -104,5 +107,3 @@ debug = true
 [features]
 default = ["iceberg_catalog"]
 iceberg_catalog = ["iceberg", "iceberg-catalog-rest", "object_store"]
-
-

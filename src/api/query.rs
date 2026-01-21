@@ -1,4 +1,4 @@
-use axum::{extract::{State, Path}, Json, http::StatusCode};
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
@@ -77,7 +77,7 @@ pub async fn query_recordings(
 ) -> Json<QueryResponse> {
     // TODO: Implement query logic using DuckDB (Phase 1.2)
     // - Build SQL query with partition pruning (app_id, record_date, category_type)
-    // - Execute query via state.query_engine.duckdb.query_metadata()
+    // - Execute query via state.query_engine.execute_query()
     // - Return metadata records with payload_file_uri, payload_file_offset, payload_row_group_index
     // See: docs/migration-to-iceberg-design.md lines 993-1004 for query pattern
     
@@ -102,62 +102,4 @@ pub async fn retrieve_payloads(
     Json(RetrieveResponse {
         payloads: vec![],
     })
-}
-
-/// Response for session query
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionQueryResponse {
-    pub session_id: String,
-    pub spans: Vec<SpanData>,
-    pub total_count: usize,
-}
-
-/// Span data returned from query
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SpanData {
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub app_id: String,
-    pub organization_id: Option<String>,
-    pub tenant_id: Option<String>,
-    pub message_type: String,
-    pub span_kind: Option<String>,
-    pub timestamp: String,
-    pub end_timestamp: Option<String>,
-    pub attributes: serde_json::Value,
-    pub events: Vec<serde_json::Value>,
-    pub status_code: Option<String>,
-    pub status_message: Option<String>,
-}
-
-/// Query all spans for a given session_id
-/// GET /v1/query/session/{session_id}
-pub async fn query_session_by_id(
-    State(_state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<SessionQueryResponse>, (StatusCode, String)> {
-    tracing::info!("Querying spans for session_id: {}", session_id);
-
-    // TODO: Re-implement query methods in refactored Iceberg module
-    tracing::warn!("Query methods not yet implemented after refactoring");
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "Query functionality temporarily disabled during refactoring".to_string(),
-    ))
-}
-
-/// Debug endpoint: Query all spans (no filter) to test table visibility
-/// GET /v1/query/debug/all
-pub async fn query_all_spans_debug(
-    State(_state): State<AppState>,
-) -> Result<Json<SessionQueryResponse>, (StatusCode, String)> {
-    tracing::info!("DEBUG: Querying all spans (no predicate) with limit 100");
-
-    // TODO: Re-implement query methods in refactored Iceberg module
-    tracing::warn!("Query methods not yet implemented after refactoring");
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "Query functionality temporarily disabled during refactoring".to_string(),
-    ))
 }

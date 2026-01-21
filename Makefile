@@ -91,8 +91,8 @@ clean:
 # Local infrastructure management
 setup-local:
 	@echo "🚀 Starting local test infrastructure..."
-	@echo "📦 Starting MinIO and Iceberg REST catalog..."
-	@docker-compose up -d minio iceberg-rest
+	@echo "📦 Starting MinIO and Lakekeeper REST catalog..."
+	@docker-compose up -d minio db migrate lakekeeper
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
@@ -103,24 +103,64 @@ setup-local:
 		(docker exec minio mc ls local/warehouse > /dev/null 2>&1 && echo "✅ Bucket 'warehouse' already exists") || \
 		(echo "❌ Failed to create or verify bucket 'warehouse'" && exit 1)
 	@echo "✅ Bucket 'warehouse' is ready"
-	@echo "✅ Checking Iceberg REST health..."
-	@curl -sf http://localhost:8181/v1/config > /dev/null || (echo "❌ Iceberg REST not ready" && exit 1)
+	@echo "✅ Checking Lakekeeper REST health..."
+	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 || (echo "❌ Lakekeeper REST not ready" && exit 1)
+	@echo "🔧 Bootstrapping Lakekeeper (if needed)..."
+	@bootstrap_status=$$(curl -s -o /tmp/lakekeeper_bootstrap.json -w "%{http_code}" -X POST http://localhost:8181/management/v1/bootstrap \
+		-H "Content-Type: application/json" \
+		-d '{"accept-terms-of-use": true}'); \
+	if [ "$$bootstrap_status" = "204" ] || \
+		([ "$$bootstrap_status" = "400" ] && grep -q "CatalogAlreadyBootstrapped" /tmp/lakekeeper_bootstrap.json); then \
+		echo "✅ Lakekeeper bootstrapped"; \
+	else \
+		echo "❌ Lakekeeper bootstrap failed (HTTP $$bootstrap_status)"; \
+		cat /tmp/lakekeeper_bootstrap.json; \
+		exit 1; \
+	fi
+	@echo "🧊 Creating Lakekeeper warehouse 'default' (if needed)..."
+	@warehouse_status=$$(curl -s -o /tmp/lakekeeper_warehouse.json -w "%{http_code}" -X POST http://localhost:8181/management/v1/warehouse \
+		-H "Content-Type: application/json" \
+		-d '{"warehouse-name":"default","project-id":"00000000-0000-0000-0000-000000000000","storage-profile":{"type":"s3","bucket":"warehouse","key-prefix":"iceberg","endpoint":"http://minio:9000","region":"us-east-1","path-style-access":true,"flavor":"minio","sts-enabled":false},"storage-credential":{"type":"s3","credential-type":"access-key","aws-access-key-id":"minioadmin","aws-secret-access-key":"minioadmin"}}'); \
+	if [ "$$warehouse_status" = "201" ] || \
+		([ "$$warehouse_status" = "400" ] && (grep -q "CreateWarehouseStorageProfileOverlap" /tmp/lakekeeper_warehouse.json || grep -q "WarehouseAlreadyExists" /tmp/lakekeeper_warehouse.json)); then \
+		echo "✅ Warehouse 'default' is ready"; \
+	else \
+		echo "❌ Warehouse creation failed (HTTP $$warehouse_status)"; \
+		cat /tmp/lakekeeper_warehouse.json; \
+		exit 1; \
+	fi
+	@echo "🔐 Ensuring Lakekeeper storage credentials use static keys..."
+	@warehouse_id=$$(curl -s http://localhost:8181/management/v1/warehouse | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((w.get("id") or w.get("warehouse-id") for w in data.get("warehouses", []) if w.get("name")=="default"), ""))'); \
+	if [ -z "$$warehouse_id" ]; then \
+		echo "❌ Unable to resolve Lakekeeper warehouse ID"; \
+		exit 1; \
+	fi; \
+	storage_status=$$(curl -s -o /tmp/lakekeeper_storage.json -w "%{http_code}" -X POST "http://localhost:8181/management/v1/warehouse/$$warehouse_id/storage" \
+		-H "Content-Type: application/json" \
+		-d '{"storage-profile":{"type":"s3","bucket":"warehouse","key-prefix":"iceberg","endpoint":"http://minio:9000","region":"us-east-1","path-style-access":true,"flavor":"minio","sts-enabled":false},"storage-credential":{"type":"s3","credential-type":"access-key","aws-access-key-id":"minioadmin","aws-secret-access-key":"minioadmin"}}'); \
+	if [ "$$storage_status" = "200" ]; then \
+		echo "✅ Lakekeeper storage profile updated"; \
+	else \
+		echo "❌ Lakekeeper storage update failed (HTTP $$storage_status)"; \
+		cat /tmp/lakekeeper_storage.json; \
+		exit 1; \
+	fi
 	@echo "✅ Local test infrastructure is ready!"
 	@echo ""
 	@echo "Services available:"
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  - MinIO API: http://localhost:9002"
-	@echo "  - Iceberg REST: http://localhost:8181"
+	@echo "  - Lakekeeper REST: http://localhost:8181/catalog"
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."
-	@cd .. && docker-compose down
+	@docker-compose down
 	@echo "✅ Local infrastructure stopped"
 
 check-local:
 	@echo "🔍 Checking local infrastructure..."
 	@curl -sf http://localhost:9002/minio/health/live > /dev/null && echo "✅ MinIO is running" || echo "❌ MinIO is not running (run 'make setup-local')"
-	@curl -sf http://localhost:8181/v1/config > /dev/null && echo "✅ Iceberg REST is running" || echo "❌ Iceberg REST is not running (run 'make setup-local')"
+	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 && echo "✅ Lakekeeper REST is running" || echo "❌ Lakekeeper REST is not running (run 'make setup-local')"
 
 # Test targets
 test-quick:
@@ -130,7 +170,7 @@ test-quick:
 test-local: check-local
 	@echo "🧪 Running integration tests with local MinIO..."
 	@echo "📝 Configuration: tests/config/test.yaml"
-	@echo "🗄️  Backend: MinIO (localhost:9002) + Iceberg REST (localhost:8181)"
+	@echo "🗄️  Backend: MinIO (localhost:9002) + Lakekeeper REST (localhost:8181)"
 	@echo ""
 	ICEBERG_TEST_TYPE=local cargo test --test iceberg_integration_test -- --test-threads=1 --nocapture
 
@@ -159,8 +199,8 @@ test-ci:
 	@echo "🧪 Running tests in CI environment..."
 	@echo "🔍 Auto-detecting environment and requirements..."
 	@# In CI, we expect services to be available via docker-compose or service containers
-	@if curl -sf http://localhost:8181/v1/config > /dev/null 2>&1; then \
-		echo "✅ Iceberg REST catalog detected"; \
+	@if curl -sf http://localhost:8181/catalog/v1/config?warehouse=default > /dev/null 2>&1; then \
+		echo "✅ Lakekeeper REST catalog detected"; \
 		echo "🧪 Running integration tests with local catalog..."; \
 		ICEBERG_TEST_TYPE=local cargo test --test iceberg_integration_test -- --test-threads=1; \
 	else \

@@ -23,6 +23,14 @@ span_buffering:
   max_buffer_bytes: 134217728  # Production: 128MB
   flush_interval_seconds: 60  # Production: 60s timeout
 
+ingest_engine:
+  enabled: true
+  wal_bucket: "softprobe-iceberg-warehouse"
+  wal_prefix: "wal"
+  cache_dir: "/var/tmp/softprobe/duckdb"
+  optimizer_interval_seconds: 300
+  replay_wal_on_startup: false
+
 compaction:
   enabled: true
   min_files_to_compact: 5

@@ -6,6 +6,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub span_buffering: SpanBufferConfig,
+    pub ingest_engine: IngestEngineConfig,
     pub compaction: CompactionConfig,
     pub duckdb: DuckDBConfig,
     pub s3: S3Config,
@@ -33,11 +34,45 @@ pub struct SpanBufferConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestEngineConfig {
+    #[serde(default = "default_ingest_engine_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_wal_bucket")]
+    pub wal_bucket: String,
+    #[serde(default = "default_wal_prefix")]
+    pub wal_prefix: String,
+    #[serde(default = "default_ingest_cache_dir")]
+    pub cache_dir: Option<String>,
+    #[serde(default = "default_wal_manifest_update_interval_seconds")]
+    pub wal_manifest_update_interval_seconds: u64,
+    #[serde(default = "default_wal_manifest_max_pending_files")]
+    pub wal_manifest_max_pending_files: usize,
+    #[serde(default = "default_optimizer_interval_seconds")]
+    pub optimizer_interval_seconds: u64,
+    #[serde(default)]
+    pub replay_wal_on_startup: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     pub enabled: bool,
     pub min_files_to_compact: usize,         // 5
     pub target_file_size_bytes: usize,      // 64MB
     pub compaction_interval_seconds: u64,   // 3600 (1 hour)
+    #[serde(default = "default_metadata_maintenance_enabled")]
+    pub metadata_maintenance_enabled: bool,
+    #[serde(default = "default_metadata_maintenance_interval_seconds")]
+    pub metadata_maintenance_interval_seconds: u64,
+    #[serde(default = "default_metadata_min_snapshots_to_keep")]
+    pub metadata_min_snapshots_to_keep: usize,
+    #[serde(default = "default_metadata_max_snapshot_age_seconds")]
+    pub metadata_max_snapshot_age_seconds: u64,
+    #[serde(default = "default_metadata_rewrite_manifests_enabled")]
+    pub metadata_rewrite_manifests_enabled: bool,
+    #[serde(default = "default_metadata_remove_orphan_files_enabled")]
+    pub metadata_remove_orphan_files_enabled: bool,
+    #[serde(default = "default_metadata_remove_orphan_older_than_seconds")]
+    pub metadata_remove_orphan_older_than_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +97,8 @@ pub struct IcebergConfig {
     pub catalog_uri: String,
     #[serde(default)]
     pub catalog_token: Option<String>,       // Bearer token for REST catalog (e.g., Cloudflare R2)
+    #[serde(default = "default_iceberg_namespace")]
+    pub namespace: String,
     #[serde(default = "default_warehouse")]
     pub warehouse: String,                   // Warehouse location (s3://path or warehouse ID)
     pub write_target_file_size_bytes: usize, // 64MB
@@ -72,6 +109,66 @@ pub struct IcebergConfig {
 
 fn default_warehouse() -> String {
     "s3://warehouse".to_string()
+}
+
+fn default_iceberg_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_metadata_maintenance_enabled() -> bool {
+    true
+}
+
+fn default_ingest_engine_enabled() -> bool {
+    true
+}
+
+fn default_wal_bucket() -> String {
+    "warehouse".to_string()
+}
+
+fn default_wal_prefix() -> String {
+    "wal".to_string()
+}
+
+fn default_ingest_cache_dir() -> Option<String> {
+    Some("/var/tmp/softprobe/duckdb".to_string())
+}
+
+fn default_wal_manifest_update_interval_seconds() -> u64 {
+    10
+}
+
+fn default_wal_manifest_max_pending_files() -> usize {
+    500
+}
+
+fn default_optimizer_interval_seconds() -> u64 {
+    300
+}
+
+fn default_metadata_maintenance_interval_seconds() -> u64 {
+    3600
+}
+
+fn default_metadata_min_snapshots_to_keep() -> usize {
+    5
+}
+
+fn default_metadata_max_snapshot_age_seconds() -> u64 {
+    7 * 24 * 3600
+}
+
+fn default_metadata_rewrite_manifests_enabled() -> bool {
+    true
+}
+
+fn default_metadata_remove_orphan_files_enabled() -> bool {
+    true
+}
+
+fn default_metadata_remove_orphan_older_than_seconds() -> u64 {
+    3600
 }
 
 impl Default for Config {
@@ -91,11 +188,28 @@ impl Default for Config {
                 max_buffer_spans: 10000, // 10K spans
                 flush_interval_seconds: 60,
             },
+            ingest_engine: IngestEngineConfig {
+                enabled: true,
+                wal_bucket: "warehouse".to_string(),
+                wal_prefix: "wal".to_string(),
+                cache_dir: default_ingest_cache_dir(),
+                wal_manifest_update_interval_seconds: default_wal_manifest_update_interval_seconds(),
+                wal_manifest_max_pending_files: default_wal_manifest_max_pending_files(),
+                optimizer_interval_seconds: 300,
+                replay_wal_on_startup: false,
+            },
             compaction: CompactionConfig {
                 enabled: true,
                 min_files_to_compact: 5,
                 target_file_size_bytes: 64 * 1024 * 1024, // 64MB
                 compaction_interval_seconds: 3600,
+                metadata_maintenance_enabled: true,
+                metadata_maintenance_interval_seconds: 3600,
+                metadata_min_snapshots_to_keep: 5,
+                metadata_max_snapshot_age_seconds: 7 * 24 * 3600,
+                metadata_rewrite_manifests_enabled: true,
+                metadata_remove_orphan_files_enabled: true,
+                metadata_remove_orphan_older_than_seconds: 3600,
             },
             duckdb: DuckDBConfig {
                 max_connections: 10,
@@ -113,6 +227,7 @@ impl Default for Config {
                 catalog_type: "s3".to_string(),
                 catalog_uri: "s3://softprobe-recordings".to_string(),
                 catalog_token: None,
+                namespace: default_iceberg_namespace(),
                 warehouse: "s3://warehouse".to_string(),
                 write_target_file_size_bytes: 64 * 1024 * 1024, // 64MB
                 write_row_group_size_bytes: 128 * 1024 * 1024, // 128MB
@@ -158,8 +273,13 @@ impl Config {
         if let Ok(region) = std::env::var("S3_REGION") {
             self.storage.s3_region = region;
         }
+
+        if let Ok(namespace) = std::env::var("ICEBERG_NAMESPACE") {
+            if !namespace.trim().is_empty() {
+                self.iceberg.namespace = namespace;
+            }
+        }
         
         // Add more environment variable overrides as needed
     }
 }
-
