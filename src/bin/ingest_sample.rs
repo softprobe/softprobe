@@ -1,11 +1,11 @@
+use chrono::Utc;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 use prost::Message;
-use chrono::Utc;
-use softprobe_otlp_backend::config::Config;
 use softprobe_otlp_backend::compaction::executor::MaintenanceExecutor;
+use softprobe_otlp_backend::config::Config;
 
 #[tokio::main]
 async fn main() {
@@ -43,25 +43,55 @@ async fn main() {
         kind: 1, // INTERNAL
         start_time_unix_nano: start,
         end_time_unix_nano: end,
-        attributes: vec![
-            KeyValue{ key: "sp.session.id".to_string(), value: Some(AnyValue{ value: Some(any_value::Value::StringValue(format!("it-{}", uuid::Uuid::new_v4()))) })},
-        ],
+        attributes: vec![KeyValue {
+            key: "sp.session.id".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(format!(
+                    "it-{}",
+                    uuid::Uuid::new_v4()
+                ))),
+            }),
+        }],
         ..Default::default()
     };
 
-    let scope = ScopeSpans { scope: None, spans: vec![span], schema_url: String::new() };
-    let resource = Resource { attributes: vec![
-        KeyValue{ key: "sp.app.id".to_string(), value: Some(AnyValue{ value: Some(any_value::Value::StringValue("test_application".to_string())) })},
-    ], dropped_attributes_count: 0 };
-    let rs = ResourceSpans { resource: Some(resource), scope_spans: vec![scope], schema_url: String::new() };
-    let req = ExportTraceServiceRequest { resource_spans: vec![rs] };
+    let scope = ScopeSpans {
+        scope: None,
+        spans: vec![span],
+        schema_url: String::new(),
+    };
+    let resource = Resource {
+        attributes: vec![KeyValue {
+            key: "sp.app.id".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(
+                    "test_application".to_string(),
+                )),
+            }),
+        }],
+        dropped_attributes_count: 0,
+    };
+    let rs = ResourceSpans {
+        resource: Some(resource),
+        scope_spans: vec![scope],
+        schema_url: String::new(),
+    };
+    let req = ExportTraceServiceRequest {
+        resource_spans: vec![rs],
+    };
 
     let bytes = req.encode_to_vec();
     let client = reqwest::Client::new();
-    let url = std::env::var("OTLP_URL").unwrap_or_else(|_| "http://localhost:8090/v1/traces".to_string());
-    let resp = client.post(url).header("content-type", "application/x-protobuf").body(bytes).send().await.unwrap();
+    let url =
+        std::env::var("OTLP_URL").unwrap_or_else(|_| "http://localhost:8090/v1/traces".to_string());
+    let resp = client
+        .post(url)
+        .header("content-type", "application/x-protobuf")
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
     println!("status={}", resp.status());
     let txt = resp.text().await.unwrap();
     println!("body={}", txt);
 }
-

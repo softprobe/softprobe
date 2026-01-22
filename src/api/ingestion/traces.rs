@@ -1,12 +1,12 @@
-use axum::{extract::State, Json};
-use axum::http::{HeaderMap, header::CONTENT_TYPE, StatusCode};
-use axum::response::{IntoResponse, Response};
-use crate::api::AppState;
 use crate::api::ingestion::IngestResponse;
+use crate::api::AppState;
 use crate::models::Span as SpanData;
+use anyhow::Result;
+use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use tracing::{error, info, warn};
-use anyhow::Result;
 
 /// OTLP /v1/traces JSON handler with proper parsing
 pub async fn ingest_traces_json(
@@ -79,8 +79,7 @@ pub async fn ingest_traces(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-)
--> Response {
+) -> Response {
     let body_size = body.len();
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -96,14 +95,16 @@ pub async fn ingest_traces(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} spans", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP traces: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(e) => {
@@ -119,14 +120,16 @@ pub async fn ingest_traces(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} spans", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP traces: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(_) => (StatusCode::BAD_REQUEST, "Invalid JSON").into_response(),
@@ -162,7 +165,9 @@ async fn process_traces(
         warn!("Span buffer not initialized");
     }
 
-    info!("Processed {} spans from OTLP request ({} bytes)", span_count, body_size);
+    info!(
+        "Processed {} spans from OTLP request ({} bytes)",
+        span_count, body_size
+    );
     Ok(span_count)
 }
-

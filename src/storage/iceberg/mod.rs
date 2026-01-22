@@ -1,3 +1,4 @@
+pub mod arrow;
 /// Modular Iceberg storage implementation
 ///
 /// This module provides a clean, composable architecture for Iceberg operations:
@@ -5,28 +6,28 @@
 /// - tables: Table schema definitions (traces, logs)
 /// - arrow: Arrow RecordBatch conversions
 /// - writer: Generic write logic with retry and row group isolation
-
 pub mod catalog;
 pub mod tables;
-pub mod arrow;
 pub mod writer;
 
 use crate::config::Config;
-use crate::models::{Span, Log, Metric};
+use crate::models::{Log, Metric, Span};
 use ::arrow::record_batch::RecordBatch;
 use anyhow::Result;
-use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use iceberg::io::FileIOBuilder;
-use iceberg::spec::{DataContentType, FormatVersion, ManifestContentType, ManifestList, ManifestListWriter};
+use iceberg::spec::{
+    DataContentType, FormatVersion, ManifestContentType, ManifestList, ManifestListWriter,
+};
+use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 use tracing::warn;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::io::{Read, Write};
 
 pub use catalog::IcebergCatalog;
-pub use tables::{TraceTable, OtlpLogsTable, OtlpMetricsTable};
+pub use tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
 pub use writer::TableWriter;
 
 /// Main Iceberg writer - manages traces, logs, and metrics tables
@@ -55,8 +56,7 @@ impl IcebergWriter {
         ensure_namespace_exists(catalog.catalog(), &namespace).await?;
 
         // Create table identifiers
-        let spans_table_ident =
-            TableIdent::from_strs(&[namespace_name, TraceTable::table_name()])?;
+        let spans_table_ident = TableIdent::from_strs(&[namespace_name, TraceTable::table_name()])?;
         let logs_table_ident =
             TableIdent::from_strs(&[namespace_name, OtlpLogsTable::table_name()])?;
         let metrics_table_ident =
@@ -70,7 +70,8 @@ impl IcebergWriter {
         // Create writers
         let spans_writer = TableWriter::new(catalog.catalog().clone(), spans_table_ident.clone());
         let logs_writer = TableWriter::new(catalog.catalog().clone(), logs_table_ident.clone());
-        let metrics_writer = TableWriter::new(catalog.catalog().clone(), metrics_table_ident.clone());
+        let metrics_writer =
+            TableWriter::new(catalog.catalog().clone(), metrics_table_ident.clone());
 
         info!("Iceberg writers initialized successfully");
 
@@ -93,42 +94,63 @@ impl IcebergWriter {
     /// Write span batches to traces table
     /// Each batch becomes a separate row group for session isolation
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
-        self.spans_writer.write_batches(batches, Span::to_record_batch).await?;
-        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name()).await;
+        self.spans_writer
+            .write_batches(batches, Span::to_record_batch)
+            .await?;
+        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name())
+            .await;
         Ok(())
     }
 
     /// Write log batches to logs table
     /// Each batch becomes a separate row group for session isolation
     pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
-        self.logs_writer.write_batches(batches, arrow::logs_to_record_batch).await?;
-        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name()).await;
+        self.logs_writer
+            .write_batches(batches, arrow::logs_to_record_batch)
+            .await?;
+        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name())
+            .await;
         Ok(())
     }
 
     /// Write metric batches to metrics table
     /// Each batch becomes a separate row group for metric_name isolation
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
-        self.metrics_writer.write_batches(batches, arrow::metrics_to_record_batch).await?;
-        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name()).await;
+        self.metrics_writer
+            .write_batches(batches, arrow::metrics_to_record_batch)
+            .await?;
+        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name())
+            .await;
         Ok(())
     }
 
     pub async fn write_span_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.spans_writer.write_record_batches(record_batches).await?;
-        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name()).await;
+        self.spans_writer
+            .write_record_batches(record_batches)
+            .await?;
+        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name())
+            .await;
         Ok(())
     }
 
     pub async fn write_log_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.logs_writer.write_record_batches(record_batches).await?;
-        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name()).await;
+        self.logs_writer
+            .write_record_batches(record_batches)
+            .await?;
+        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name())
+            .await;
         Ok(())
     }
 
-    pub async fn write_metric_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.metrics_writer.write_record_batches(record_batches).await?;
-        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name()).await;
+    pub async fn write_metric_record_batches(
+        &self,
+        record_batches: Vec<RecordBatch>,
+    ) -> Result<()> {
+        self.metrics_writer
+            .write_record_batches(record_batches)
+            .await?;
+        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name())
+            .await;
         Ok(())
     }
 
@@ -145,9 +167,12 @@ impl IcebergWriter {
     }
 
     async fn refresh_metadata_pointers(&self) {
-        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name()).await;
-        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name()).await;
-        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name()).await;
+        self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name())
+            .await;
+        self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name())
+            .await;
+        self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name())
+            .await;
     }
 
     async fn update_metadata_pointer(&self, table_ident: &TableIdent, table_name: &str) {
@@ -158,7 +183,10 @@ impl IcebergWriter {
         let table = match self.catalog.catalog().load_table(table_ident).await {
             Ok(table) => table,
             Err(err) => {
-                warn!("Failed to load Iceberg table {} for metadata pointer: {}", table_name, err);
+                warn!(
+                    "Failed to load Iceberg table {} for metadata pointer: {}",
+                    table_name, err
+                );
                 return;
             }
         };
@@ -187,7 +215,10 @@ impl IcebergWriter {
 
         let metadata_dir = cache_dir.join("iceberg_metadata");
         if let Err(err) = std::fs::create_dir_all(&metadata_dir) {
-            warn!("Failed to create Iceberg metadata cache dir {:?}: {}", metadata_dir, err);
+            warn!(
+                "Failed to create Iceberg metadata cache dir {:?}: {}",
+                metadata_dir, err
+            );
             return;
         }
         let pointer_path = metadata_dir.join(format!("{table_name}.json"));
@@ -250,7 +281,8 @@ impl IcebergWriter {
                             "Failed to write Iceberg metadata file {:?}: {}",
                             temp_metadata_path, err
                         );
-                    } else if let Err(err) = std::fs::rename(&temp_metadata_path, &metadata_file_path)
+                    } else if let Err(err) =
+                        std::fs::rename(&temp_metadata_path, &metadata_file_path)
                     {
                         warn!(
                             "Failed to move Iceberg metadata file {:?}: {}",
@@ -287,11 +319,7 @@ impl IcebergWriter {
             } else {
                 let trimmed = path.trim_start_matches('/');
                 let trimmed = trimmed.strip_prefix("metadata/").unwrap_or(trimmed);
-                format!(
-                    "{}/{}",
-                    metadata_base.trim_end_matches('/'),
-                    trimmed
-                )
+                format!("{}/{}", metadata_base.trim_end_matches('/'), trimmed)
             }
         };
         let resolve_local_path = |path: &str| -> PathBuf {
@@ -332,7 +360,9 @@ impl IcebergWriter {
                                 let manifest_list_path = snapshot
                                     .get("manifest-list")
                                     .and_then(|v| v.as_str())
-                                    .or_else(|| snapshot.get("manifest_list").and_then(|v| v.as_str()));
+                                    .or_else(|| {
+                                        snapshot.get("manifest_list").and_then(|v| v.as_str())
+                                    });
                                 if let Some(manifest_list_path) = manifest_list_path {
                                     let manifest_list_name = manifest_list_path
                                         .rsplit('/')
@@ -451,10 +481,7 @@ impl IcebergWriter {
                         }
                         let manifest_path = entry.manifest_path.as_str();
                         let (remote_path, local_path) = if manifest_path.contains("://") {
-                            let name = manifest_path
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or(manifest_path);
+                            let name = manifest_path.rsplit('/').next().unwrap_or(manifest_path);
                             (manifest_path.to_string(), table_metadata_dir.join(name))
                         } else {
                             (
@@ -498,10 +525,7 @@ impl IcebergWriter {
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        "Failed to load manifest list for {}: {}",
-                        table_name, err
-                    );
+                    warn!("Failed to load manifest list for {}: {}", table_name, err);
                 }
             }
         }
@@ -509,7 +533,8 @@ impl IcebergWriter {
         if let Some(local_manifest_list_path) = pinned_manifest_list_path {
             if let Ok(bytes) = std::fs::read(&local_manifest_list_path) {
                 let format_version = table.metadata().format_version();
-                if let Ok(manifest_list) = ManifestList::parse_with_version(&bytes, format_version) {
+                if let Ok(manifest_list) = ManifestList::parse_with_version(&bytes, format_version)
+                {
                     let mut rewritten_entries = Vec::new();
                     for mut entry in manifest_list.consume_entries() {
                         let manifest_path = entry.manifest_path.clone();
@@ -523,8 +548,7 @@ impl IcebergWriter {
                             resolve_local_path(&manifest_path)
                         };
                         if local_manifest_path.exists() {
-                            entry.manifest_path =
-                                local_manifest_path.to_string_lossy().to_string();
+                            entry.manifest_path = local_manifest_path.to_string_lossy().to_string();
                         }
                         rewritten_entries.push(entry);
                     }
@@ -532,14 +556,17 @@ impl IcebergWriter {
                         let file_io = FileIOBuilder::new_fs_io().build();
                         match file_io {
                             Ok(file_io) => {
-                                let output_path = local_manifest_list_path.to_string_lossy().to_string();
+                                let output_path =
+                                    local_manifest_list_path.to_string_lossy().to_string();
                                 match file_io.new_output(&output_path) {
                                     Ok(output) => {
                                         let parent_snapshot_id = snapshot.parent_snapshot_id();
                                         let mut writer = match format_version {
-                                            FormatVersion::V1 => {
-                                                ManifestListWriter::v1(output, snapshot.snapshot_id(), parent_snapshot_id)
-                                            }
+                                            FormatVersion::V1 => ManifestListWriter::v1(
+                                                output,
+                                                snapshot.snapshot_id(),
+                                                parent_snapshot_id,
+                                            ),
                                             FormatVersion::V2 => ManifestListWriter::v2(
                                                 output,
                                                 snapshot.snapshot_id(),
@@ -547,7 +574,9 @@ impl IcebergWriter {
                                                 snapshot.sequence_number(),
                                             ),
                                         };
-                                        if let Err(err) = writer.add_manifests(rewritten_entries.into_iter()) {
+                                        if let Err(err) =
+                                            writer.add_manifests(rewritten_entries.into_iter())
+                                        {
                                             warn!(
                                                 "Failed to rewrite manifest list entries for {}: {}",
                                                 table_name, err
@@ -592,11 +621,17 @@ impl IcebergWriter {
             "data_files_path": data_files_path.as_ref().map(|path| path.to_string_lossy().to_string()),
         });
         if let Err(err) = std::fs::write(&temp_path, payload.to_string()) {
-            warn!("Failed to write Iceberg metadata pointer {:?}: {}", temp_path, err);
+            warn!(
+                "Failed to write Iceberg metadata pointer {:?}: {}",
+                temp_path, err
+            );
             return;
         }
         if let Err(err) = std::fs::rename(&temp_path, &final_path) {
-            warn!("Failed to move Iceberg metadata pointer {:?}: {}", final_path, err);
+            warn!(
+                "Failed to move Iceberg metadata pointer {:?}: {}",
+                final_path, err
+            );
         }
     }
 }
@@ -615,7 +650,10 @@ async fn ensure_namespace_exists(
 ) -> Result<()> {
     match catalog.namespace_exists(namespace).await {
         Ok(true) => {
-            info!("Namespace {} already exists, using existing namespace", namespace);
+            info!(
+                "Namespace {} already exists, using existing namespace",
+                namespace
+            );
             Ok(())
         }
         Ok(false) => {
@@ -623,7 +661,10 @@ async fn ensure_namespace_exists(
             if let Err(err) = catalog.create_namespace(namespace, HashMap::new()).await {
                 let message = err.to_string();
                 if message.contains("already exists") {
-                    info!("Namespace {} already exists after create attempt", namespace);
+                    info!(
+                        "Namespace {} already exists after create attempt",
+                        namespace
+                    );
                 } else {
                     return Err(err.into());
                 }
@@ -638,7 +679,10 @@ async fn ensure_namespace_exists(
             if let Err(err) = catalog.create_namespace(namespace, HashMap::new()).await {
                 let message = err.to_string();
                 if message.contains("already exists") {
-                    info!("Namespace {} already exists after create attempt", namespace);
+                    info!(
+                        "Namespace {} already exists after create attempt",
+                        namespace
+                    );
                 } else {
                     return Err(err.into());
                 }
@@ -667,7 +711,10 @@ async fn ensure_table_exists(
             info!("Table {} does not exist, creating it", table_ident);
         }
         Err(_) => {
-            info!("Table {} existence check failed, assuming it doesn't exist", table_ident);
+            info!(
+                "Table {} existence check failed, assuming it doesn't exist",
+                table_ident
+            );
         }
     }
 
@@ -705,17 +752,25 @@ async fn ensure_table_exists(
         .build();
 
     // Create the table
-    match catalog.create_table(&table_ident.namespace(), table_creation).await {
+    match catalog
+        .create_table(&table_ident.namespace(), table_creation)
+        .await
+    {
         Ok(_) => {
             info!("Successfully created table: {}", table_ident);
             Ok(())
         }
         Err(e) if e.to_string().contains("already exists") => {
-            info!("Table {} already exists (concurrent creation), continuing", table_ident);
+            info!(
+                "Table {} already exists (concurrent creation), continuing",
+                table_ident
+            );
             Ok(())
         }
-        Err(e) => {
-            Err(anyhow::anyhow!("Failed to create table {}: {}", table_ident, e))
-        }
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to create table {}: {}",
+            table_ident,
+            e
+        )),
     }
 }

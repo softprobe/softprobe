@@ -1,11 +1,14 @@
+pub mod health;
 pub mod ingestion;
 pub mod query;
-pub mod health;
 
-use axum::{routing::{get, post}, Router};
 use crate::config::Config;
-use crate::storage::{IngestPipeline, Storage, SpanBuffer, LogBuffer, MetricBuffer};
 use crate::query::{self as query_engine, QueryEngine};
+use crate::storage::{IngestPipeline, LogBuffer, MetricBuffer, SpanBuffer, Storage};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use std::sync::Arc;
 
 // Unified application state for Axum router

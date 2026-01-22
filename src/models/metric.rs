@@ -1,9 +1,9 @@
 use crate::storage::buffer::Bufferable;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use anyhow::Result;
 
 /// Metric data model representing an OTLP metric data point
 ///
@@ -40,7 +40,6 @@ pub struct Metric {
     /// Resource attributes identifying the metric source
     /// (e.g., service.name, host.name, k8s.pod.name)
     pub resource_attributes: HashMap<String, String>,
-
     // Field 13: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
@@ -144,10 +143,22 @@ impl Metric {
             for attr in &resource.attributes {
                 if let Some(value) = &attr.value {
                     let value_str = match value.value.as_ref() {
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                s,
+                            ),
+                        ) => s.clone(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
+                        ) => i.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
+                                d,
+                            ),
+                        ) => d.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
+                        ) => b.to_string(),
                         _ => continue,
                     };
                     attributes.insert(attr.key.clone(), value_str);
@@ -172,7 +183,8 @@ impl Metric {
             chrono::DateTime::from_timestamp(
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
-            ).unwrap_or_else(|| chrono::Utc::now())
+            )
+            .unwrap_or_else(|| chrono::Utc::now())
         } else {
             chrono::Utc::now()
         };
@@ -213,7 +225,8 @@ impl Metric {
             chrono::DateTime::from_timestamp(
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
-            ).unwrap_or_else(|| chrono::Utc::now())
+            )
+            .unwrap_or_else(|| chrono::Utc::now())
         } else {
             chrono::Utc::now()
         };
@@ -252,7 +265,8 @@ impl Metric {
             chrono::DateTime::from_timestamp(
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
-            ).unwrap_or_else(|| chrono::Utc::now())
+            )
+            .unwrap_or_else(|| chrono::Utc::now())
         } else {
             chrono::Utc::now()
         };
@@ -286,10 +300,18 @@ impl Metric {
         for attr in otlp_attributes {
             if let Some(attr_value) = &attr.value {
                 let value_str = match attr_value.value.as_ref() {
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                    ) => s.clone(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
+                        i.to_string()
+                    }
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
+                    ) => d.to_string(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
+                        b,
+                    )) => b.to_string(),
                     _ => continue,
                 };
                 attributes.insert(attr.key.clone(), value_str);
@@ -327,7 +349,7 @@ impl Bufferable for Metric {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Datelike};
+    use chrono::{Datelike, TimeZone};
 
     #[test]
     fn test_metric_partition_key() {

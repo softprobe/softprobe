@@ -16,4 +16,3 @@ pub async fn ready_check() -> Json<serde_json::Value> {
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
-

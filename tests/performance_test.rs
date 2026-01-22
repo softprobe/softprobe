@@ -1,4 +1,6 @@
 use chrono::Utc;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
 use softprobe_otlp_backend::config::Config;
 use softprobe_otlp_backend::models::Log as LogData;
 use softprobe_otlp_backend::query;
@@ -8,8 +10,6 @@ use softprobe_otlp_backend::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::tempdir;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 mod util;
 use util::pipeline::TestPipeline;
@@ -98,19 +98,21 @@ fn format_result(result: &softprobe_otlp_backend::query::duckdb::QueryResult) ->
     output
 }
 
-async fn maybe_log_cache_profile(
-    engine: &softprobe_otlp_backend::query::QueryEngine,
-    label: &str,
-) {
+async fn maybe_log_cache_profile(engine: &softprobe_otlp_backend::query::QueryEngine, label: &str) {
     if !profile_enabled() {
         return;
     }
     println!("cache_httpfs profile ({label})");
-    if let Ok(result) = engine.execute_query("SELECT cache_httpfs_get_profile();").await {
+    if let Ok(result) = engine
+        .execute_query("SELECT cache_httpfs_get_profile();")
+        .await
+    {
         println!("{}", format_result(&result));
     }
     if let Ok(result) = engine
-        .execute_query("SELECT name, value FROM duckdb_settings() WHERE name LIKE 'cache_httpfs_%';")
+        .execute_query(
+            "SELECT name, value FROM duckdb_settings() WHERE name LIKE 'cache_httpfs_%';",
+        )
         .await
     {
         println!("{}", format_result(&result));
@@ -178,11 +180,7 @@ async fn run_diagnostics(
 #[ignore]
 async fn perf_union_read_latency() {
     let mut config = load_perf_config();
-    if std::env::var("PERF_FORCE_SINGLE_WORKER")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
         config.duckdb.max_connections = 1;
     }
     ensure_wal_bucket(&mut config);
@@ -274,7 +272,10 @@ async fn perf_union_read_latency() {
     );
     let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
     for _ in 0..warmup_workers {
-        let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+        let warmup = query_engine
+            .execute_query(&warmup_sql)
+            .await
+            .expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_iceberg_sql = format!(
@@ -310,7 +311,10 @@ async fn perf_union_read_latency() {
         record_date_start(days_back),
     );
     for _ in 0..warmup_workers {
-        let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+        let warmup = query_engine
+            .execute_query(&warmup_sql)
+            .await
+            .expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
 
@@ -375,11 +379,7 @@ async fn perf_union_read_latency() {
 #[ignore]
 async fn perf_union_read_concurrency() {
     let mut config = load_perf_config();
-    if std::env::var("PERF_FORCE_SINGLE_WORKER")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
         config.duckdb.max_connections = 1;
     }
     ensure_wal_bucket(&mut config);
@@ -475,7 +475,10 @@ async fn perf_union_read_concurrency() {
     );
     let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
     for _ in 0..warmup_workers {
-        let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+        let warmup = query_engine
+            .execute_query(&warmup_sql)
+            .await
+            .expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
 
@@ -486,7 +489,10 @@ async fn perf_union_read_concurrency() {
         record_date_start(days_back),
     );
     for _ in 0..warmup_workers {
-        let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+        let warmup = query_engine
+            .execute_query(&warmup_sql)
+            .await
+            .expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
 
@@ -497,7 +503,10 @@ async fn perf_union_read_concurrency() {
         record_date_start(days_back),
     );
     for _ in 0..warmup_workers {
-        let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+        let warmup = query_engine
+            .execute_query(&warmup_sql)
+            .await
+            .expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
 
@@ -668,23 +677,19 @@ async fn perf_view_recreate_stability() {
     let snapshot_after_second = view_counters_snapshot();
 
     assert_eq!(
-        snapshot_after_first.iceberg_recreates,
-        snapshot_after_second.iceberg_recreates,
+        snapshot_after_first.iceberg_recreates, snapshot_after_second.iceberg_recreates,
         "Iceberg view should not be recreated between warm queries"
     );
     assert_eq!(
-        snapshot_after_first.staged_recreates,
-        snapshot_after_second.staged_recreates,
+        snapshot_after_first.staged_recreates, snapshot_after_second.staged_recreates,
         "Staged view should not be recreated between warm queries"
     );
     assert_eq!(
-        snapshot_after_first.wal_recreates,
-        snapshot_after_second.wal_recreates,
+        snapshot_after_first.wal_recreates, snapshot_after_second.wal_recreates,
         "WAL view should not be recreated between warm queries"
     );
     assert_eq!(
-        snapshot_after_first.union_recreates,
-        snapshot_after_second.union_recreates,
+        snapshot_after_first.union_recreates, snapshot_after_second.union_recreates,
         "Union view should not be recreated between warm queries"
     );
 }
@@ -717,7 +722,8 @@ async fn view_recreate_stability_local_stub() {
     let record_batch = logs_to_record_batch(&[log], &schema).expect("record batch");
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(&stub_path).expect("stub file");
-    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(props)).expect("writer");
+    let mut writer =
+        ArrowWriter::try_new(file, record_batch.schema(), Some(props)).expect("writer");
     writer.write(&record_batch).expect("write");
     writer.close().expect("close");
 
@@ -727,7 +733,9 @@ async fn view_recreate_stability_local_stub() {
     );
     reset_view_counters();
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = query::create_query_engine(&config)
+        .await
+        .expect("query engine");
     let sql = "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = 'stub-session'";
     let first = query_engine.execute_query(sql).await.expect("query");
     assert_eq!(first.rows[0][0].as_i64().unwrap_or(0), 1);
@@ -737,7 +745,10 @@ async fn view_recreate_stability_local_stub() {
     assert_eq!(second.rows[0][0].as_i64().unwrap_or(0), 1);
     let after_second = view_counters_snapshot();
 
-    assert_eq!(after_first.iceberg_recreates, after_second.iceberg_recreates);
+    assert_eq!(
+        after_first.iceberg_recreates,
+        after_second.iceberg_recreates
+    );
     assert_eq!(after_first.staged_recreates, after_second.staged_recreates);
     assert_eq!(after_first.wal_recreates, after_second.wal_recreates);
     assert_eq!(after_first.union_recreates, after_second.union_recreates);

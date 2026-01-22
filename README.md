@@ -71,7 +71,40 @@ make test-quick      # Unit tests only (fast, no infrastructure)
 make test-local      # Integration tests with local MinIO
 make test-r2         # Integration tests with Cloudflare R2
 make test-all        # All tests
+make stress-test     # Local perf stress test via perf_stress binary
 ```
+
+## Performance Stress Tool
+
+`perf_stress` is a lightweight CLI that repeatedly writes WAL records (spans/logs/metrics) through the ingest pipeline and runs SQL queries over the DuckDB union views so you exercise the same components that serve real traffic.
+
+### Features
+
+- Drives configurable QPS of spans, logs, and metrics through the ingest pipeline.
+- Runs parallel DuckDB query workers to mimic dashboard load.
+- Reuses the production `IngestPipeline` and query engine so the benchmark touches Iceberg, cache_httpfs, object storage, and WAL maintenance.
+- Prints a concise summary of produced records, query latency percentiles, and observed errors.
+
+### Usage
+
+1. Point at your production config or override `CONFIG_FILE`/`INGEST_*` env vars:
+   ```bash
+   CONFIG_FILE=deploy/config/prod.yaml
+   ```
+2. Run the tool with workload knobs:
+   ```bash
+   cargo run --bin perf_stress -- \
+     --config deploy/config/prod.yaml \
+     --duration 120 \
+     --span-qps 500 \
+     --log-qps 1000 \
+     --metric-qps 400 \
+     --query-concurrency 8 \
+     --query-interval-ms 750
+   ```
+3. Review the printed report (records produced, errors, query latency p95) and adjust the QPS or duration until you meet your real-time goals.
+
+Use this tool locally or in GCP/AWS (make sure `ingest_engine.cache_dir` points at a local SSD) to validate WAL/query performance before deploying to production.
 
 ## Make Commands (Holistic View)
 

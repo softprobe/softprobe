@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use crate::config::Config;
+use std::sync::Arc;
 
-pub mod duckdb;
 pub mod cache;
+pub mod duckdb;
 
 #[derive(Clone)]
 pub struct QueryEngine {
@@ -11,10 +11,8 @@ pub struct QueryEngine {
 
 pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine> {
     let duckdb = Arc::new(duckdb::DuckDBQueryEngine::new(config).await?);
-    
-    Ok(QueryEngine {
-        duckdb,
-    })
+
+    Ok(QueryEngine { duckdb })
 }
 
 impl QueryEngine {

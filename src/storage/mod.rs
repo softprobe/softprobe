@@ -3,14 +3,16 @@ pub mod iceberg;
 pub mod schema;
 pub mod transaction;
 
-use std::pin::Pin;
-use std::sync::Arc;
 use crate::config::Config;
 use crate::ingest_engine::IngestEngine;
-use crate::models::{Span, Log, Metric};
-use crate::storage::iceberg::arrow::{logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch};
-use buffer::SimpleBuffer;
+use crate::models::{Log, Metric, Span};
+use crate::storage::iceberg::arrow::{
+    logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
+};
 use anyhow::Result;
+use buffer::SimpleBuffer;
+use std::pin::Pin;
+use std::sync::Arc;
 
 pub use iceberg::IcebergWriter;
 
@@ -35,9 +37,24 @@ pub struct IngestPipeline {
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let storage = create_storage(config).await?;
-        let span_buffer = create_span_buffer(config, storage.iceberg_writer.clone(), storage.ingest_engine.clone()).await?;
-        let log_buffer = create_log_buffer(config, storage.iceberg_writer.clone(), storage.ingest_engine.clone()).await?;
-        let metric_buffer = create_metric_buffer(config, storage.iceberg_writer.clone(), storage.ingest_engine.clone()).await?;
+        let span_buffer = create_span_buffer(
+            config,
+            storage.iceberg_writer.clone(),
+            storage.ingest_engine.clone(),
+        )
+        .await?;
+        let log_buffer = create_log_buffer(
+            config,
+            storage.iceberg_writer.clone(),
+            storage.ingest_engine.clone(),
+        )
+        .await?;
+        let metric_buffer = create_metric_buffer(
+            config,
+            storage.iceberg_writer.clone(),
+            storage.ingest_engine.clone(),
+        )
+        .await?;
 
         Ok(Self {
             storage,
@@ -60,7 +77,10 @@ impl IngestPipeline {
     }
 
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
-        self.storage.iceberg_writer.write_span_batches(batches).await
+        self.storage
+            .iceberg_writer
+            .write_span_batches(batches)
+            .await
     }
 
     pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
@@ -68,7 +88,10 @@ impl IngestPipeline {
     }
 
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
-        self.storage.iceberg_writer.write_metric_batches(batches).await
+        self.storage
+            .iceberg_writer
+            .write_metric_batches(batches)
+            .await
     }
 
     pub async fn write_wal_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
@@ -78,7 +101,13 @@ impl IngestPipeline {
         let schema = self.storage.iceberg_writer.spans_schema().await?;
         engine
             .wal_writer()
-            .write_batch("spans", &items, request_size, schema.as_ref(), spans_to_record_batch)
+            .write_batch(
+                "spans",
+                &items,
+                request_size,
+                schema.as_ref(),
+                spans_to_record_batch,
+            )
             .await
     }
 
@@ -89,7 +118,13 @@ impl IngestPipeline {
         let schema = self.storage.iceberg_writer.logs_schema().await?;
         engine
             .wal_writer()
-            .write_batch("logs", &items, request_size, schema.as_ref(), logs_to_record_batch)
+            .write_batch(
+                "logs",
+                &items,
+                request_size,
+                schema.as_ref(),
+                logs_to_record_batch,
+            )
             .await
     }
 
@@ -100,7 +135,13 @@ impl IngestPipeline {
         let schema = self.storage.iceberg_writer.metrics_schema().await?;
         engine
             .wal_writer()
-            .write_batch("metrics", &items, request_size, schema.as_ref(), metrics_to_record_batch)
+            .write_batch(
+                "metrics",
+                &items,
+                request_size,
+                schema.as_ref(),
+                metrics_to_record_batch,
+            )
             .await
     }
 
@@ -160,8 +201,13 @@ pub async fn create_span_buffer(
     iceberg_writer: Arc<IcebergWriter>,
     ingest_engine: Option<Arc<IngestEngine>>,
 ) -> Result<SpanBuffer> {
-    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) = ingest_engine {
-        (Some(engine.span_pre_add_callback()), engine.span_flush_callback())
+    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) =
+        ingest_engine
+    {
+        (
+            Some(engine.span_pre_add_callback()),
+            engine.span_flush_callback(),
+        )
     } else {
         // Create flush callback that writes session batches to Iceberg
         // Each session becomes a row group in a single Parquet file
@@ -189,8 +235,13 @@ pub async fn create_log_buffer(
     iceberg_writer: Arc<IcebergWriter>,
     ingest_engine: Option<Arc<IngestEngine>>,
 ) -> Result<LogBuffer> {
-    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) = ingest_engine {
-        (Some(engine.log_pre_add_callback()), engine.log_flush_callback())
+    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) =
+        ingest_engine
+    {
+        (
+            Some(engine.log_pre_add_callback()),
+            engine.log_flush_callback(),
+        )
     } else {
         // Create flush callback that writes log batches to Iceberg
         let flush_callback = Arc::new(move |log_batches: Vec<Vec<Log>>| -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
@@ -217,8 +268,13 @@ pub async fn create_metric_buffer(
     iceberg_writer: Arc<IcebergWriter>,
     ingest_engine: Option<Arc<IngestEngine>>,
 ) -> Result<MetricBuffer> {
-    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) = ingest_engine {
-        (Some(engine.metric_pre_add_callback()), engine.metric_flush_callback())
+    let (pre_add_callback, flush_callback): (Option<Arc<_>>, Arc<_>) = if let Some(engine) =
+        ingest_engine
+    {
+        (
+            Some(engine.metric_pre_add_callback()),
+            engine.metric_flush_callback(),
+        )
     } else {
         // Create flush callback that writes metric batches to Iceberg
         // Metrics are organized by metric_name, NOT session_id

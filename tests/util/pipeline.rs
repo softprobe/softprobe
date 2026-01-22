@@ -15,7 +15,9 @@ impl TestPipeline {
         let cache_dir = TempDir::new().expect("tempdir");
         config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
-        let query_engine = query::create_query_engine(&config).await.expect("query engine");
+        let query_engine = query::create_query_engine(&config)
+            .await
+            .expect("query engine");
         Self {
             config,
             cache_dir,
@@ -52,7 +54,9 @@ impl TestPipelineBuilder {
     }
 
     pub async fn build(self) -> TestPipeline {
-        let config = self.config.unwrap_or_else(|| Config::load().expect("config"));
+        let config = self
+            .config
+            .unwrap_or_else(|| Config::load().expect("config"));
         TestPipeline::new(config).await
     }
 }

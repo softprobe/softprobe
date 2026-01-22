@@ -1,6 +1,6 @@
+use crate::api::AppState;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
-use crate::api::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
@@ -80,7 +80,7 @@ pub async fn query_recordings(
     // - Execute query via state.query_engine.execute_query()
     // - Return metadata records with payload_file_uri, payload_file_offset, payload_row_group_index
     // See: docs/migration-to-iceberg-design.md lines 993-1004 for query pattern
-    
+
     Json(QueryResponse {
         records: vec![],
         total: 0,
@@ -99,7 +99,5 @@ pub async fn retrieve_payloads(
     // - Cache frequently accessed files in memory
     // See: docs/migration-to-iceberg-design.md lines 1068-1150 for retrieval strategy
 
-    Json(RetrieveResponse {
-        payloads: vec![],
-    })
+    Json(RetrieveResponse { payloads: vec![] })
 }

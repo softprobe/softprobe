@@ -1,7 +1,7 @@
 use crate::storage::buffer::Bufferable;
+use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use anyhow::Result;
 
 /// Span domain model - unified representation across all layers
 /// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
@@ -52,7 +52,6 @@ pub struct Span {
     pub http_response_status_code: Option<i32>,
     pub http_response_headers: Option<String>,
     pub http_response_body: Option<String>,
-
     // Field 32: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
@@ -77,7 +76,8 @@ impl Bufferable for Span {
     fn compare_for_sort(&self, other: &Self) -> Ordering {
         // Sort by session_id first, then trace_id, then timestamp
         // This matches Iceberg sort order (field 1, 2, 10)
-        self.session_id.cmp(&other.session_id)
+        self.session_id
+            .cmp(&other.session_id)
             .then_with(|| self.trace_id.cmp(&other.trace_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
@@ -109,10 +109,18 @@ impl Span {
         for attr in &otlp_span.attributes {
             if let Some(value) = &attr.value {
                 let value_str = match value.value.as_ref() {
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                    ) => s.clone(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
+                        i.to_string()
+                    }
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
+                    ) => d.to_string(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
+                        b,
+                    )) => b.to_string(),
                     _ => continue,
                 };
                 attributes.insert(attr.key.clone(), value_str);
@@ -155,17 +163,21 @@ impl Span {
         let timestamp = if otlp_span.start_time_unix_nano > 0 {
             chrono::DateTime::from_timestamp(
                 (otlp_span.start_time_unix_nano / 1_000_000_000) as i64,
-                (otlp_span.start_time_unix_nano % 1_000_000_000) as u32
-            ).unwrap_or_else(|| chrono::Utc::now())
+                (otlp_span.start_time_unix_nano % 1_000_000_000) as u32,
+            )
+            .unwrap_or_else(|| chrono::Utc::now())
         } else {
             chrono::Utc::now()
         };
 
         let end_timestamp = if otlp_span.end_time_unix_nano > 0 {
-            Some(chrono::DateTime::from_timestamp(
-                (otlp_span.end_time_unix_nano / 1_000_000_000) as i64,
-                (otlp_span.end_time_unix_nano % 1_000_000_000) as u32
-            ).unwrap_or_else(|| chrono::Utc::now()))
+            Some(
+                chrono::DateTime::from_timestamp(
+                    (otlp_span.end_time_unix_nano / 1_000_000_000) as i64,
+                    (otlp_span.end_time_unix_nano % 1_000_000_000) as u32,
+                )
+                .unwrap_or_else(|| chrono::Utc::now()),
+            )
         } else {
             None
         };
@@ -241,10 +253,22 @@ impl Span {
             for attr in &resource.attributes {
                 if let Some(value) = &attr.value {
                     let value_str = match value.value.as_ref() {
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                s,
+                            ),
+                        ) => s.clone(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
+                        ) => i.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
+                                d,
+                            ),
+                        ) => d.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
+                        ) => b.to_string(),
                         _ => continue,
                     };
                     attributes.insert(attr.key.clone(), value_str);
@@ -260,19 +284,27 @@ impl Span {
     fn extract_http_data_from_events(&mut self) {
         // Find http.request event
         if let Some(request_event) = self.events.iter().find(|e| e.name == "http.request") {
-            self.http_request_headers = request_event.attributes.get("http.request.headers").cloned();
+            self.http_request_headers = request_event
+                .attributes
+                .get("http.request.headers")
+                .cloned();
             self.http_request_body = request_event.attributes.get("http.request.body").cloned();
         }
 
         // Find http.response event
         if let Some(response_event) = self.events.iter().find(|e| e.name == "http.response") {
-            self.http_response_headers = response_event.attributes.get("http.response.headers").cloned();
+            self.http_response_headers = response_event
+                .attributes
+                .get("http.response.headers")
+                .cloned();
             self.http_response_body = response_event.attributes.get("http.response.body").cloned();
         }
 
         // Extract standard HTTP attributes from span attributes
         self.http_request_method = self.attributes.get("http.request.method").cloned();
-        self.http_request_path = self.attributes.get("http.request.path")
+        self.http_request_path = self
+            .attributes
+            .get("http.request.path")
             .or_else(|| self.attributes.get("http.target"))
             .cloned();
 

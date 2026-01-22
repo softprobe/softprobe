@@ -1,18 +1,21 @@
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
+use chrono::NaiveDate;
 use iceberg::{
-    TableIdent, Catalog,
-    spec::{Schema as IcebergSchema, Struct, Literal},
-    writer::{IcebergWriter, IcebergWriterBuilder},
-    writer::base_writer::data_file_writer::DataFileWriterBuilder,
-    writer::file_writer::{ParquetWriterBuilder, location_generator::{DefaultLocationGenerator, DefaultFileNameGenerator}},
     spec::DataFileFormat,
-    transaction::{Transaction, ApplyTransactionAction},
+    spec::{Literal, Schema as IcebergSchema, Struct},
+    transaction::{ApplyTransactionAction, Transaction},
+    writer::base_writer::data_file_writer::DataFileWriterBuilder,
+    writer::file_writer::{
+        location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
+        ParquetWriterBuilder,
+    },
+    writer::{IcebergWriter, IcebergWriterBuilder},
+    Catalog, TableIdent,
 };
 use iceberg_catalog_rest::RestCatalog;
 use std::sync::Arc;
 use tracing::{debug, error, info};
-use chrono::NaiveDate;
 
 /// Generic writer for Iceberg tables
 /// Handles write retries, row group isolation, and transaction commits
@@ -30,7 +33,10 @@ fn is_retryable_commit_error(error_msg: &str) -> bool {
 
 impl TableWriter {
     pub fn new(catalog: Arc<RestCatalog>, table_ident: TableIdent) -> Self {
-        Self { catalog, table_ident }
+        Self {
+            catalog,
+            table_ident,
+        }
     }
 
     pub async fn current_schema(&self) -> Result<Arc<IcebergSchema>> {
@@ -42,11 +48,7 @@ impl TableWriter {
     /// Each batch becomes a separate row group in the file for optimal query performance
     ///
     /// Generic over T to support both Span and Log batches
-    pub async fn write_batches<T, F>(
-        &self,
-        batches: Vec<Vec<T>>,
-        to_record_batch: F,
-    ) -> Result<()>
+    pub async fn write_batches<T, F>(&self, batches: Vec<Vec<T>>, to_record_batch: F) -> Result<()>
     where
         T: Clone,
         F: Fn(&[T], &IcebergSchema) -> Result<RecordBatch>,
@@ -57,8 +59,10 @@ impl TableWriter {
 
         let total_records: usize = batches.iter().map(|b| b.len()).sum();
         let batch_count = batches.len();
-        info!("Writing {} batches ({} total records) to single Parquet file with {} row groups",
-              batch_count, total_records, batch_count);
+        info!(
+            "Writing {} batches ({} total records) to single Parquet file with {} row groups",
+            batch_count, total_records, batch_count
+        );
 
         // Retry logic for handling catalog commit conflicts
         const MAX_RETRIES: u32 = 5;
@@ -69,7 +73,10 @@ impl TableWriter {
             match self.write_batches_inner(&batches, &to_record_batch).await {
                 Ok(()) => {
                     if retry_count > 0 {
-                        info!("Successfully wrote {} batches to Iceberg after {} retries", batch_count, retry_count);
+                        info!(
+                            "Successfully wrote {} batches to Iceberg after {} retries",
+                            batch_count, retry_count
+                        );
                     } else {
                         info!("Successfully wrote {} batches to Iceberg", batch_count);
                     }
@@ -82,12 +89,18 @@ impl TableWriter {
                         if retry_count < MAX_RETRIES {
                             retry_count += 1;
                             let backoff_ms = INITIAL_BACKOFF_MS * (2_u64.pow(retry_count - 1));
-                            info!("Catalog commit conflict, retrying ({}/{}) after {}ms",
-                                  retry_count, MAX_RETRIES, backoff_ms);
-                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                            info!(
+                                "Catalog commit conflict, retrying ({}/{}) after {}ms",
+                                retry_count, MAX_RETRIES, backoff_ms
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms))
+                                .await;
                             continue;
                         } else {
-                            error!("Failed after {} retries due to commit conflicts", MAX_RETRIES);
+                            error!(
+                                "Failed after {} retries due to commit conflicts",
+                                MAX_RETRIES
+                            );
                             return Err(e);
                         }
                     } else {
@@ -101,10 +114,7 @@ impl TableWriter {
 
     /// Write multiple RecordBatches to a single Parquet file with row groups
     /// Each RecordBatch becomes a separate row group in the file.
-    pub async fn write_record_batches(
-        &self,
-        record_batches: Vec<RecordBatch>,
-    ) -> Result<()> {
+    pub async fn write_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
         if record_batches.is_empty() {
             return Ok(());
         }
@@ -129,7 +139,10 @@ impl TableWriter {
                             batch_count, retry_count
                         );
                     } else {
-                        info!("Successfully wrote {} record batches to Iceberg", batch_count);
+                        info!(
+                            "Successfully wrote {} record batches to Iceberg",
+                            batch_count
+                        );
                     }
                     return Ok(());
                 }
@@ -143,10 +156,14 @@ impl TableWriter {
                                 "Catalog commit conflict, retrying ({}/{}) after {}ms",
                                 retry_count, MAX_RETRIES, backoff_ms
                             );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms))
+                                .await;
                             continue;
                         } else {
-                            error!("Failed after {} retries due to commit conflicts", MAX_RETRIES);
+                            error!(
+                                "Failed after {} retries due to commit conflicts",
+                                MAX_RETRIES
+                            );
                             return Err(e);
                         }
                     } else {
@@ -159,11 +176,7 @@ impl TableWriter {
     }
 
     /// Inner write method for multiple batches
-    async fn write_batches_inner<T, F>(
-        &self,
-        batches: &[Vec<T>],
-        to_record_batch: &F,
-    ) -> Result<()>
+    async fn write_batches_inner<T, F>(&self, batches: &[Vec<T>], to_record_batch: &F) -> Result<()>
     where
         T: Clone,
         F: Fn(&[T], &IcebergSchema) -> Result<RecordBatch>,
@@ -203,7 +216,8 @@ impl TableWriter {
 
         // Compute partition value from first record's timestamp
         // Convert first record to RecordBatch to extract record_date
-        let first_batch = batches.first()
+        let first_batch = batches
+            .first()
             .ok_or_else(|| anyhow::anyhow!("No batches to write"))?;
 
         // Convert to RecordBatch to extract partition value
@@ -213,7 +227,7 @@ impl TableWriter {
         let data_file_writer_builder = DataFileWriterBuilder::new(
             parquet_writer_builder,
             Some(partition_value.clone()),
-            partition_spec_id
+            partition_spec_id,
         );
 
         // Build the data file writer
@@ -222,8 +236,12 @@ impl TableWriter {
         // Write each batch as a separate row group
         for (batch_idx, batch_records) in batches.iter().enumerate() {
             let record_batch = to_record_batch(batch_records, table.metadata().current_schema())?;
-            debug!("Writing row group {}/{} with {} records",
-                  batch_idx + 1, batches.len(), batch_records.len());
+            debug!(
+                "Writing row group {}/{} with {} records",
+                batch_idx + 1,
+                batches.len(),
+                batch_records.len()
+            );
             data_file_writer.write(record_batch).await?;
         }
 
@@ -240,10 +258,7 @@ impl TableWriter {
         Ok(())
     }
 
-    async fn write_record_batches_inner(
-        &self,
-        record_batches: &[RecordBatch],
-    ) -> Result<()> {
+    async fn write_record_batches_inner(&self, record_batches: &[RecordBatch]) -> Result<()> {
         let table = self.catalog.load_table(&self.table_ident).await?;
 
         let batch_id = uuid::Uuid::new_v4().to_string();
@@ -332,8 +347,10 @@ fn extract_partition_value(batch: &RecordBatch) -> Result<Struct> {
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let record_date = epoch + chrono::Duration::days(days_since_epoch as i64);
 
-    debug!("Computed partition value: record_date={} (days since epoch: {})",
-          record_date, days_since_epoch);
+    debug!(
+        "Computed partition value: record_date={} (days since epoch: {})",
+        record_date, days_since_epoch
+    );
 
     // Create partition value: Struct with Literal::date()
     Ok(Struct::from_iter([Some(Literal::date(days_since_epoch))]))

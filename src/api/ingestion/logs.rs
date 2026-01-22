@@ -1,12 +1,12 @@
-use axum::{extract::State, Json};
-use axum::http::{HeaderMap, header::CONTENT_TYPE, StatusCode};
-use axum::response::{IntoResponse, Response};
-use crate::api::AppState;
 use crate::api::ingestion::IngestResponse;
+use crate::api::AppState;
 use crate::models::Log as LogData;
+use anyhow::Result;
+use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use tracing::{error, info, warn};
-use anyhow::Result;
 
 /// Unified OTLP /v1/logs handler that switches on Content-Type
 pub async fn ingest_logs(
@@ -29,14 +29,16 @@ pub async fn ingest_logs(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} log records", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP logs: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(e) => {
@@ -52,14 +54,16 @@ pub async fn ingest_logs(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} log records", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP logs: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(e) => {
@@ -98,6 +102,9 @@ async fn process_logs(
         warn!("Log buffer not initialized");
     }
 
-    info!("Processed {} log records from OTLP request ({} bytes)", log_count, body_size);
+    info!(
+        "Processed {} log records from OTLP request ({} bytes)",
+        log_count, body_size
+    );
     Ok(log_count)
 }

@@ -1,21 +1,17 @@
 use axum::extract::DefaultBodyLimit;
 use std::net::SocketAddr;
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    trace::TraceLayer,
-    decompression::RequestDecompressionLayer,
-};
+use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer, trace::TraceLayer};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 pub mod api;
-pub mod models;
-pub mod storage;
-pub mod query;
 pub mod compaction;
 pub mod config;
 pub mod ingest_engine;
+pub mod models;
+pub mod query;
+pub mod storage;
 
 use config::Config;
 
@@ -31,7 +27,10 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting SoftProbe OTLP Backend v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting SoftProbe OTLP Backend v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Load configuration
     let config = Config::load()?;
@@ -71,7 +70,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize API handlers
-    let app = api::create_router(storage, query_engine, Some(span_buffer), Some(log_buffer), Some(metric_buffer)).await?.layer(
+    let app = api::create_router(
+        storage,
+        query_engine,
+        Some(span_buffer),
+        Some(log_buffer),
+        Some(metric_buffer),
+    )
+    .await?
+    .layer(
         ServiceBuilder::new()
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive())
@@ -87,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("OTLP collector service initialized successfully");
-    
+
     axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())

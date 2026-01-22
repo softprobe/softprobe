@@ -1,10 +1,14 @@
 use crate::config::Config;
-use crate::models::{Log, Metric, Span};
 use crate::ingest_engine::fs::list_parquet_files;
-use crate::storage::buffer::{Bufferable, FlushCallback, FlushFuture, PreAddCallback, PreAddFuture};
+use crate::models::{Log, Metric, Span};
+use crate::storage::buffer::{
+    Bufferable, FlushCallback, FlushFuture, PreAddCallback, PreAddFuture,
+};
 
 mod fs;
-use crate::storage::iceberg::arrow::{logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch};
+use crate::storage::iceberg::arrow::{
+    logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
+};
 use crate::storage::iceberg::IcebergWriter;
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
@@ -77,49 +81,73 @@ impl IngestEngine {
     pub fn span_pre_add_callback(&self) -> Arc<PreAddCallback<Span>> {
         let wal_writer = self.wal_writer.clone();
         let iceberg_writer = self.iceberg_writer.clone();
-        Arc::new(move |items: Vec<Span>, request_size: usize| -> PreAddFuture<Span> {
-            let wal_writer = wal_writer.clone();
-            let iceberg_writer = iceberg_writer.clone();
-            Box::pin(async move {
-                let schema = iceberg_writer.spans_schema().await?;
-                wal_writer
-                    .write_batch("spans", &items, request_size, schema.as_ref(), spans_to_record_batch)
-                    .await?;
-                Ok(items)
-            })
-        })
+        Arc::new(
+            move |items: Vec<Span>, request_size: usize| -> PreAddFuture<Span> {
+                let wal_writer = wal_writer.clone();
+                let iceberg_writer = iceberg_writer.clone();
+                Box::pin(async move {
+                    let schema = iceberg_writer.spans_schema().await?;
+                    wal_writer
+                        .write_batch(
+                            "spans",
+                            &items,
+                            request_size,
+                            schema.as_ref(),
+                            spans_to_record_batch,
+                        )
+                        .await?;
+                    Ok(items)
+                })
+            },
+        )
     }
 
     pub fn log_pre_add_callback(&self) -> Arc<PreAddCallback<Log>> {
         let wal_writer = self.wal_writer.clone();
         let iceberg_writer = self.iceberg_writer.clone();
-        Arc::new(move |items: Vec<Log>, request_size: usize| -> PreAddFuture<Log> {
-            let wal_writer = wal_writer.clone();
-            let iceberg_writer = iceberg_writer.clone();
-            Box::pin(async move {
-                let schema = iceberg_writer.logs_schema().await?;
-                wal_writer
-                    .write_batch("logs", &items, request_size, schema.as_ref(), logs_to_record_batch)
-                    .await?;
-                Ok(items)
-            })
-        })
+        Arc::new(
+            move |items: Vec<Log>, request_size: usize| -> PreAddFuture<Log> {
+                let wal_writer = wal_writer.clone();
+                let iceberg_writer = iceberg_writer.clone();
+                Box::pin(async move {
+                    let schema = iceberg_writer.logs_schema().await?;
+                    wal_writer
+                        .write_batch(
+                            "logs",
+                            &items,
+                            request_size,
+                            schema.as_ref(),
+                            logs_to_record_batch,
+                        )
+                        .await?;
+                    Ok(items)
+                })
+            },
+        )
     }
 
     pub fn metric_pre_add_callback(&self) -> Arc<PreAddCallback<Metric>> {
         let wal_writer = self.wal_writer.clone();
         let iceberg_writer = self.iceberg_writer.clone();
-        Arc::new(move |items: Vec<Metric>, request_size: usize| -> PreAddFuture<Metric> {
-            let wal_writer = wal_writer.clone();
-            let iceberg_writer = iceberg_writer.clone();
-            Box::pin(async move {
-                let schema = iceberg_writer.metrics_schema().await?;
-                wal_writer
-                    .write_batch("metrics", &items, request_size, schema.as_ref(), metrics_to_record_batch)
-                    .await?;
-                Ok(items)
-            })
-        })
+        Arc::new(
+            move |items: Vec<Metric>, request_size: usize| -> PreAddFuture<Metric> {
+                let wal_writer = wal_writer.clone();
+                let iceberg_writer = iceberg_writer.clone();
+                Box::pin(async move {
+                    let schema = iceberg_writer.metrics_schema().await?;
+                    wal_writer
+                        .write_batch(
+                            "metrics",
+                            &items,
+                            request_size,
+                            schema.as_ref(),
+                            metrics_to_record_batch,
+                        )
+                        .await?;
+                    Ok(items)
+                })
+            },
+        )
     }
 
     pub fn span_flush_callback(&self) -> Arc<FlushCallback<Span>> {
@@ -135,7 +163,15 @@ impl IngestEngine {
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.spans_schema().await?;
-                stage_batches("spans", schema.as_ref(), batches, spans_to_record_batch, cache_dir, queue).await?;
+                stage_batches(
+                    "spans",
+                    schema.as_ref(),
+                    batches,
+                    spans_to_record_batch,
+                    cache_dir,
+                    queue,
+                )
+                .await?;
                 engine.update_wal_watermark("spans", watermark).await?;
                 Ok(())
             })
@@ -155,7 +191,15 @@ impl IngestEngine {
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.logs_schema().await?;
-                stage_batches("logs", schema.as_ref(), batches, logs_to_record_batch, cache_dir, queue).await?;
+                stage_batches(
+                    "logs",
+                    schema.as_ref(),
+                    batches,
+                    logs_to_record_batch,
+                    cache_dir,
+                    queue,
+                )
+                .await?;
                 engine.update_wal_watermark("logs", watermark).await?;
                 Ok(())
             })
@@ -175,7 +219,15 @@ impl IngestEngine {
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.metrics_schema().await?;
-                stage_batches("metrics", schema.as_ref(), batches, metrics_to_record_batch, cache_dir, queue).await?;
+                stage_batches(
+                    "metrics",
+                    schema.as_ref(),
+                    batches,
+                    metrics_to_record_batch,
+                    cache_dir,
+                    queue,
+                )
+                .await?;
                 engine.update_wal_watermark("metrics", watermark).await?;
                 Ok(())
             })
@@ -198,7 +250,8 @@ impl IngestEngine {
         let engine = Arc::clone(self);
         let interval_seconds = self.optimizer_interval_seconds;
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
             loop {
                 ticker.tick().await;
                 if let Err(err) = engine.optimize_once().await {
@@ -236,7 +289,11 @@ impl IngestEngine {
                 continue;
             }
 
-            if let Err(err) = self.iceberg_writer.write_span_record_batches(combined).await {
+            if let Err(err) = self
+                .iceberg_writer
+                .write_span_record_batches(combined)
+                .await
+            {
                 warn!("Optimizer failed to commit spans for {}: {}", date, err);
                 for item in items {
                     self.span_queue.push(item).await;
@@ -296,7 +353,11 @@ impl IngestEngine {
                 continue;
             }
 
-            if let Err(err) = self.iceberg_writer.write_metric_record_batches(combined).await {
+            if let Err(err) = self
+                .iceberg_writer
+                .write_metric_record_batches(combined)
+                .await
+            {
                 warn!("Optimizer failed to commit metrics for {}: {}", date, err);
                 for item in items {
                     self.metric_queue.push(item).await;
@@ -330,15 +391,12 @@ impl IngestEngine {
     async fn replay_wal(&self) -> Result<()> {
         self.replay_kind("spans", self.span_queue.clone()).await?;
         self.replay_kind("logs", self.log_queue.clone()).await?;
-        self.replay_kind("metrics", self.metric_queue.clone()).await?;
+        self.replay_kind("metrics", self.metric_queue.clone())
+            .await?;
         Ok(())
     }
 
-    async fn replay_kind(
-        &self,
-        kind: &str,
-        queue: Arc<FlushQueue>,
-    ) -> Result<()> {
+    async fn replay_kind(&self, kind: &str, queue: Arc<FlushQueue>) -> Result<()> {
         let record_batches = self.wal_writer.read_record_batches(kind).await?;
         if record_batches.is_empty() {
             return Ok(());
@@ -417,19 +475,15 @@ pub struct WalWriter {
 
 impl WalWriter {
     pub async fn new(config: &Config) -> Result<Self> {
-        let manifest_writer = config
-            .ingest_engine
-            .cache_dir
-            .as_ref()
-            .map(|dir| {
-                Arc::new(WalManifestWriter::new(
-                    PathBuf::from(dir),
-                    std::time::Duration::from_secs(
-                        config.ingest_engine.wal_manifest_update_interval_seconds,
-                    ),
-                    config.ingest_engine.wal_manifest_max_pending_files,
-                ))
-            });
+        let manifest_writer = config.ingest_engine.cache_dir.as_ref().map(|dir| {
+            Arc::new(WalManifestWriter::new(
+                PathBuf::from(dir),
+                std::time::Duration::from_secs(
+                    config.ingest_engine.wal_manifest_update_interval_seconds,
+                ),
+                config.ingest_engine.wal_manifest_max_pending_files,
+            ))
+        });
 
         Ok(Self {
             wal_prefix: config.ingest_engine.wal_prefix.clone(),
@@ -492,7 +546,11 @@ impl WalWriter {
                 .join(format!("{:04}", date.year()))
                 .join(format!("{:02}", date.month()))
                 .join(format!("{:02}", date.day()))
-                .join(format!("{}-{}.parquet", now.format("%Y%m%dT%H%M%SZ"), Uuid::new_v4().simple()));
+                .join(format!(
+                    "{}-{}.parquet",
+                    now.format("%Y%m%dT%H%M%SZ"),
+                    Uuid::new_v4().simple()
+                ));
             if let Some(parent) = cache_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -547,7 +605,9 @@ impl WalWriter {
         match std::fs::read_to_string(&path) {
             Ok(contents) => chrono::DateTime::parse_from_rfc3339(contents.trim())
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH)),
+                .unwrap_or_else(|_| {
+                    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH)
+                }),
             Err(_) => chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH),
         }
     }
@@ -587,7 +647,9 @@ impl WalManifestWriter {
 
         let should_flush = {
             let mut last_flush = self.last_flush.lock().await;
-            let last = last_flush.entry(kind.to_string()).or_insert_with(std::time::Instant::now);
+            let last = last_flush
+                .entry(kind.to_string())
+                .or_insert_with(std::time::Instant::now);
             let pending_len = self
                 .pending
                 .lock()
@@ -736,8 +798,7 @@ fn write_parquet_cache(
     schema: &IcebergSchema,
     record_batches: &[RecordBatch],
     cache_dir: &Path,
-) -> Result<PathBuf>
-{
+) -> Result<PathBuf> {
     let cache_path = cache_dir
         .join(kind)
         .join(format!("{:04}", date.year()))
@@ -858,8 +919,11 @@ fn group_items_by_key<T: Bufferable + Clone>(items: &[T]) -> Vec<Vec<T>> {
     groups
 }
 
-fn group_by_date(staged: Vec<StagedBatch>) -> std::collections::HashMap<NaiveDate, Vec<StagedBatch>> {
-    let mut grouped: std::collections::HashMap<NaiveDate, Vec<StagedBatch>> = std::collections::HashMap::new();
+fn group_by_date(
+    staged: Vec<StagedBatch>,
+) -> std::collections::HashMap<NaiveDate, Vec<StagedBatch>> {
+    let mut grouped: std::collections::HashMap<NaiveDate, Vec<StagedBatch>> =
+        std::collections::HashMap::new();
     for item in staged {
         grouped.entry(item.date).or_default().push(item);
     }

@@ -1,8 +1,8 @@
 // Re-export key modules for testing
 pub mod api;
-pub mod models;
-pub mod storage;
-pub mod query;
-pub mod config;
 pub mod compaction;
+pub mod config;
 pub mod ingest_engine;
+pub mod models;
+pub mod query;
+pub mod storage;

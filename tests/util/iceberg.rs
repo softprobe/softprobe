@@ -43,4 +43,3 @@ pub fn ensure_wal_bucket(config: &mut Config) {
     );
     config.ingest_engine.wal_bucket = candidate;
 }
-

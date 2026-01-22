@@ -1,7 +1,9 @@
 use crate::config::Config;
 use anyhow::Result;
 use iceberg::CatalogBuilder;
-use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE};
+use iceberg_catalog_rest::{
+    RestCatalog, RestCatalogBuilder, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -14,16 +16,25 @@ pub struct IcebergCatalog {
 impl IcebergCatalog {
     /// Initialize the Iceberg REST catalog with configuration
     pub async fn new(config: &Config) -> Result<Self> {
-        info!("Initializing Iceberg REST catalog: {}", config.iceberg.catalog_uri);
+        info!(
+            "Initializing Iceberg REST catalog: {}",
+            config.iceberg.catalog_uri
+        );
 
         // Configure REST catalog properties
         let mut catalog_props = HashMap::new();
-        catalog_props.insert(REST_CATALOG_PROP_URI.to_string(), config.iceberg.catalog_uri.clone());
+        catalog_props.insert(
+            REST_CATALOG_PROP_URI.to_string(),
+            config.iceberg.catalog_uri.clone(),
+        );
 
         // Warehouse location
-        let warehouse_uri = std::env::var("ICEBERG_WAREHOUSE")
-            .unwrap_or_else(|_| config.iceberg.warehouse.clone());
-        catalog_props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_uri.clone());
+        let warehouse_uri =
+            std::env::var("ICEBERG_WAREHOUSE").unwrap_or_else(|_| config.iceberg.warehouse.clone());
+        catalog_props.insert(
+            REST_CATALOG_PROP_WAREHOUSE.to_string(),
+            warehouse_uri.clone(),
+        );
         info!("Using Iceberg warehouse: {}", warehouse_uri);
 
         // Authentication token (for Cloudflare R2, etc.)
@@ -35,7 +46,9 @@ impl IcebergCatalog {
         // TLS validation (development only!)
         let http_client = if std::env::var("ICEBERG_DISABLE_TLS_VALIDATION").is_ok() {
             info!("⚠️  TLS certificate validation DISABLED (ICEBERG_DISABLE_TLS_VALIDATION set)");
-            info!("⚠️  This should ONLY be used in sandboxed test environments with TLS interception");
+            info!(
+                "⚠️  This should ONLY be used in sandboxed test environments with TLS interception"
+            );
             reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .build()?

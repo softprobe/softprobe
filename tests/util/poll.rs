@@ -23,7 +23,11 @@ where
 
         if start.elapsed() >= timeout {
             if let Some(err) = last_err {
-                return Err(anyhow!("timed out after {:?}: last error: {}", timeout, err));
+                return Err(anyhow!(
+                    "timed out after {:?}: last error: {}",
+                    timeout,
+                    err
+                ));
             }
             return Err(anyhow!("timed out after {:?}", timeout));
         }
@@ -31,4 +35,3 @@ where
         tokio::time::sleep(interval).await;
     }
 }
-

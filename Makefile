@@ -14,7 +14,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
 # Default target
 help:
@@ -302,3 +302,10 @@ test-deployment-stress: check-local
 		pip3 install --user requests || pip3 install requests; \
 	fi
 	@python3 test_deployment.py --env local --span-count 20000
+
+stress-test: setup-local
+	@echo "🧪 Stress testing local deployment via `perf_stress`..."
+	@CONFIG_FILE=config.yaml \
+		cargo run --bin perf_stress -- \
+		--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500
+	@$(MAKE) teardown-local

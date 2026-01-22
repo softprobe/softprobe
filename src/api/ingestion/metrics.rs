@@ -1,12 +1,12 @@
-use axum::{extract::State, Json};
-use axum::http::{HeaderMap, header::CONTENT_TYPE, StatusCode};
-use axum::response::{IntoResponse, Response};
-use crate::api::AppState;
 use crate::api::ingestion::IngestResponse;
+use crate::api::AppState;
 use crate::models::Metric;
+use anyhow::Result;
+use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use tracing::{error, info, warn};
-use anyhow::Result;
 
 /// OTLP /v1/metrics JSON handler
 pub async fn ingest_metrics_json(
@@ -95,14 +95,16 @@ pub async fn ingest_metrics(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} metric data points", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP metrics: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(e) => {
@@ -118,14 +120,16 @@ pub async fn ingest_metrics(
                     success: true,
                     ingested_count: count,
                     message: format!("Successfully ingested {} metric data points", count),
-                }).into_response(),
+                })
+                .into_response(),
                 Err(e) => {
                     error!("Failed to process OTLP metrics: {}", e);
                     Json(IngestResponse {
                         success: false,
                         ingested_count: 0,
                         message: format!("Ingestion failed: {}", e),
-                    }).into_response()
+                    })
+                    .into_response()
                 }
             },
             Err(_) => (StatusCode::BAD_REQUEST, "Invalid JSON").into_response(),
@@ -161,6 +165,9 @@ async fn process_metrics(
         warn!("Metric buffer not initialized");
     }
 
-    info!("Processed {} metric data points from OTLP request ({} bytes)", metric_count, body_size);
+    info!(
+        "Processed {} metric data points from OTLP request ({} bytes)",
+        metric_count, body_size
+    );
     Ok(metric_count)
 }

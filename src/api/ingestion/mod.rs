@@ -1,6 +1,6 @@
-pub mod traces;
 pub mod logs;
 pub mod metrics;
+pub mod traces;
 
 use serde::{Deserialize, Serialize};
 

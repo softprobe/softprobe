@@ -1,19 +1,18 @@
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::metrics::v1::{
+    metric::Data, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum,
+};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use prost::Message;
+use reqwest::Client;
+use reqwest::StatusCode;
 use softprobe_otlp_backend::api;
 use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::storage;
 use softprobe_otlp_backend::query;
-use reqwest::StatusCode;
+use softprobe_otlp_backend::storage;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use reqwest::Client;
-use opentelemetry_proto::tonic::metrics::v1::{
-    ResourceMetrics, ScopeMetrics, Metric, NumberDataPoint,
-    metric::Data, Gauge, Sum,
-};
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::common::v1::{KeyValue, AnyValue, any_value};
-use prost::Message;
 
 async fn start_test_server() -> String {
     let mut config = Config::default();
@@ -48,7 +47,9 @@ async fn start_test_server() -> String {
     .unwrap();
 
     // Create router
-    let app = api::create_router(storage, query_engine, None, None, Some(metric_buffer)).await.unwrap();
+    let app = api::create_router(storage, query_engine, None, None, Some(metric_buffer))
+        .await
+        .unwrap();
 
     // Bind to a random available port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

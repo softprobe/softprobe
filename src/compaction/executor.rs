@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::storage::iceberg::IcebergCatalog;
 use anyhow::{anyhow, Result};
-use iceberg::{Catalog, TableIdent, TableRequirement, TableUpdate};
 use iceberg::table::Table;
+use iceberg::{Catalog, TableIdent, TableRequirement, TableUpdate};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -128,7 +128,10 @@ async fn resolve_catalog_api_base_url(
             return Ok(format!("{}/v1", base_uri));
         }
         Err(err) => {
-            warn!("Catalog config lookup failed ({}), falling back to base URI", err);
+            warn!(
+                "Catalog config lookup failed ({}), falling back to base URI",
+                err
+            );
             if diag {
                 println!(
                     "MAINT_DIAG config_lookup_error err={} fallback_base={}/v1",
@@ -142,8 +145,15 @@ async fn resolve_catalog_api_base_url(
     let status = response.status();
     let raw = response.text().await.unwrap_or_default();
     if diag {
-        let preview = if raw.len() > 800 { &raw[..800] } else { raw.as_str() };
-        println!("MAINT_DIAG config_lookup_ok status={} body_preview={}", status, preview);
+        let preview = if raw.len() > 800 {
+            &raw[..800]
+        } else {
+            raw.as_str()
+        };
+        println!(
+            "MAINT_DIAG config_lookup_ok status={} body_preview={}",
+            status, preview
+        );
     }
     let config: CatalogConfigResponse = serde_json::from_str(&raw).unwrap_or_default();
     let resolved_uri = config
@@ -190,8 +200,8 @@ impl MaintenanceExecutor {
         };
 
         let catalog_token = config.iceberg.catalog_token.clone();
-        let warehouse = std::env::var("ICEBERG_WAREHOUSE")
-            .unwrap_or_else(|_| config.iceberg.warehouse.clone());
+        let warehouse =
+            std::env::var("ICEBERG_WAREHOUSE").unwrap_or_else(|_| config.iceberg.warehouse.clone());
         let catalog_api_base_url = resolve_catalog_api_base_url(
             &http_client,
             config.iceberg.catalog_uri.as_str(),
@@ -456,7 +466,8 @@ impl MaintenanceExecutor {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 404 || status.as_u16() == 501
+        if status.as_u16() == 404
+            || status.as_u16() == 501
             || (status.as_u16() == 400 && body.contains("No route for request"))
         {
             warn!(
@@ -501,7 +512,11 @@ impl MaintenanceExecutor {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             if std::env::var("MAINT_DIAG").ok().as_deref() == Some("1") {
-                let preview = if body.len() > 800 { &body[..800] } else { body.as_str() };
+                let preview = if body.len() > 800 {
+                    &body[..800]
+                } else {
+                    body.as_str()
+                };
                 println!(
                     "MAINT_DIAG post_table_commit_failed status={} body_preview={}",
                     status, preview
@@ -530,7 +545,11 @@ impl MaintenanceExecutor {
             .map_err(|e| anyhow!("time error: {}", e))?
             .as_millis() as i64;
         let older_than_ms = now_ms.saturating_sub(
-            (self.config.compaction.metadata_remove_orphan_older_than_seconds as i64) * 1000,
+            (self
+                .config
+                .compaction
+                .metadata_remove_orphan_older_than_seconds as i64)
+                * 1000,
         );
         let request = serde_json::json!({
             "options": { "older-than": older_than_ms }
@@ -568,7 +587,8 @@ impl MaintenanceExecutor {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 404 || status.as_u16() == 501
+        if status.as_u16() == 404
+            || status.as_u16() == 501
             || (status.as_u16() == 400 && body.contains("No route for request"))
         {
             warn!(

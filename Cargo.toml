@@ -95,6 +95,10 @@ hyper = "1.0"
 name = "softprobe_otlp_backend"
 path = "src/lib.rs"
 
+[[bin]]
+name = "perf_stress"
+path = "src/bin/perf_stress.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

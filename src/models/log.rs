@@ -1,7 +1,7 @@
 use crate::storage::buffer::Bufferable;
+use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use anyhow::Result;
 
 /// Log domain model - unified representation across all layers
 /// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
@@ -37,7 +37,6 @@ pub struct Log {
     // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
-
     // Field 15: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
@@ -57,7 +56,8 @@ impl Bufferable for Log {
     fn compare_for_sort(&self, other: &Self) -> Ordering {
         // Sort by session_id first, then timestamp
         // This matches Iceberg sort order (field 1, 2)
-        self.session_id.cmp(&other.session_id)
+        self.session_id
+            .cmp(&other.session_id)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
@@ -92,7 +92,9 @@ impl Log {
 
         // Extract observed timestamp
         let observed_timestamp = if log_record.observed_time_unix_nano > 0 {
-            Some(chrono::DateTime::from_timestamp_nanos(log_record.observed_time_unix_nano as i64))
+            Some(chrono::DateTime::from_timestamp_nanos(
+                log_record.observed_time_unix_nano as i64,
+            ))
         } else {
             None
         };
@@ -112,10 +114,18 @@ impl Log {
         for attr in &log_record.attributes {
             if let Some(value) = &attr.value {
                 let value_str = match value.value.as_ref() {
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                    ) => s.clone(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
+                        i.to_string()
+                    }
+                    Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
+                    ) => d.to_string(),
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
+                        b,
+                    )) => b.to_string(),
                     _ => continue,
                 };
                 attributes.insert(attr.key.clone(), value_str);
@@ -159,10 +169,22 @@ impl Log {
             for attr in &resource.attributes {
                 if let Some(value) = &attr.value {
                     let value_str = match value.value.as_ref() {
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                s,
+                            ),
+                        ) => s.clone(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
+                        ) => i.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
+                                d,
+                            ),
+                        ) => d.to_string(),
+                        Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
+                        ) => b.to_string(),
                         _ => continue,
                     };
                     attributes.insert(attr.key.clone(), value_str);
@@ -182,7 +204,10 @@ impl Log {
         for attr in &log_record.attributes {
             if attr.key == "session.id" || attr.key == "session_id" {
                 if let Some(value) = &attr.value {
-                    if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) = &value.value {
+                    if let Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                    ) = &value.value
+                    {
                         return Some(s.clone());
                     }
                 }
@@ -190,7 +215,8 @@ impl Log {
         }
 
         // Fallback to resource attributes
-        resource_attributes.get("session.id")
+        resource_attributes
+            .get("session.id")
             .or_else(|| resource_attributes.get("session_id"))
             .cloned()
     }
@@ -199,14 +225,23 @@ impl Log {
     fn extract_log_body(
         log_record: &opentelemetry_proto::tonic::logs::v1::LogRecord,
     ) -> Option<String> {
-        log_record.body.as_ref().and_then(|body| {
-            match body.value.as_ref() {
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => Some(s.clone()),
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => Some(i.to_string()),
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => Some(d.to_string()),
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => Some(b.to_string()),
+        log_record
+            .body
+            .as_ref()
+            .and_then(|body| match body.value.as_ref() {
+                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => {
+                    Some(s.clone())
+                }
+                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
+                    Some(i.to_string())
+                }
+                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => {
+                    Some(d.to_string())
+                }
+                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => {
+                    Some(b.to_string())
+                }
                 _ => None,
-            }
-        })
+            })
     }
 }

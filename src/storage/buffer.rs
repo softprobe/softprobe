@@ -35,7 +35,7 @@ pub type PreAddCallback<T> = dyn Fn(Vec<T>, usize) -> PreAddFuture<T> + Send + S
 
 /// Generic buffer with size and time-based flushing
 pub struct SimpleBuffer<T: Bufferable> {
-    name: String, // For logging (e.g., "spans", "logs", "metrics")
+    name: String,             // For logging (e.g., "spans", "logs", "metrics")
     config: SpanBufferConfig, // TODO: Rename to BufferConfig
     items: Arc<Mutex<Vec<T>>>,
     current_size_bytes: Arc<AtomicUsize>,
@@ -67,14 +67,20 @@ impl<T: Bufferable> SimpleBuffer<T> {
             let check_interval = if cfg!(test) {
                 Duration::from_millis(100) // Fast checks during testing
             } else {
-                Duration::from_secs(std::cmp::max(1, buffer_clone.config.flush_interval_seconds / 2))
+                Duration::from_secs(std::cmp::max(
+                    1,
+                    buffer_clone.config.flush_interval_seconds / 2,
+                ))
             };
             let mut interval_timer = interval(check_interval);
 
             loop {
                 interval_timer.tick().await;
                 if let Err(e) = buffer_clone.check_and_flush_by_time().await {
-                    warn!("[{}] Failed to flush buffer by time: {}", buffer_clone.name, e);
+                    warn!(
+                        "[{}] Failed to flush buffer by time: {}",
+                        buffer_clone.name, e
+                    );
                 }
             }
         });
@@ -111,7 +117,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
         }
 
         let item_count = items.len();
-        debug!("[{}] Adding {} items with request body size {} bytes", self.name, item_count, request_body_size);
+        debug!(
+            "[{}] Adding {} items with request body size {} bytes",
+            self.name, item_count, request_body_size
+        );
 
         // Determine if we should flush BEFORE releasing the lock to avoid TOCTOU race
         let should_flush = {
@@ -119,13 +128,15 @@ impl<T: Bufferable> SimpleBuffer<T> {
             buffer.append(&mut items);
 
             // Track approximate size using request body size as proxy
-            self.current_size_bytes.fetch_add(request_body_size, AtomicOrdering::Relaxed);
+            self.current_size_bytes
+                .fetch_add(request_body_size, AtomicOrdering::Relaxed);
 
             // Check limits while holding the lock - this is critical for correctness
             let current_size = self.current_size_bytes.load(AtomicOrdering::Relaxed);
             let current_count = buffer.len();
 
-            current_count >= self.config.max_buffer_spans || current_size >= self.config.max_buffer_bytes
+            current_count >= self.config.max_buffer_spans
+                || current_size >= self.config.max_buffer_bytes
         }; // Lock is released here
 
         // Flush if needed (outside the lock to avoid holding it during I/O)
@@ -136,7 +147,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
             };
             let current_size = self.current_size_bytes.load(AtomicOrdering::Relaxed);
 
-            info!("[{}] Buffer reached limit ({} items, {} bytes), flushing", self.name, current_count, current_size);
+            info!(
+                "[{}] Buffer reached limit ({} items, {} bytes), flushing",
+                self.name, current_count, current_size
+            );
             self.flush().await?;
         }
 
@@ -155,8 +169,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
             };
 
             if item_count > 0 {
-                info!("[{}] Buffer reached time limit ({} seconds), flushing {} items",
-                      self.name, self.config.flush_interval_seconds, item_count);
+                info!(
+                    "[{}] Buffer reached time limit ({} seconds), flushing {} items",
+                    self.name, self.config.flush_interval_seconds, item_count
+                );
                 self.flush().await?;
             }
         }
@@ -175,7 +191,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
         let item_count = buffer.len();
         let size_bytes = self.current_size_bytes.load(AtomicOrdering::Relaxed);
 
-        info!("[{}] Flushing {} items ({} bytes) to storage", self.name, item_count, size_bytes);
+        info!(
+            "[{}] Flushing {} items ({} bytes) to storage",
+            self.name, item_count, size_bytes
+        );
 
         // Sort items for data locality: date -> grouping_key -> timestamp
         // Partitioning by date is critical: all items in a file must have the same partition
@@ -183,7 +202,8 @@ impl<T: Bufferable> SimpleBuffer<T> {
             let date_a = a.partition_key();
             let date_b = b.partition_key();
 
-            date_a.cmp(&date_b)
+            date_a
+                .cmp(&date_b)
                 .then_with(|| a.grouping_key().cmp(&b.grouping_key()))
                 .then_with(|| a.compare_for_sort(b))
         });
@@ -202,25 +222,43 @@ impl<T: Bufferable> SimpleBuffer<T> {
         // Each date group will be written to a separate Parquet file
         let date_groups = self.group_by_partition(&batch);
 
-        info!("[{}] Flushing items grouped by date: {} date partition(s)", self.name, date_groups.len());
+        info!(
+            "[{}] Flushing items grouped by date: {} date partition(s)",
+            self.name,
+            date_groups.len()
+        );
 
         // Write each date group as a separate file (each file has one partition value)
         for (date, date_items) in date_groups {
-            info!("[{}] Writing {} items for date {} to storage", self.name, date_items.len(), date);
+            info!(
+                "[{}] Writing {} items for date {} to storage",
+                self.name,
+                date_items.len(),
+                date
+            );
 
             // Group items by grouping_key for row group isolation
             // For traces/logs: one row group per session_id
             // For metrics: one row group per metric_name
             let grouped = self.group_by_key(&date_items);
 
-            info!("[{}] Writing {} groups as separate row groups in single Parquet file for date {}",
-                  self.name, grouped.len(), date);
+            info!(
+                "[{}] Writing {} groups as separate row groups in single Parquet file for date {}",
+                self.name,
+                grouped.len(),
+                date
+            );
 
             // Collect batches (drop grouping_key, keep only items)
             let batches: Vec<Vec<T>> = grouped
                 .into_iter()
                 .map(|(key, items)| {
-                    debug!("[{}] Preparing row group for {} ({} items)", self.name, key, items.len());
+                    debug!(
+                        "[{}] Preparing row group for {} ({} items)",
+                        self.name,
+                        key,
+                        items.len()
+                    );
                     items
                 })
                 .collect();
@@ -229,7 +267,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
             (self.flush_callback)(batches).await?;
         }
 
-        info!("[{}] Successfully flushed {} items to storage", self.name, item_count);
+        info!(
+            "[{}] Successfully flushed {} items to storage",
+            self.name, item_count
+        );
         Ok(())
     }
 
@@ -319,7 +360,10 @@ impl<T: Bufferable> SimpleBuffer<T> {
         };
 
         if item_count > 0 {
-            info!("[{}] Flushing all {} buffered items on shutdown", self.name, item_count);
+            info!(
+                "[{}] Flushing all {} buffered items on shutdown",
+                self.name, item_count
+            );
             self.flush().await?;
         }
 

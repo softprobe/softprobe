@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Recursively collect Parquet files under `dir` into `out`.
 pub fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {

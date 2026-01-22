@@ -3,13 +3,13 @@ use crate::query::cache::CacheSettings;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use duckdb::{Connection, ToSql};
 use duckdb::types::Value as DuckValue;
+use duckdb::{Connection, ToSql};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
@@ -22,7 +22,7 @@ pub struct DuckDBQueryEngine {
 const CATALOG_ALIAS: &str = "iceberg_catalog";
 
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicU64};
+use std::sync::atomic::AtomicU64;
 
 #[derive(Default)]
 struct ViewCounters {
@@ -179,10 +179,15 @@ impl DuckDBQueryEngine {
             .send(request)
             .await
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
-        rx.await.map_err(|_| anyhow!("DuckDB worker dropped response"))?
+        rx.await
+            .map_err(|_| anyhow!("DuckDB worker dropped response"))?
     }
 
-    pub async fn query_metadata(&self, _query: &str, _params: &[&dyn std::any::Any]) -> Result<Vec<crate::api::query::RecordingMetadata>> {
+    pub async fn query_metadata(
+        &self,
+        _query: &str,
+        _params: &[&dyn std::any::Any],
+    ) -> Result<Vec<crate::api::query::RecordingMetadata>> {
         // TODO: Execute DuckDB query on Iceberg table (Phase 1.2)
         // - Use iceberg_scan() function
         // - Apply partition pruning automatically (record_date, category_type)
@@ -190,7 +195,6 @@ impl DuckDBQueryEngine {
         // See: docs/migration-to-iceberg-design.md lines 993-1004 for query pattern
         todo!("Implement DuckDB query execution - see design document v1.7")
     }
-
 }
 
 impl DuckDBCore {
@@ -199,7 +203,11 @@ impl DuckDBCore {
     }
 
     fn cache_dir(&self) -> Option<&Path> {
-        self.config.ingest_engine.cache_dir.as_deref().map(Path::new)
+        self.config
+            .ingest_engine
+            .cache_dir
+            .as_deref()
+            .map(Path::new)
     }
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
@@ -220,7 +228,11 @@ impl DuckDBCore {
         })
     }
 
-    fn execute_query_on_state(&self, state: &mut ConnectionState, query: &str) -> Result<QueryResult> {
+    fn execute_query_on_state(
+        &self,
+        state: &mut ConnectionState,
+        query: &str,
+    ) -> Result<QueryResult> {
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
         let prepare_start = std::time::Instant::now();
         self.prepare_union_views_for_query(state, query)?;
@@ -302,7 +314,9 @@ impl DuckDBCore {
         if let Err(err) = conn.execute("SET experimental_metadata_reuse = true;", []) {
             warn!("Failed to enable DuckDB metadata reuse: {}", err);
         }
-        if self.cache.cache_dir.is_some() && std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+        if self.cache.cache_dir.is_some()
+            && std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1")
+        {
             return Ok(());
         }
 
@@ -383,7 +397,8 @@ impl DuckDBCore {
             .unwrap_or(true);
         if source_changed || !kind_ready {
             let start = std::time::Instant::now();
-            let applied_source = self.create_iceberg_view(&state.conn, kind, table_name, &source)?;
+            let applied_source =
+                self.create_iceberg_view(&state.conn, kind, table_name, &source)?;
             if diag {
                 println!(
                     "DIAG iceberg_view({}) created in {:?}",
@@ -433,9 +448,7 @@ impl DuckDBCore {
                     start.elapsed()
                 );
             }
-            state
-                .staged_signatures
-                .insert(staged_key, staged_signature);
+            state.staged_signatures.insert(staged_key, staged_signature);
             #[cfg(test)]
             {
                 VIEW_COUNTERS.staged.fetch_add(1, Ordering::Relaxed);
@@ -497,11 +510,7 @@ impl DuckDBCore {
             let start = std::time::Instant::now();
             state.conn.execute_batch(&union_view)?;
             if diag {
-                println!(
-                    "DIAG union_view({}) created in {:?}",
-                    kind,
-                    start.elapsed()
-                );
+                println!("DIAG union_view({}) created in {:?}", kind, start.elapsed());
             }
             #[cfg(test)]
             {
@@ -566,18 +575,18 @@ impl DuckDBCore {
     ) -> Result<(IcebergSource, String)> {
         if let Some(source) = state.iceberg_sources.get(kind_key) {
             if let IcebergSource::Pinned { .. } = source {
-        if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
-            return Ok((
-                IcebergSource::Pinned {
-                    metadata_path: pinned.metadata_path,
-                    snapshot_id: pinned.snapshot_id,
-                    compression: pinned.compression,
-                    signature: pinned.signature.clone(),
-                    data_files_path: pinned.data_files_path,
-                },
-                pinned.signature,
-            ));
-        }
+                if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
+                    return Ok((
+                        IcebergSource::Pinned {
+                            metadata_path: pinned.metadata_path,
+                            snapshot_id: pinned.snapshot_id,
+                            compression: pinned.compression,
+                            signature: pinned.signature.clone(),
+                            data_files_path: pinned.data_files_path,
+                        },
+                        pinned.signature,
+                    ));
+                }
             }
             let signature = self.iceberg_source_signature(source, table_name)?;
             return Ok((source.clone(), signature));
@@ -594,16 +603,16 @@ impl DuckDBCore {
             == Some("1");
         if !disable_pinned {
             if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
-            return Ok((
-                IcebergSource::Pinned {
-                    metadata_path: pinned.metadata_path,
-                    snapshot_id: pinned.snapshot_id,
-                    compression: pinned.compression,
-                    signature: pinned.signature.clone(),
-                    data_files_path: pinned.data_files_path,
-                },
-                pinned.signature,
-            ));
+                return Ok((
+                    IcebergSource::Pinned {
+                        metadata_path: pinned.metadata_path,
+                        snapshot_id: pinned.snapshot_id,
+                        compression: pinned.compression,
+                        signature: pinned.signature.clone(),
+                        data_files_path: pinned.data_files_path,
+                    },
+                    pinned.signature,
+                ));
             }
         }
 
@@ -877,7 +886,9 @@ impl DuckDBCore {
 
     fn iceberg_pinned_metadata(&self, table: &str) -> Option<PinnedMetadata> {
         let cache_dir = self.cache_dir()?;
-        let pointer_path = cache_dir.join("iceberg_metadata").join(format!("{table}.json"));
+        let pointer_path = cache_dir
+            .join("iceberg_metadata")
+            .join(format!("{table}.json"));
         let contents = std::fs::read_to_string(&pointer_path).ok()?;
         #[derive(serde::Deserialize)]
         struct Pointer {
@@ -907,11 +918,12 @@ impl DuckDBCore {
             metadata_path = pointer.metadata_location;
         }
         let metadata_path = metadata_path?;
-        let compression = if metadata_path.ends_with(".gz.metadata.json") || metadata_path.ends_with(".gz") {
-            Some("gzip".to_string())
-        } else {
-            None
-        };
+        let compression =
+            if metadata_path.ends_with(".gz.metadata.json") || metadata_path.ends_with(".gz") {
+                Some("gzip".to_string())
+            } else {
+                None
+            };
         let data_files_modified = pointer
             .data_files_path
             .as_ref()
@@ -935,7 +947,12 @@ impl DuckDBCore {
     fn iceberg_table_uri(&self, table: &str) -> String {
         let warehouse = self.config.iceberg.warehouse.trim_end_matches('/');
         if warehouse.contains("://") {
-            format!("{}/{}/{}", warehouse, self.config.iceberg.namespace.as_str(), table)
+            format!(
+                "{}/{}/{}",
+                warehouse,
+                self.config.iceberg.namespace.as_str(),
+                table
+            )
         } else {
             let bucket = self.config.ingest_engine.wal_bucket.trim_end_matches('/');
             format!("s3://{}/{}/{}", bucket, warehouse, table)
@@ -972,17 +989,23 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         DuckValue::USmallInt(v) => Value::Number(v.into()),
         DuckValue::UInt(v) => Value::Number(v.into()),
         DuckValue::UBigInt(v) => Value::Number(v.into()),
-        DuckValue::Float(v) => serde_json::Number::from_f64(v as f64).map(Value::Number).unwrap_or(Value::Null),
-        DuckValue::Double(v) => serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null),
+        DuckValue::Float(v) => serde_json::Number::from_f64(v as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        DuckValue::Double(v) => serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         DuckValue::Decimal(v) => Value::String(v.to_string()),
         DuckValue::Timestamp(unit, value) => Value::String(format!("{:?}:{}", unit, value)),
         DuckValue::Text(v) => Value::String(v),
         DuckValue::Blob(v) => Value::String(base64::engine::general_purpose::STANDARD.encode(v)),
         DuckValue::Date32(v) => Value::String(v.to_string()),
         DuckValue::Time64(unit, value) => Value::String(format!("{:?}:{}", unit, value)),
-        DuckValue::Interval { months, days, nanos } => {
-            Value::String(format!("months={months},days={days},nanos={nanos}"))
-        }
+        DuckValue::Interval {
+            months,
+            days,
+            nanos,
+        } => Value::String(format!("months={months},days={days},nanos={nanos}")),
         DuckValue::List(v) => Value::Array(v.into_iter().map(duck_value_to_json).collect()),
         DuckValue::Enum(v) => Value::String(v),
         DuckValue::Struct(fields) => {

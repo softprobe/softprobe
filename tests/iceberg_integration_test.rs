@@ -1,14 +1,14 @@
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::models::{Span as SpanData, SpanEvent, Log as LogData};
 use chrono::Utc;
+use softprobe_otlp_backend::config::Config;
+use softprobe_otlp_backend::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 mod util;
 use util::iceberg::{ensure_wal_bucket, load_test_config};
+use util::perf::{PerformanceMetrics, Timer};
 use util::pipeline::TestPipeline;
 use util::poll::wait_for;
-use util::perf::{PerformanceMetrics, Timer};
 
 // Note: perf + config helpers live under `tests/util/`.
 
@@ -67,10 +67,15 @@ async fn test_iceberg_writer_initialization() {
 async fn test_config_loading() {
     // Test that test config can be loaded and has valid iceberg section
     let config = load_test_config();
-    assert!(!config.iceberg.catalog_uri.is_empty(), "Catalog URI should not be empty");
-    assert_eq!(config.span_buffering.max_buffer_spans, 1, "Should have test buffer config");
+    assert!(
+        !config.iceberg.catalog_uri.is_empty(),
+        "Catalog URI should not be empty"
+    );
+    assert_eq!(
+        config.span_buffering.max_buffer_spans, 1,
+        "Should have test buffer config"
+    );
 }
-
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_session_roundtrip() {
@@ -105,17 +110,24 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             let events = if i % 10 == 0 {
                 vec![SpanEvent {
                     name: format!("event.{}", i),
-                    timestamp: now + chrono::Duration::milliseconds((session_idx * 1000 + i) as i64),
-                    attributes: HashMap::from([
-                        ("event.index".to_string(), i.to_string()),
-                    ]),
+                    timestamp: now
+                        + chrono::Duration::milliseconds((session_idx * 1000 + i) as i64),
+                    attributes: HashMap::from([("event.index".to_string(), i.to_string())]),
                 }]
             } else {
                 Vec::new()
             };
 
             // Add HTTP data to first span of each session for verification
-            let (http_method, http_path, http_headers, http_req_body, http_status, http_resp_headers, http_resp_body) = if i == 0 {
+            let (
+                http_method,
+                http_path,
+                http_headers,
+                http_req_body,
+                http_status,
+                http_resp_headers,
+                http_resp_body,
+            ) = if i == 0 {
                 (
                     Some("POST".to_string()),
                     Some(format!("/api/v1/session/{}", session_idx)),
@@ -140,7 +152,9 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 message_type: "HTTP_REQUEST".to_string(),
                 span_kind: Some("SERVER".to_string()),
                 timestamp: now + chrono::Duration::milliseconds((session_idx * 1000 + i) as i64),
-                end_timestamp: Some(now + chrono::Duration::milliseconds((session_idx * 1000 + i + 5) as i64)),
+                end_timestamp: Some(
+                    now + chrono::Duration::milliseconds((session_idx * 1000 + i + 5) as i64),
+                ),
                 attributes,
                 events,
                 http_request_method: http_method,
@@ -160,11 +174,20 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     let total_spans = num_sessions * spans_per_session;
 
     // Act: write through WAL + local cache
-    println!("🧪 Writing {} sessions ({} total spans) via WAL + local cache...", num_sessions, total_spans);
-    let write_timer = Timer::start(&format!("Multi-Session WAL Write ({} sessions)", num_sessions));
+    println!(
+        "🧪 Writing {} sessions ({} total spans) via WAL + local cache...",
+        num_sessions, total_spans
+    );
+    let write_timer = Timer::start(&format!(
+        "Multi-Session WAL Write ({} sessions)",
+        num_sessions
+    ));
     pipeline
         .add_spans(
-            all_session_batches.into_iter().flatten().collect::<Vec<_>>(),
+            all_session_batches
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
             total_spans * 256,
         )
         .await
@@ -172,17 +195,17 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     let write_duration = write_timer.stop();
 
     // Report write performance
-    let write_metrics = PerformanceMetrics::new(&format!("Multi-Session WAL Write ({} sessions, {} spans)", num_sessions, total_spans))
-        .with_duration(write_duration)
-        .with_rows(total_spans);
+    let write_metrics = PerformanceMetrics::new(&format!(
+        "Multi-Session WAL Write ({} sessions, {} spans)",
+        num_sessions, total_spans
+    ))
+    .with_duration(write_duration)
+    .with_rows(total_spans);
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-session WAL write time");
 
     let wal_files = pipeline.list_wal_files("spans").expect("wal files");
-    assert!(
-        !wal_files.is_empty(),
-        "Expected WAL cache files for spans"
-    );
+    assert!(!wal_files.is_empty(), "Expected WAL cache files for spans");
 
     println!("✅ WAL write completed, querying back each session to verify row group isolation...");
 
@@ -190,7 +213,12 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     let mut total_query_duration = std::time::Duration::ZERO;
 
     for (session_idx, session_id) in session_ids.iter().enumerate() {
-        println!("\n🔍 Querying session {}/{}: {}", session_idx + 1, num_sessions, session_id);
+        println!(
+            "\n🔍 Querying session {}/{}: {}",
+            session_idx + 1,
+            num_sessions,
+            session_id
+        );
 
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
@@ -207,9 +235,11 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
         println!("  ✓ Found {} rows", found);
 
-        assert_eq!(found, spans_per_session,
-                   "Expected exactly {} spans for session {}, found {}",
-                   spans_per_session, session_id, found);
+        assert_eq!(
+            found, spans_per_session,
+            "Expected exactly {} spans for session {}, found {}",
+            spans_per_session, session_id, found
+        );
 
         let http_sql = format!(
             "SELECT \
@@ -225,8 +255,15 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
              LIMIT 1",
             escaped
         );
-        let http_result = test_pipeline.execute_query(&http_sql).await.expect("http query");
-        assert_eq!(http_result.row_count, 1, "Expected HTTP fields row for session {}", session_id);
+        let http_result = test_pipeline
+            .execute_query(&http_sql)
+            .await
+            .expect("http query");
+        assert_eq!(
+            http_result.row_count, 1,
+            "Expected HTTP fields row for session {}",
+            session_id
+        );
         let row = &http_result.rows[0];
         let method = row[0].as_str().unwrap_or("");
         let path = row[1].as_str().unwrap_or("");
@@ -236,27 +273,66 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         let resp_headers = row[5].as_str().unwrap_or("");
         let resp_body = row[6].as_str().unwrap_or("");
 
-        assert_eq!(method, "POST", "HTTP method should be POST for session {}", session_idx);
-        assert_eq!(path, format!("/api/v1/session/{}", session_idx), "HTTP path should match for session {}", session_idx);
-        assert!(headers.contains("Content-Type"), "Request headers should contain Content-Type");
-        assert!(headers.contains("Authorization"), "Request headers should contain Authorization");
-        assert!(body.contains(session_id.as_str()), "Request body should contain session_id");
-        assert!(body.contains("action"), "Request body should contain action field");
+        assert_eq!(
+            method, "POST",
+            "HTTP method should be POST for session {}",
+            session_idx
+        );
+        assert_eq!(
+            path,
+            format!("/api/v1/session/{}", session_idx),
+            "HTTP path should match for session {}",
+            session_idx
+        );
+        assert!(
+            headers.contains("Content-Type"),
+            "Request headers should contain Content-Type"
+        );
+        assert!(
+            headers.contains("Authorization"),
+            "Request headers should contain Authorization"
+        );
+        assert!(
+            body.contains(session_id.as_str()),
+            "Request body should contain session_id"
+        );
+        assert!(
+            body.contains("action"),
+            "Request body should contain action field"
+        );
         assert_eq!(status, 200, "HTTP response status should be 200");
-        assert!(resp_headers.contains("X-Request-Id"), "Response headers should contain X-Request-Id");
-        assert!(resp_body.contains(session_id.as_str()), "Response body should contain session_id");
-        assert!(resp_body.contains("success"), "Response body should contain success field");
+        assert!(
+            resp_headers.contains("X-Request-Id"),
+            "Response headers should contain X-Request-Id"
+        );
+        assert!(
+            resp_body.contains(session_id.as_str()),
+            "Response body should contain session_id"
+        );
+        assert!(
+            resp_body.contains("success"),
+            "Response body should contain success field"
+        );
 
         println!("  ✓ HTTP fields verified for session {}", session_idx);
     }
 
     println!("\n📊 Multi-Session Query Performance Summary:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("⏱️  Total query time ({} sessions): {:?}", num_sessions, total_query_duration);
-    println!("⏱️  Average per session: {:?}", total_query_duration / num_sessions as u32);
+    println!(
+        "⏱️  Total query time ({} sessions): {:?}",
+        num_sessions, total_query_duration
+    );
+    println!(
+        "⏱️  Average per session: {:?}",
+        total_query_duration / num_sessions as u32
+    );
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    println!("\n✅ WAL-backed union-read validated for {} sessions", num_sessions);
+    println!(
+        "\n✅ WAL-backed union-read validated for {} sessions",
+        num_sessions
+    );
 
     println!("🔄 Forcing flush to staged local cache...");
     pipeline.force_flush_spans().await.expect("force flush");
@@ -270,7 +346,9 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     println!("⚙️  Running optimizer to commit staged spans to Iceberg...");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let staged_files_after = pipeline.list_staged_files("spans").expect("staged files after");
+    let staged_files_after = pipeline
+        .list_staged_files("spans")
+        .expect("staged files after");
     assert!(
         staged_files_after.is_empty(),
         "Expected staged cache cleanup after optimizer, found {:?}",
@@ -286,12 +364,9 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
-            found,
-            spans_per_session,
+            found, spans_per_session,
             "Expected Iceberg scan to return {} spans for session {} after optimizer, found {}",
-            spans_per_session,
-            session_id,
-            found
+            spans_per_session, session_id, found
         );
 
         let http_sql = format!(
@@ -308,8 +383,15 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
              LIMIT 1",
             escaped
         );
-        let http_result = test_pipeline.execute_query(&http_sql).await.expect("http query");
-        assert_eq!(http_result.row_count, 1, "Expected HTTP fields row for session {}", session_id);
+        let http_result = test_pipeline
+            .execute_query(&http_sql)
+            .await
+            .expect("http query");
+        assert_eq!(
+            http_result.row_count, 1,
+            "Expected HTTP fields row for session {}",
+            session_id
+        );
         let row = &http_result.rows[0];
         let method = row[0].as_str().unwrap_or("");
         let path = row[1].as_str().unwrap_or("");
@@ -319,13 +401,42 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         let resp_headers = row[5].as_str().unwrap_or("");
         let resp_body = row[6].as_str().unwrap_or("");
 
-        assert_eq!(method, "POST", "HTTP method should be POST for session {}", session_idx);
-        assert_eq!(path, format!("/api/v1/session/{}", session_idx), "HTTP path should match for session {}", session_idx);
-        assert!(headers.contains("Authorization"), "HTTP request headers should contain Authorization for session {}", session_idx);
-        assert!(body.contains("session_id"), "HTTP request body should contain session_id for session {}", session_idx);
-        assert_eq!(status, 200, "HTTP response status should be 200 for session {}", session_idx);
-        assert!(resp_headers.contains("X-Request-Id"), "HTTP response headers should contain X-Request-Id for session {}", session_idx);
-        assert!(resp_body.contains("success"), "HTTP response body should contain success for session {}", session_idx);
+        assert_eq!(
+            method, "POST",
+            "HTTP method should be POST for session {}",
+            session_idx
+        );
+        assert_eq!(
+            path,
+            format!("/api/v1/session/{}", session_idx),
+            "HTTP path should match for session {}",
+            session_idx
+        );
+        assert!(
+            headers.contains("Authorization"),
+            "HTTP request headers should contain Authorization for session {}",
+            session_idx
+        );
+        assert!(
+            body.contains("session_id"),
+            "HTTP request body should contain session_id for session {}",
+            session_idx
+        );
+        assert_eq!(
+            status, 200,
+            "HTTP response status should be 200 for session {}",
+            session_idx
+        );
+        assert!(
+            resp_headers.contains("X-Request-Id"),
+            "HTTP response headers should contain X-Request-Id for session {}",
+            session_idx
+        );
+        assert!(
+            resp_body.contains("success"),
+            "HTTP response body should contain success for session {}",
+            session_idx
+        );
     }
 
     println!("\n✅ WAL, local cache, and optimizer paths validated for spans");
@@ -411,7 +522,10 @@ async fn test_duckdb_union_read_realtime_performance() {
     }
 
     if let Err(err) = pipeline.write_wal_spans(wal_spans, 1024).await {
-        println!("⚠️  Skipping WAL union-read performance test: WAL write failed: {}", err);
+        println!(
+            "⚠️  Skipping WAL union-read performance test: WAL write failed: {}",
+            err
+        );
         return;
     }
 
@@ -464,7 +578,10 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
             attributes.insert("source".to_string(), "test".to_string());
 
             let mut resource_attributes = HashMap::new();
-            resource_attributes.insert("service.name".to_string(), format!("test-service-{}", session_idx));
+            resource_attributes.insert(
+                "service.name".to_string(),
+                format!("test-service-{}", session_idx),
+            );
             resource_attributes.insert("host.name".to_string(), "localhost".to_string());
 
             // Vary severity across logs
@@ -475,7 +592,8 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 12 => "ERROR",
                 16 => "FATAL",
                 _ => "DEBUG",
-            }.to_string();
+            }
+            .to_string();
 
             // Add trace correlation for every 5th log
             let (trace_id, span_id) = if i % 5 == 0 {
@@ -490,7 +608,9 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
             all_logs.push(LogData {
                 session_id: Some(session_id.clone()),
                 timestamp: now + chrono::Duration::milliseconds((session_idx * 1000 + i) as i64),
-                observed_timestamp: Some(now + chrono::Duration::milliseconds((session_idx * 1000 + i + 1) as i64)),
+                observed_timestamp: Some(
+                    now + chrono::Duration::milliseconds((session_idx * 1000 + i + 1) as i64),
+                ),
                 severity_number: severity_number as i32,
                 severity_text,
                 body: format!("Test log message {} from session {}", i, session_idx),
@@ -505,8 +625,14 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     let total_logs = num_sessions * logs_per_session;
 
     // Act: add all logs through the ingest path (WAL first, then local cache, then optimizer)
-    println!("🧪 Writing {} sessions ({} total logs) via WAL + local cache...", num_sessions, total_logs);
-    let write_timer = Timer::start(&format!("Multi-Session Log Add ({} sessions)", num_sessions));
+    println!(
+        "🧪 Writing {} sessions ({} total logs) via WAL + local cache...",
+        num_sessions, total_logs
+    );
+    let write_timer = Timer::start(&format!(
+        "Multi-Session Log Add ({} sessions)",
+        num_sessions
+    ));
     pipeline
         .add_logs(all_logs, total_logs * 256)
         .await
@@ -514,16 +640,16 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     let write_duration = write_timer.stop();
 
     // Report write performance
-    let write_metrics = PerformanceMetrics::new(&format!("Multi-Session Log Add ({} sessions, {} logs)", num_sessions, total_logs))
-        .with_duration(write_duration)
-        .with_rows(total_logs);
+    let write_metrics = PerformanceMetrics::new(&format!(
+        "Multi-Session Log Add ({} sessions, {} logs)",
+        num_sessions, total_logs
+    ))
+    .with_duration(write_duration)
+    .with_rows(total_logs);
     write_metrics.print_report();
 
     let wal_files = pipeline.list_wal_files("logs").expect("wal files");
-    assert!(
-        !wal_files.is_empty(),
-        "Expected WAL cache files for logs"
-    );
+    assert!(!wal_files.is_empty(), "Expected WAL cache files for logs");
 
     println!("✅ WAL write completed, querying back each session through DuckDB union view...");
 
@@ -536,16 +662,16 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
-            found,
-            logs_per_session,
+            found, logs_per_session,
             "Expected exactly {} logs for session {}, found {}",
-            logs_per_session,
-            session_id,
-            found
+            logs_per_session, session_id, found
         );
     }
 
-    println!("✅ WAL-backed union-read validated for {} log sessions", num_sessions);
+    println!(
+        "✅ WAL-backed union-read validated for {} log sessions",
+        num_sessions
+    );
 
     println!("🔄 Forcing flush to staged local cache...");
     pipeline.force_flush_logs().await.expect("force flush");
@@ -565,18 +691,18 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
-            found,
-            logs_per_session,
+            found, logs_per_session,
             "Expected staged union-read to return {} logs for session {}",
-            logs_per_session,
-            session_id
+            logs_per_session, session_id
         );
     }
 
     println!("⚙️  Running optimizer to commit staged logs to Iceberg...");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let staged_files_after = pipeline.list_staged_files("logs").expect("staged files after");
+    let staged_files_after = pipeline
+        .list_staged_files("logs")
+        .expect("staged files after");
     assert!(
         staged_files_after.is_empty(),
         "Expected staged cache cleanup after optimizer, found {:?}",
@@ -592,11 +718,9 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
-            found,
-            logs_per_session,
+            found, logs_per_session,
             "Expected Iceberg scan to return {} logs for session {} after optimizer",
-            logs_per_session,
-            session_id
+            logs_per_session, session_id
         );
     }
 
@@ -639,7 +763,10 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
             attributes.insert("region".to_string(), format!("region-{}", i % 2)); // 2 different regions
 
             let mut resource_attributes = HashMap::new();
-            resource_attributes.insert("service.name".to_string(), format!("service-{}", metric_idx));
+            resource_attributes.insert(
+                "service.name".to_string(),
+                format!("service-{}", metric_idx),
+            );
             resource_attributes.insert("service.version".to_string(), "1.0.0".to_string());
 
             // Vary metric values
@@ -650,7 +777,14 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
                 metric_name: metric_name.clone(),
                 description: format!("Test metric {} description", metric_idx),
                 unit: if metric_idx % 2 == 0 { "ms" } else { "bytes" }.to_string(),
-                metric_type: if metric_idx % 3 == 0 { "gauge" } else if metric_idx % 3 == 1 { "sum" } else { "histogram" }.to_string(),
+                metric_type: if metric_idx % 3 == 0 {
+                    "gauge"
+                } else if metric_idx % 3 == 1 {
+                    "sum"
+                } else {
+                    "histogram"
+                }
+                .to_string(),
                 timestamp: now + chrono::Duration::milliseconds((metric_idx * 1000 + i) as i64),
                 value,
                 attributes,
@@ -664,8 +798,14 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     let total_metrics = num_metric_names * data_points_per_metric;
 
     // Act: write through WAL + local cache
-    println!("🧪 Writing {} metric names ({} total data points) via WAL + local cache...", num_metric_names, total_metrics);
-    let write_timer = Timer::start(&format!("Multi-Metric WAL Write ({} metric names)", num_metric_names));
+    println!(
+        "🧪 Writing {} metric names ({} total data points) via WAL + local cache...",
+        num_metric_names, total_metrics
+    );
+    let write_timer = Timer::start(&format!(
+        "Multi-Metric WAL Write ({} metric names)",
+        num_metric_names
+    ));
     pipeline
         .add_metrics(
             all_metric_batches.into_iter().flatten().collect::<Vec<_>>(),
@@ -677,8 +817,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
     let write_metrics = PerformanceMetrics::new(&format!(
         "Multi-Metric WAL Write ({} metric names, {} data points)",
-        num_metric_names,
-        total_metrics
+        num_metric_names, total_metrics
     ))
     .with_duration(write_duration)
     .with_rows(total_metrics);
@@ -697,7 +836,12 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     let mut total_query_duration = std::time::Duration::ZERO;
 
     for (metric_idx, metric_name) in metric_names.iter().enumerate() {
-        println!("\n🔍 Querying metric {}/{}: {}", metric_idx + 1, num_metric_names, metric_name);
+        println!(
+            "\n🔍 Querying metric {}/{}: {}",
+            metric_idx + 1,
+            num_metric_names,
+            metric_name
+        );
 
         let escaped = metric_name.replace('\'', "''");
         let sql = format!(
@@ -716,22 +860,37 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         println!("  ✓ Found {} data points", found);
         println!("  ✓ Sum of values: {:.2}", values_sum);
 
-        assert_eq!(found, data_points_per_metric,
-                   "Expected exactly {} data points for metric {}, found {}",
-                   data_points_per_metric, metric_name, found);
+        assert_eq!(
+            found, data_points_per_metric,
+            "Expected exactly {} data points for metric {}, found {}",
+            data_points_per_metric, metric_name, found
+        );
 
         let expected_sum = expected_sums[metric_idx];
-        assert!((values_sum - expected_sum).abs() < 0.01,
-                "Expected sum {:.2}, got {:.2}", expected_sum, values_sum);
+        assert!(
+            (values_sum - expected_sum).abs() < 0.01,
+            "Expected sum {:.2}, got {:.2}",
+            expected_sum,
+            values_sum
+        );
     }
 
     println!("\n📊 Multi-Metric Query Performance Summary:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("⏱️  Total query time ({} metric names): {:?}", num_metric_names, total_query_duration);
-    println!("⏱️  Average per metric: {:?}", total_query_duration / num_metric_names as u32);
+    println!(
+        "⏱️  Total query time ({} metric names): {:?}",
+        num_metric_names, total_query_duration
+    );
+    println!(
+        "⏱️  Average per metric: {:?}",
+        total_query_duration / num_metric_names as u32
+    );
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    println!("\n✅ WAL-backed union-read validated for {} metric names", num_metric_names);
+    println!(
+        "\n✅ WAL-backed union-read validated for {} metric names",
+        num_metric_names
+    );
 
     println!("🔄 Forcing flush to staged local cache...");
     pipeline.force_flush_metrics().await.expect("force flush");
@@ -745,7 +904,9 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     println!("⚙️  Running optimizer to commit staged metrics to Iceberg...");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let staged_files_after = pipeline.list_staged_files("metrics").expect("staged files after");
+    let staged_files_after = pipeline
+        .list_staged_files("metrics")
+        .expect("staged files after");
     assert!(
         staged_files_after.is_empty(),
         "Expected staged cache cleanup after optimizer, found {:?}",
@@ -785,8 +946,8 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
 #[tokio::test]
 async fn test_http_fields_in_span_model() {
-    use softprobe_otlp_backend::models::Span as SpanData;
     use chrono::Utc;
+    use softprobe_otlp_backend::models::Span as SpanData;
     use std::collections::HashMap;
 
     println!("🧪 Testing HTTP fields in Span model...");
@@ -805,9 +966,7 @@ async fn test_http_fields_in_span_model() {
         span_kind: Some("SERVER".to_string()),
         timestamp: Utc::now(),
         end_timestamp: Some(Utc::now()),
-        attributes: HashMap::from([
-            ("sp.session.id".to_string(), session_id.to_string()),
-        ]),
+        attributes: HashMap::from([("sp.session.id".to_string(), session_id.to_string())]),
         events: Vec::new(),
         http_request_method: Some("POST".to_string()),
         http_request_path: Some("/api/v1/test".to_string()),
@@ -823,17 +982,32 @@ async fn test_http_fields_in_span_model() {
     // Verify all HTTP fields are set correctly
     assert_eq!(span.http_request_method, Some("POST".to_string()));
     assert_eq!(span.http_request_path, Some("/api/v1/test".to_string()));
-    assert!(span.http_request_headers.as_ref().unwrap().contains("Content-Type"));
+    assert!(span
+        .http_request_headers
+        .as_ref()
+        .unwrap()
+        .contains("Content-Type"));
     assert!(span.http_request_body.as_ref().unwrap().contains("test"));
     assert_eq!(span.http_response_status_code, Some(200));
-    assert!(span.http_response_headers.as_ref().unwrap().contains("X-Request-Id"));
-    assert!(span.http_response_body.as_ref().unwrap().contains("success"));
+    assert!(span
+        .http_response_headers
+        .as_ref()
+        .unwrap()
+        .contains("X-Request-Id"));
+    assert!(span
+        .http_response_body
+        .as_ref()
+        .unwrap()
+        .contains("success"));
 
     println!("✅ HTTP request method: {:?}", span.http_request_method);
     println!("✅ HTTP request path: {:?}", span.http_request_path);
     println!("✅ HTTP request headers: {:?}", span.http_request_headers);
     println!("✅ HTTP request body: {:?}", span.http_request_body);
-    println!("✅ HTTP response status: {:?}", span.http_response_status_code);
+    println!(
+        "✅ HTTP response status: {:?}",
+        span.http_response_status_code
+    );
     println!("✅ HTTP response headers: {:?}", span.http_response_headers);
     println!("✅ HTTP response body: {:?}", span.http_response_body);
 
@@ -844,7 +1018,11 @@ async fn test_http_fields_in_span_model() {
 
     // Write the span and verify it succeeds
     let result = pipeline.write_span_batches(vec![vec![span]]).await;
-    assert!(result.is_ok(), "Failed to write span with HTTP fields: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to write span with HTTP fields: {:?}",
+        result.err()
+    );
 
     println!("✅ Successfully wrote span with HTTP fields to Iceberg");
     println!("✅ HTTP fields are correctly included in the schema and can be persisted");
@@ -890,7 +1068,10 @@ async fn test_pinned_metadata_updates_on_commit() {
         });
     }
 
-    pipeline.add_spans(spans.clone(), spans.len() * 256).await.expect("add spans");
+    pipeline
+        .add_spans(spans.clone(), spans.len() * 256)
+        .await
+        .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
@@ -902,18 +1083,33 @@ async fn test_pinned_metadata_updates_on_commit() {
     let first = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
     let first_json: serde_json::Value = serde_json::from_str(&first).expect("metadata json");
     let first_snapshot = first_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let first_location = first_json.get("metadata_location").and_then(|v| v.as_str()).map(str::to_string);
-    assert!(first_snapshot.is_some(), "expected snapshot_id in metadata pointer");
-    assert!(first_location.is_some(), "expected metadata_location in metadata pointer");
+    let first_location = first_json
+        .get("metadata_location")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert!(
+        first_snapshot.is_some(),
+        "expected snapshot_id in metadata pointer"
+    );
+    assert!(
+        first_location.is_some(),
+        "expected metadata_location in metadata pointer"
+    );
 
-    pipeline.add_spans(spans, 10 * 256).await.expect("add spans");
+    pipeline
+        .add_spans(spans, 10 * 256)
+        .await
+        .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
     let second = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
     let second_json: serde_json::Value = serde_json::from_str(&second).expect("metadata json");
     let second_snapshot = second_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let second_location = second_json.get("metadata_location").and_then(|v| v.as_str()).map(str::to_string);
+    let second_location = second_json
+        .get("metadata_location")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     assert!(
         second_snapshot != first_snapshot || second_location != first_location,
@@ -999,7 +1195,10 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
         staged_session.replace('\'', "''")
     );
-    let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
+    let warmup = query_engine
+        .execute_query(&warmup_sql)
+        .await
+        .expect("warmup");
     assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
 
     let sessions = vec![base_session, staged_session, wal_session];
@@ -1007,7 +1206,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
     let concurrent = 6usize;
     for i in 0..concurrent {
         let session_id = sessions[i % sessions.len()].clone();
-            let engine = query_engine.clone();
+        let engine = query_engine.clone();
         handles.push(tokio::spawn(async move {
             let sql = format!(
                 "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
@@ -1066,14 +1265,19 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
         status_message: None,
     };
 
-    pipeline.add_spans(vec![span], 256).await.expect("add spans");
+    pipeline
+        .add_spans(vec![span], 256)
+        .await
+        .expect("add spans");
 
     let wal_files = pipeline.list_wal_files("spans").expect("wal files");
     assert!(!wal_files.is_empty(), "expected WAL files after add_spans");
 
-    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
-        Ok(!pipeline.list_staged_files("spans")?.is_empty())
-    })
+    wait_for(
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || async { Ok(!pipeline.list_staged_files("spans")?.is_empty()) },
+    )
     .await
     .expect("staged files should appear after flush interval");
 
@@ -1082,11 +1286,15 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
         escaped
     );
-    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
-        let result = test_pipeline.execute_query(&sql).await?;
-        let count = result.rows[0][0].as_i64().unwrap_or(0);
-        Ok(count == 1)
-    })
+    wait_for(
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || async {
+            let result = test_pipeline.execute_query(&sql).await?;
+            let count = result.rows[0][0].as_i64().unwrap_or(0);
+            Ok(count == 1)
+        },
+    )
     .await
     .expect("union view should return exactly one row after flush");
 }
@@ -1133,7 +1341,9 @@ async fn test_wal_replay_recovers_spans() {
         status_message: None,
     };
 
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = storage::IngestPipeline::new(&config)
+        .await
+        .expect("pipeline");
     pipeline
         .write_wal_spans(vec![span], 256)
         .await
@@ -1148,7 +1358,11 @@ async fn test_wal_replay_recovers_spans() {
         .and_then(|engine| engine.list_wal_files("spans").ok())
         .map(|files| files.len())
         .unwrap_or(0);
-    assert!(wal_count >= 1, "expected at least one WAL entry, found {}", wal_count);
+    assert!(
+        wal_count >= 1,
+        "expected at least one WAL entry, found {}",
+        wal_count
+    );
 
     if let Some(engine) = storage.ingest_engine.as_ref() {
         engine.run_optimizer_once().await.expect("optimizer");
@@ -1161,11 +1375,15 @@ async fn test_wal_replay_recovers_spans() {
         escaped
     );
 
-    wait_for(Duration::from_secs(15), Duration::from_millis(500), || async {
-        let result = query_engine.execute_query(&sql).await?;
-        let count = result.rows[0][0].as_i64().unwrap_or(0);
-        Ok(count > 0)
-    })
+    wait_for(
+        Duration::from_secs(15),
+        Duration::from_millis(500),
+        || async {
+            let result = query_engine.execute_query(&sql).await?;
+            let count = result.rows[0][0].as_i64().unwrap_or(0);
+            Ok(count > 0)
+        },
+    )
     .await
     .expect("expected WAL replay to surface spans in union view");
 }
@@ -1197,8 +1415,9 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
         .await;
 
     let table_name = format!("traces_maintenance_{}", uuid::Uuid::new_v4().simple());
-    let table_ident = TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
-        .expect("table ident");
+    let table_ident =
+        TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
+            .expect("table ident");
 
     let schema = TraceTable::schema();
     let partition_spec = TraceTable::partition_spec(&schema).unwrap();
@@ -1302,11 +1521,15 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
         );
     }
 
-    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
-        let table_after = catalog.catalog().load_table(&table_ident).await?;
-        let remaining = table_after.metadata().snapshots().count();
-        Ok(remaining <= config.compaction.metadata_min_snapshots_to_keep)
-    })
+    wait_for(
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || async {
+            let table_after = catalog.catalog().load_table(&table_ident).await?;
+            let remaining = table_after.metadata().snapshots().count();
+            Ok(remaining <= config.compaction.metadata_min_snapshots_to_keep)
+        },
+    )
     .await
     .expect("snapshots should be expired down to configured minimum");
 

@@ -72,7 +72,10 @@ impl PerformanceMetrics {
             println!("🗂️  Partitions Scanned:    {}", partitions);
         }
 
-        println!("⚡ Throughput (rows/sec): {:.2}", self.throughput_rows_per_sec);
+        println!(
+            "⚡ Throughput (rows/sec): {:.2}",
+            self.throughput_rows_per_sec
+        );
 
         if let Some(mb_per_sec) = self.throughput_mb_per_sec {
             println!("⚡ Throughput (MB/sec):   {:.2}", mb_per_sec);
@@ -120,4 +123,3 @@ impl Timer {
         duration
     }
 }
-
