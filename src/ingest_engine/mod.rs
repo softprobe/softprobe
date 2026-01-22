@@ -554,7 +554,10 @@ impl WalWriter {
             if let Some(parent) = cache_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(&cache_path, &bytes).await?;
+            // Write atomically to avoid partially-written parquet being observed by readers.
+            let tmp_path = cache_path.with_extension("parquet.tmp");
+            tokio::fs::write(&tmp_path, &bytes).await?;
+            tokio::fs::rename(&tmp_path, &cache_path).await?;
             if let Some(writer) = &self.manifest_writer {
                 writer.record(kind, &cache_path).await?;
             }
@@ -809,17 +812,32 @@ fn write_parquet_cache(
         std::fs::create_dir_all(parent)?;
     }
 
+    // Write atomically: write to a temp file in the same directory, then rename.
+    // This prevents DuckDB readers from observing partially-written parquet files.
+    let tmp_path = cache_path.with_extension("parquet.tmp");
+
     let writer_props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
         .build();
     let arrow_schema = Arc::new(arrow::datatypes::Schema::try_from(schema)?);
-    let file = std::fs::File::create(&cache_path)?;
+    let file = std::fs::File::create(&tmp_path)?;
     let mut writer = ArrowWriter::try_new(file, arrow_schema, Some(writer_props))?;
 
     for record_batch in record_batches {
         writer.write(record_batch)?;
     }
     writer.close()?;
+    std::fs::rename(&tmp_path, &cache_path)?;
+
+    // Touch a marker so query engines can cheaply detect new staged files without scanning
+    // the entire directory tree on every query.
+    let marker_dir = cache_dir.join("staged_watermarks");
+    std::fs::create_dir_all(&marker_dir)?;
+    let marker_path = marker_dir.join(format!("{kind}.txt"));
+    let marker_tmp = marker_dir.join(format!("{kind}.txt.tmp"));
+    std::fs::write(&marker_tmp, chrono::Utc::now().to_rfc3339())?;
+    std::fs::rename(&marker_tmp, &marker_path)?;
+
     info!("Staged {} parquet cache file at {:?}", kind, cache_path);
 
     Ok(cache_path)

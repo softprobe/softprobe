@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -73,6 +73,7 @@ impl ProducerStats {
 
 struct QueryStats {
     durations: Mutex<Vec<Duration>>,
+    by_kind: Mutex<HashMap<String, PerQueryStats>>,
     executed: std::sync::atomic::AtomicU64,
     errors: std::sync::atomic::AtomicU64,
     steady_executed: std::sync::atomic::AtomicU64,
@@ -80,10 +81,18 @@ struct QueryStats {
     warmup_end: Instant,
 }
 
+#[derive(Default, Clone)]
+struct PerQueryStats {
+    durations: Vec<Duration>,
+    executed: u64,
+    errors: u64,
+}
+
 impl QueryStats {
     fn new(warmup_start: Instant, warmup_duration: Duration) -> Self {
         Self {
             durations: Mutex::new(Vec::new()),
+            by_kind: Mutex::new(HashMap::new()),
             executed: std::sync::atomic::AtomicU64::new(0),
             errors: std::sync::atomic::AtomicU64::new(0),
             steady_executed: std::sync::atomic::AtomicU64::new(0),
@@ -92,7 +101,7 @@ impl QueryStats {
         }
     }
 
-    async fn record(&self, duration: Duration) {
+    async fn record(&self, label: &str, duration: Duration) {
         let now = Instant::now();
         self.executed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -101,16 +110,25 @@ impl QueryStats {
             guard.push(duration);
             self.steady_executed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let mut by_kind = self.by_kind.lock().await;
+            let entry = by_kind.entry(label.to_string()).or_default();
+            entry.executed += 1;
+            entry.durations.push(duration);
         }
     }
 
-    fn record_error(&self) {
+    async fn record_error(&self, label: &str) {
         let now = Instant::now();
         self.errors
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if now >= self.warmup_end {
             self.steady_errors
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let mut by_kind = self.by_kind.lock().await;
+            let entry = by_kind.entry(label.to_string()).or_default();
+            entry.errors += 1;
         }
     }
 }
@@ -176,7 +194,14 @@ async fn main() -> Result<()> {
     }
 
     if let Some(cache_dir) = &cache_dir_path {
-        wait_for_wal_watermarks(cache_dir, warmup_duration).await;
+        // In real systems, buffers flush on size/time. For perf_stress, we force a flush
+        // after a short warm-up so queries can exercise staged parquet + WAL manifests.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = pipeline.force_flush_spans().await;
+        let _ = pipeline.force_flush_logs().await;
+        let _ = pipeline.force_flush_metrics().await;
+
+        wait_for_wal_watermarks(cache_dir, &config.ingest_engine.wal_prefix, warmup_duration).await;
         wait_for_ready_parquet(cache_dir, warmup_duration).await;
         info!("Warm-up guard completed after {warmup_secs} seconds");
     } else {
@@ -288,25 +313,24 @@ async fn run_query_worker(
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms.max(100)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let query_tables = ["union_logs", "union_spans", "union_metrics"];
     let mut idx = 0;
     while Instant::now() < deadline {
         ticker.tick().await;
-        let table = query_tables[idx % query_tables.len()];
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM {table} \
-             WHERE record_date >= DATE '{}'",
-            (Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d")
-        );
+        let seed = (idx as u64).wrapping_add((worker_id as u64) * 1_000_000);
+        let case = pick_query_case(seed);
+        let (label, sql) = build_query(case, seed);
         let start = Instant::now();
         match engine.execute_query(&sql).await {
             Ok(_) => {
                 let elapsed = start.elapsed();
-                stats.record(elapsed).await;
+                stats.record(label, elapsed).await;
             }
             Err(err) => {
-                tracing::warn!("query worker {worker_id} error: {}", err);
-                stats.record_error();
+                let elapsed = start.elapsed();
+                // Record latency even for failures: alerts still pay the cost, and we want to see it.
+                stats.record(label, elapsed).await;
+                tracing::warn!("query worker {worker_id} {label} error: {}", err);
+                stats.record_error(label).await;
             }
         }
         idx += 1;
@@ -314,36 +338,220 @@ async fn run_query_worker(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum QueryCase {
+    SpanErrorRate5m,
+    SpanTop5xxPaths15m,
+    SpanP95LatencyByPath5m,
+    SpanSessionRecent,
+    LogErrorRate5m,
+    LogRecentErrorsSample,
+    LogSessionRecent,
+    MetricLatencyTimeseries10m,
+    MetricLatencyMax5m,
+}
+
+fn pick_query_case(seed: u64) -> QueryCase {
+    // Deterministic, interleaved schedule so short runs (or slow queries) still cover
+    // many query types instead of getting "stuck" on the first weight bucket.
+    const SCHEDULE: [QueryCase; 16] = [
+        QueryCase::SpanErrorRate5m,
+        QueryCase::LogErrorRate5m,
+        QueryCase::MetricLatencyMax5m,
+        QueryCase::SpanSessionRecent,
+        QueryCase::SpanTop5xxPaths15m,
+        QueryCase::LogRecentErrorsSample,
+        QueryCase::MetricLatencyTimeseries10m,
+        QueryCase::SpanP95LatencyByPath5m,
+        QueryCase::LogSessionRecent,
+        QueryCase::SpanSessionRecent,
+        QueryCase::SpanErrorRate5m,
+        QueryCase::LogErrorRate5m,
+        QueryCase::MetricLatencyMax5m,
+        QueryCase::SpanTop5xxPaths15m,
+        QueryCase::SpanP95LatencyByPath5m,
+        QueryCase::MetricLatencyTimeseries10m,
+    ];
+    SCHEDULE[(seed as usize) % SCHEDULE.len()]
+}
+
+fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
+    let date_filter = (Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d");
+    // DuckDB returns CURRENT_TIMESTAMP as TIMESTAMP WITH TIME ZONE; subtracting INTERVAL from that
+    // is not supported in some builds. Cast to TIMESTAMP for stable interval arithmetic.
+    let now_ts = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)";
+    let hit = seed % 5 != 0; // 80/20 hit/miss drilldowns
+    let session = if hit {
+        format!("stress-session-{}", seed % 256)
+    } else {
+        format!("stress-session-miss-{}", seed % 10_000)
+    };
+
+    match case {
+        QueryCase::SpanErrorRate5m => (
+            "span_error_rate_5m",
+            format!(
+                "SELECT COUNT(*) AS errors \
+                 FROM union_spans \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                   AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
+            ),
+        ),
+        QueryCase::SpanTop5xxPaths15m => (
+            "span_top_5xx_paths_15m",
+            format!(
+                "SELECT http_request_path, COUNT(*) AS errors \
+                 FROM union_spans \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '15 minutes') \
+                   AND http_response_status_code >= 500 \
+                   AND http_request_path IS NOT NULL \
+                 GROUP BY 1 \
+                 ORDER BY errors DESC \
+                 LIMIT 10"
+            ),
+        ),
+        QueryCase::SpanP95LatencyByPath5m => (
+            "span_p95_latency_by_path_5m",
+            format!(
+                "SELECT http_request_path, \
+                        quantile_cont((EXTRACT(EPOCH FROM end_timestamp) - EXTRACT(EPOCH FROM timestamp)) * 1000.0, 0.95) AS p95_ms \
+                 FROM union_spans \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                   AND end_timestamp IS NOT NULL \
+                   AND http_request_path IS NOT NULL \
+                 GROUP BY 1 \
+                 ORDER BY p95_ms DESC \
+                 LIMIT 10"
+            ),
+        ),
+        QueryCase::SpanSessionRecent => (
+            "span_session_recent",
+            format!(
+                "SELECT trace_id, span_id, timestamp, http_request_path, http_response_status_code \
+                 FROM union_spans \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND session_id = '{session}' \
+                 ORDER BY timestamp DESC \
+                 LIMIT 50"
+            ),
+        ),
+        QueryCase::LogErrorRate5m => (
+            "log_error_rate_5m",
+            format!(
+                "SELECT COUNT(*) AS errors \
+                 FROM union_logs \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                   AND severity_number >= 17"
+            ),
+        ),
+        QueryCase::LogRecentErrorsSample => (
+            "log_recent_errors_sample",
+            format!(
+                "SELECT timestamp, severity_text, body \
+                 FROM union_logs \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                   AND severity_number >= 17 \
+                 ORDER BY timestamp DESC \
+                 LIMIT 50"
+            ),
+        ),
+        QueryCase::LogSessionRecent => (
+            "log_session_recent",
+            format!(
+                "SELECT timestamp, severity_text, body \
+                 FROM union_logs \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND session_id = '{session}' \
+                 ORDER BY timestamp DESC \
+                 LIMIT 50"
+            ),
+        ),
+        QueryCase::MetricLatencyTimeseries10m => (
+            "metric_latency_timeseries_10m",
+            format!(
+                "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
+                 FROM union_metrics \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '10 minutes') \
+                   AND metric_name = 'stress.metric.latency' \
+                 GROUP BY 1 \
+                 ORDER BY 1"
+            ),
+        ),
+        QueryCase::MetricLatencyMax5m => (
+            "metric_latency_max_5m",
+            format!(
+                "SELECT MAX(value) AS max_latency_ms \
+                 FROM union_metrics \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                   AND metric_name = 'stress.metric.latency'"
+            ),
+        ),
+    }
+}
+
 fn sample_span(counter: u64) -> Span {
-    let session_id = format!("stress-span-{}", counter % 1024);
     let timestamp = Utc::now();
+    let session_id = format!("stress-session-{}", counter % 256);
+
+    let app_id = format!("stress-app-{}", counter % 4);
+    let method = if counter % 4 == 0 { "POST" } else { "GET" };
+    let path = match counter % 8 {
+        0 => "/api/login",
+        1 => "/api/orders",
+        2 => "/api/orders/123",
+        3 => "/api/checkout",
+        4 => "/api/catalog/search",
+        5 => "/api/cart",
+        6 => "/api/users/me",
+        _ => "/healthz",
+    };
+
+    // Deterministic "bursty" error/latency pattern to mimic real alerting scenarios.
+    let burst = (counter / 200) % 10 == 0;
+    let is_error = burst && (counter % 10 == 0);
+    let http_status = if is_error { 500 } else { 200 };
+    let duration_ms = if is_error {
+        900
+    } else if burst {
+        250
+    } else {
+        10 + (counter % 40) as i64
+    };
+
     let mut attributes = HashMap::new();
-    attributes.insert(
-        "sp.session.id".to_string(),
-        format!("stress-span-{}", counter % 64),
-    );
+    attributes.insert("sp.session.id".to_string(), session_id.clone());
+    attributes.insert("http.request.method".to_string(), method.to_string());
+    attributes.insert("http.request.path".to_string(), path.to_string());
+    attributes.insert("http.response.status_code".to_string(), http_status.to_string());
 
     Span {
         session_id,
         trace_id: uuid::Uuid::new_v4().to_string(),
         span_id: uuid::Uuid::new_v4().to_string(),
         parent_span_id: None,
-        app_id: "stress-app".to_string(),
+        app_id,
         organization_id: Some("stress-org".to_string()),
         tenant_id: Some("stress-tenant".to_string()),
-        message_type: "stress-span".to_string(),
+        message_type: "http.server".to_string(),
         span_kind: Some("SERVER".to_string()),
         timestamp,
-        end_timestamp: Some(timestamp + chrono::Duration::milliseconds(5)),
+        end_timestamp: Some(timestamp + chrono::Duration::milliseconds(duration_ms)),
         attributes,
         events: Vec::new(),
-        status_code: Some("OK".to_string()),
-        status_message: Some("Stress".to_string()),
-        http_request_method: None,
-        http_request_path: None,
+        status_code: Some(if is_error { "ERROR" } else { "OK" }.to_string()),
+        status_message: Some(if is_error { "synthetic error" } else { "ok" }.to_string()),
+        http_request_method: Some(method.to_string()),
+        http_request_path: Some(path.to_string()),
         http_request_headers: None,
         http_request_body: None,
-        http_response_status_code: None,
+        http_response_status_code: Some(http_status),
         http_response_headers: None,
         http_response_body: None,
     }
@@ -351,20 +559,41 @@ fn sample_span(counter: u64) -> Span {
 
 fn sample_log(counter: u64) -> Log {
     let timestamp = Utc::now();
+    let burst = (counter / 200) % 10 == 0;
+    let is_error = burst && (counter % 10 == 0);
+    let severity_number = if is_error { 17 } else { 12 };
+    let severity_text = if is_error { "ERROR" } else { "INFO" };
+    let session_id = Some(format!("stress-session-{}", counter % 256));
+    let path = match counter % 6 {
+        0 => "/api/login",
+        1 => "/api/orders",
+        2 => "/api/checkout",
+        3 => "/api/catalog/search",
+        4 => "/api/cart",
+        _ => "/api/users/me",
+    };
     let mut attributes = HashMap::new();
     attributes.insert("log.index".to_string(), counter.to_string());
+    attributes.insert("http.request.path".to_string(), path.to_string());
 
     let mut resource_attributes = HashMap::new();
-    resource_attributes.insert("service.name".to_string(), "stress-service".to_string());
+    resource_attributes.insert(
+        "service.name".to_string(),
+        format!("stress-service-{}", counter % 4),
+    );
     resource_attributes.insert("host.name".to_string(), "stress-worker".to_string());
 
     Log {
-        session_id: Some(format!("stress-log-{}", counter % 128)),
+        session_id,
         timestamp,
         observed_timestamp: Some(timestamp + chrono::Duration::milliseconds(1)),
-        severity_number: 12,
-        severity_text: "INFO".to_string(),
-        body: format!("stress log {}", counter),
+        severity_number,
+        severity_text: severity_text.to_string(),
+        body: if is_error {
+            format!("http 5xx on {path} (synthetic) idx={counter}")
+        } else {
+            format!("request ok {path} idx={counter}")
+        },
         attributes,
         resource_attributes,
         trace_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -376,9 +605,19 @@ fn sample_metric(counter: u64) -> Metric {
     let now = Utc::now();
     let mut attributes = HashMap::new();
     attributes.insert("stress.key".to_string(), format!("value-{}", counter % 8));
+    attributes.insert(
+        "service.name".to_string(),
+        format!("stress-service-{}", counter % 4),
+    );
 
     let mut resource_attributes = HashMap::new();
-    resource_attributes.insert("service.name".to_string(), "stress-service".to_string());
+    resource_attributes.insert(
+        "service.name".to_string(),
+        format!("stress-service-{}", counter % 4),
+    );
+
+    let burst = (counter / 200) % 10 == 0;
+    let value = if burst { 900.0 } else { 100.0 + (counter % 50) as f64 };
 
     Metric {
         metric_name: "stress.metric.latency".to_string(),
@@ -386,7 +625,7 @@ fn sample_metric(counter: u64) -> Metric {
         unit: "ms".to_string(),
         metric_type: "gauge".to_string(),
         timestamp: now,
-        value: 100.0 + (counter % 50) as f64,
+        value,
         attributes,
         resource_attributes,
     }
@@ -443,12 +682,39 @@ async fn print_report(
     println!("Steady-state query errors: {}", steady_errors);
     println!("Steady-state avg latency: {} ms", avg);
     println!("Steady-state p95 latency: {} ms", p95);
+
+    // Per-query-type breakdown (post-warmup)
+    let by_kind = query_stats.by_kind.lock().await.clone();
+    if !by_kind.is_empty() {
+        println!("\n---- Query Breakdown (post-warmup) ----");
+        let mut ordered: BTreeMap<String, PerQueryStats> = BTreeMap::new();
+        for (k, v) in by_kind {
+            ordered.insert(k, v);
+        }
+        for (label, stats) in ordered {
+            let avg = stats
+                .durations
+                .iter()
+                .map(|d| d.as_millis())
+                .sum::<u128>()
+                .checked_div(stats.durations.len().max(1) as u128)
+                .unwrap_or(0);
+            let p95 = percentile(&stats.durations, 95);
+            println!(
+                "{:<30} executed={} errors={} avg={}ms p95={}ms",
+                label, stats.executed, stats.errors, avg, p95
+            );
+        }
+        println!("---------------------------------------");
+    }
     println!("=========================================");
 }
 
-async fn wait_for_wal_watermarks(cache_dir: &Path, timeout: Duration) {
+async fn wait_for_wal_watermarks(cache_dir: &Path, wal_prefix: &str, timeout: Duration) {
     let start = Instant::now();
-    let wal_dir = cache_dir.join("wal_watermarks").join("wal");
+    let wal_dir = cache_dir
+        .join("wal_watermarks")
+        .join(wal_prefix.replace('/', "_"));
     let required = ["logs", "spans", "metrics"];
     while start.elapsed() < timeout {
         if required
@@ -499,16 +765,16 @@ fn has_stable_parquet(cache_dir: &Path, kind: &str) -> bool {
     if !kind_dir.exists() {
         return false;
     }
-    if let Ok(entries) = std::fs::read_dir(&kind_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Ok(metadata) = path.metadata() {
-                    if metadata.len() >= 64 * 1024 {
-                        if let Ok(modified) = metadata.modified() {
-                            if modified.elapsed().unwrap_or_default() >= Duration::from_secs(1) {
-                                return true;
-                            }
+    let mut found = Vec::new();
+    if collect_parquet_files(&kind_dir, &mut found).is_ok() {
+        for path in found {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                // Be permissive: during warm-up, even small parquet files are valid.
+                // The real correctness guard is atomic rename on write.
+                if metadata.len() >= 512 {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified.elapsed().unwrap_or_default() >= Duration::from_millis(500) {
+                            return true;
                         }
                     }
                 }
@@ -516,6 +782,22 @@ fn has_stable_parquet(cache_dir: &Path, kind: &str) -> bool {
         }
     }
     false
+}
+
+fn collect_parquet_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_parquet_files(&path, out)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn print_producer_summary(label: &str, stats: Arc<ProducerStats>) {

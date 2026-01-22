@@ -37,8 +37,8 @@ iceberg = { version = "0.7", optional = true, features = ["storage-all"] }
 iceberg-catalog-rest = { version = "0.7", optional = true }
 object_store = { version = "0.9", optional = true, features = ["aws"] }
 
-# DuckDB
-duckdb = { version = "1.0", features = ["bundled"] }
+# DuckDB - pinned to 1.4.3 for cache_httpfs filesystem wrapping support
+duckdb = { version = "1.4.3", features = ["bundled"] }
 
 # Configuration YAML
 serde_yaml = "0.9"

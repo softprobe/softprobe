@@ -4,7 +4,6 @@ use duckdb::{Connection, ToSql};
 use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::warn;
 
 #[derive(Clone)]
 pub struct CacheSettings {
@@ -35,37 +34,15 @@ fn configure_cache_httpfs(cache_dir: &PathBuf, conn: &Connection) -> Result<()> 
     let cache_path = cache_dir.join("duckdb_http_cache");
     std::fs::create_dir_all(&cache_path)?;
     let cache_dir_str = cache_path.to_string_lossy().to_string();
-    if let Err(err) = conn.execute(
-        "SET external_file_cache_directory = ?;",
-        [&cache_dir_str as &dyn ToSql],
-    ) {
-        handle_config_error(err, "external_file_cache_directory")?;
-    }
-    if let Err(err) = conn.execute("SET external_file_cache_size = '2GB';", []) {
-        if !is_unrecognized_config_error(&err) {
-            return Err(anyhow!(err));
-        }
-    }
-    if let Err(err) = conn.execute(
-        "SET s3_cache_directory = ?;",
-        [&cache_dir_str as &dyn ToSql],
-    ) {
-        handle_config_error(err, "s3_cache_directory")?;
-    }
-    if let Err(err) = conn.execute("SET s3_cache_size = '2GB';", []) {
-        if !is_unrecognized_config_error(&err) {
-            return Err(anyhow!(err));
-        }
-    }
+    // 3) cache_httpfs for persistent on-disk caching + glob caching (useful when we use globs like **/*.parquet).
+    // We keep cache_httpfs' disk cache enabled, but disable its in-memory caching so we don't double-cache
+    // with DuckDB's native external_file_cache.
     conn.execute_batch("LOAD cache_httpfs;")?;
+    // Enable glob result caching (best-effort; setting may vary by extension version).
+    let _ = conn.execute("SET cache_httpfs_enable_glob_cache = true;", []);
     conn.execute("SET cache_httpfs_cache_block_size = 8388608;", [])?;
-    conn.execute("SET cache_httpfs_max_in_mem_cache_block_count = 4096;", [])?;
     conn.execute(
-        "SET cache_httpfs_disk_cache_reader_enable_memory_cache = 1;",
-        [],
-    )?;
-    conn.execute(
-        "SET cache_httpfs_disk_cache_reader_mem_cache_block_count = 4096;",
+        "SET cache_httpfs_disk_cache_reader_enable_memory_cache = 0;",
         [],
     )?;
     conn.execute(
@@ -77,19 +54,45 @@ fn configure_cache_httpfs(cache_dir: &PathBuf, conn: &Connection) -> Result<()> 
     Ok(())
 }
 
+/// Wrap S3 and httpfs filesystems with cache_httpfs for persistent on-disk caching.
+/// Filesystems are registered lazily by DuckDB when first used, so wrapping may fail
+/// until S3/httpfs paths are actually queried. This is non-fatal - caching will work
+/// once filesystems are registered through actual usage.
 fn wrap_filesystem(conn: &Connection) -> Result<()> {
-    if let Err(err) = conn.execute("SELECT cache_httpfs_wrap_cache_filesystem('httpfs');", []) {
-        let message = err.to_string();
-        if !message.contains("already wrapped") {
-            return Err(anyhow!(err));
-        }
-    }
+    // Wrap S3 filesystem (will succeed once S3 is used in a query)
     if let Err(err) = conn.execute("SELECT cache_httpfs_wrap_cache_filesystem('s3');", []) {
         let message = err.to_string();
-        if !message.contains("already wrapped") {
-            return Err(anyhow!(err));
+        if message.contains("already wrapped") {
+            // Already wrapped is fine (idempotent)
+        } else if message.contains("hasn't been registered yet") {
+            // S3 filesystem not registered yet - will be registered on first S3 query
+            // This is expected and non-fatal. Caching will work once S3 is used.
+        } else {
+            return Err(anyhow!(
+                "Failed to wrap S3 filesystem with cache_httpfs: {}. \
+                Unexpected error - ensure DuckDB 1.4.3+ with cache_httpfs support.",
+                err
+            ));
         }
     }
+
+    // Wrap httpfs filesystem (will succeed once httpfs is used in a query)
+    if let Err(err) = conn.execute("SELECT cache_httpfs_wrap_cache_filesystem('httpfs');", []) {
+        let message = err.to_string();
+        if message.contains("already wrapped") {
+            // Already wrapped is fine (idempotent)
+        } else if message.contains("hasn't been registered yet") {
+            // httpfs filesystem not registered yet - will be registered on first HTTP query
+            // This is expected and non-fatal. Caching will work once httpfs is used.
+        } else {
+            return Err(anyhow!(
+                "Failed to wrap httpfs filesystem with cache_httpfs: {}. \
+                Unexpected error - ensure DuckDB 1.4.3+ with cache_httpfs support.",
+                err
+            ));
+        }
+    }
+
     if std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1") {
         let first = !CACHE_PROFILE_INIT.swap(true, Ordering::Relaxed);
         if first {
@@ -101,22 +104,3 @@ fn wrap_filesystem(conn: &Connection) -> Result<()> {
 }
 
 static CACHE_PROFILE_INIT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-static CACHE_HTTPFS_UNSUPPORTED_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
-fn handle_config_error(err: duckdb::Error, setting: &str) -> Result<()> {
-    if is_unrecognized_config_error(&err) {
-        if !CACHE_HTTPFS_UNSUPPORTED_WARNED.swap(true, Ordering::Relaxed) {
-            warn!(
-                "DuckDB does not expose cache_httpfs setting {}; skipping disk cache setup",
-                setting,
-            );
-        }
-        return Ok(());
-    }
-    Err(anyhow!(err))
-}
-
-fn is_unrecognized_config_error(err: &duckdb::Error) -> bool {
-    err.to_string()
-        .contains("unrecognized configuration parameter")
-}

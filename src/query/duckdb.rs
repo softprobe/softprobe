@@ -23,6 +23,7 @@ const CATALOG_ALIAS: &str = "iceberg_catalog";
 
 use once_cell::sync::Lazy;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Default)]
 struct ViewCounters {
@@ -33,6 +34,7 @@ struct ViewCounters {
 }
 
 static VIEW_COUNTERS: Lazy<ViewCounters> = Lazy::new(ViewCounters::default);
+static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 #[derive(Debug, Clone)]
 pub struct ViewCounterSnapshot {
     pub iceberg_recreates: u64,
@@ -121,24 +123,22 @@ impl DuckDBQueryEngine {
             config: config.clone(),
             cache: CacheSettings::new(config),
         };
-        let base_connection = core.open_connection()?;
-        core.install_extensions(&base_connection)?;
-        let shared_connection = Arc::new(Mutex::new(base_connection));
+        // Install extensions once to ensure they're available
+        let temp_conn = core.open_connection()?;
+        core.install_extensions(&temp_conn)?;
+        drop(temp_conn); // Extensions are installed globally, connection no longer needed
+
         let worker_count = std::cmp::max(1, config.duckdb.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
             let core = core.clone();
-            let shared_connection = Arc::clone(&shared_connection);
             std::thread::spawn(move || {
-                let connection = match shared_connection.lock() {
-                    Ok(base) => base.try_clone(),
-                    Err(poisoned) => poisoned.into_inner().try_clone(),
-                };
-                let connection = match connection {
-                    Ok(connection) => connection,
+                // Each worker gets its own independent connection (not cloned)
+                let connection = match core.open_connection() {
+                    Ok(conn) => conn,
                     Err(err) => {
-                        warn!("DuckDB worker failed to clone connection: {}", err);
+                        warn!("DuckDB worker failed to open connection: {}", err);
                         return;
                     }
                 };
@@ -157,8 +157,11 @@ impl DuckDBQueryEngine {
             workers.push(WorkerHandle { sender: tx });
         }
 
+        // Keep a dummy connection for the _shared_connection field (for compatibility)
+        let dummy_conn = core.open_connection()?;
+
         Ok(Self {
-            _shared_connection: shared_connection,
+            _shared_connection: Arc::new(Mutex::new(dummy_conn)),
             workers: Arc::new(workers),
             next_worker: AtomicUsize::new(0),
         })
@@ -279,6 +282,11 @@ impl DuckDBCore {
         conn.execute_batch("LOAD iceberg;")?;
         conn.execute_batch("SET unsafe_enable_version_guessing = true;")?;
 
+        // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
+        if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {
+            warn!("Failed to enable DuckDB object cache: {}", err);
+        }
+
         if let Some(endpoint) = self.config.s3.endpoint.as_ref() {
             let trimmed = endpoint
                 .trim_start_matches("http://")
@@ -302,6 +310,8 @@ impl DuckDBCore {
             [&self.config.storage.s3_region as &dyn ToSql],
         )?;
 
+        // 2) Native external file cache for raw bytes (in-memory). This complements cache_httpfs'
+        // on-disk persistence; we disable cache_httpfs in-memory caching to avoid double-caching.
         if let Err(err) = conn.execute("SET enable_external_file_cache = true;", []) {
             warn!("Failed to enable DuckDB external file cache: {}", err);
         }
@@ -321,7 +331,10 @@ impl DuckDBCore {
         }
 
         if let Err(err) = self.cache.configure(conn) {
-            warn!("Failed to configure cache_httpfs: {}", err);
+            // Avoid log spam when DuckDB build doesn't support wrapping 'httpfs' or cache_httpfs knobs.
+            if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
+                warn!("Failed to configure cache_httpfs: {}", err);
+            }
         }
 
         Ok(())
@@ -419,26 +432,32 @@ impl DuckDBCore {
             }
         }
 
-        let staged_view = if let Some(glob) = self.parquet_glob(kind) {
-            format!(
-                "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM read_parquet('{glob}');",
-                kind = kind,
-                glob = escape_sql_literal(&glob),
-            )
-        } else {
-            format!(
-                "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
-                kind = kind,
-            )
-        };
-        let staged_signature = staged_view.clone();
         let staged_key = kind_key.clone();
+        let staged_signature = self.staged_watermark_signature(kind);
         let staged_changed = state
             .staged_signatures
             .get(&staged_key)
             .map(|prev| prev != &staged_signature)
             .unwrap_or(true);
         if staged_changed || !kind_ready {
+            let staged_files = self.staged_files(kind);
+            let staged_view = if !staged_files.is_empty() {
+                let file_list = staged_files
+                    .iter()
+                    .map(|path| format!("'{}'", escape_sql_literal(path)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM read_parquet([{files}]);",
+                    kind = kind,
+                    files = file_list,
+                )
+            } else {
+                format!(
+                    "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
+                    kind = kind,
+                )
+            };
             let start = std::time::Instant::now();
             state.conn.execute_batch(&staged_view)?;
             if diag {
@@ -455,26 +474,9 @@ impl DuckDBCore {
             }
         }
 
-        let wal_files = self.wal_files(kind);
-        let wal_signature = self.wal_signature(kind, &wal_files);
-        let wal_view = if !wal_files.is_empty() {
-            let file_list = wal_files
-                .iter()
-                .map(|path| format!("'{}'", escape_sql_literal(path)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "CREATE OR REPLACE TEMP VIEW wal_{kind} AS \
-                 SELECT * FROM read_parquet([{files}]);",
-                kind = kind,
-                files = file_list,
-            )
-        } else {
-            format!(
-                "CREATE OR REPLACE TEMP VIEW wal_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
-                kind = kind,
-            )
-        };
+        // Avoid scanning WAL directories on every query: use the wal_manifest mtime as a cheap
+        // signature, and only rebuild the wal_* view when it changes.
+        let wal_signature = self.wal_manifest_signature(kind);
         let wal_key = kind_key.clone();
         let wal_changed = state
             .wal_signatures
@@ -482,6 +484,25 @@ impl DuckDBCore {
             .map(|prev| prev != &wal_signature)
             .unwrap_or(true);
         if wal_changed || !kind_ready {
+            let wal_files = self.wal_files(kind);
+            let wal_view = if !wal_files.is_empty() {
+                let file_list = wal_files
+                    .iter()
+                    .map(|path| format!("'{}'", escape_sql_literal(path)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "CREATE OR REPLACE TEMP VIEW wal_{kind} AS \
+                     SELECT * FROM read_parquet([{files}]);",
+                    kind = kind,
+                    files = file_list,
+                )
+            } else {
+                format!(
+                    "CREATE OR REPLACE TEMP VIEW wal_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
+                    kind = kind,
+                )
+            };
             let start = std::time::Instant::now();
             state.conn.execute_batch(&wal_view)?;
             if diag {
@@ -760,17 +781,36 @@ impl DuckDBCore {
         Ok(format!("stub:{}:{}", path, modified))
     }
 
-    fn parquet_glob(&self, kind: &str) -> Option<String> {
-        let cache_dir = self.cache_dir()?;
-        let parquet_dir = cache_dir.join(kind);
-        if !parquet_dir.exists() {
-            return None;
+    fn staged_watermark_signature(&self, kind: &str) -> String {
+        let Some(cache_dir) = self.cache_dir() else {
+            return String::new();
+        };
+        let marker_path = cache_dir
+            .join("staged_watermarks")
+            .join(format!("{kind}.txt"));
+        if let Ok(metadata) = std::fs::metadata(&marker_path) {
+            if let Ok(modified) = metadata.modified() {
+                let modified = DateTime::<Utc>::from(modified);
+                return modified.to_rfc3339();
+            }
         }
+        String::new()
+    }
+
+    fn staged_files(&self, kind: &str) -> Vec<String> {
+        let Some(cache_dir) = self.cache_dir() else {
+            return Vec::new();
+        };
+        let staged_dir = cache_dir.join(kind);
         let mut files = Vec::new();
-        if collect_parquet_files(&parquet_dir, &mut files).is_err() || files.is_empty() {
-            return None;
+        if collect_parquet_files(&staged_dir, &mut files).is_err() {
+            return Vec::new();
         }
-        Some(format!("{}/**/*.parquet", parquet_dir.to_string_lossy()))
+        files.sort();
+        files.dedup();
+        files.into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect()
     }
 
     fn wal_files(&self, kind: &str) -> Vec<String> {
@@ -823,7 +863,7 @@ impl DuckDBCore {
             .collect()
     }
 
-    fn wal_signature(&self, kind: &str, files: &[String]) -> String {
+    fn wal_manifest_signature(&self, kind: &str) -> String {
         let Some(cache_dir) = self.cache_dir() else {
             return String::new();
         };
@@ -834,9 +874,7 @@ impl DuckDBCore {
                 return modified.to_rfc3339();
             }
         }
-        let mut sorted = files.to_vec();
-        sorted.sort();
-        sorted.join("|")
+        String::new()
     }
 
     fn read_wal_manifest(&self, kind: &str) -> Option<WalManifest> {
@@ -878,7 +916,10 @@ impl DuckDBCore {
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH)),
             Err(err) => {
-                warn!("Failed to read WAL watermark {:?}: {}", path, err);
+                // Missing watermark is normal early in startup; don't spam logs.
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Failed to read WAL watermark {:?}: {}", path, err);
+                }
                 DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH)
             }
         }
