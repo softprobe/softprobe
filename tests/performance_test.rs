@@ -1,17 +1,18 @@
 use chrono::Utc;
 use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::ingest_engine::{IngestEngine, WalWriter};
 use softprobe_otlp_backend::models::Log as LogData;
 use softprobe_otlp_backend::query;
 use softprobe_otlp_backend::query::duckdb::{reset_view_counters, view_counters_snapshot};
 use softprobe_otlp_backend::storage;
 use softprobe_otlp_backend::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 use tempfile::tempdir;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+
+mod util;
+use util::pipeline::TestPipeline;
 
 // ========================================
 // Performance test goals (tunable via env):
@@ -186,11 +187,8 @@ async fn perf_union_read_latency() {
     }
     ensure_wal_bucket(&mut config);
 
-    let writer = Arc::new(storage::iceberg::IcebergWriter::new(&config).await.expect("writer"));
-    let ingest_engine = Arc::new(IngestEngine::new(&config, writer.clone()).await.expect("engine"));
-    let log_buffer = storage::create_log_buffer(&config, writer.clone(), Some(ingest_engine))
-        .await
-        .expect("log buffer");
+    let test_pipeline = TestPipeline::new(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()
@@ -221,7 +219,10 @@ async fn perf_union_read_latency() {
             span_id: None,
         });
     }
-    writer.write_log_batches(vec![base_logs]).await.expect("base write");
+    pipeline
+        .write_log_batches(vec![base_logs])
+        .await
+        .expect("base write");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -238,11 +239,11 @@ async fn perf_union_read_latency() {
             span_id: None,
         });
     }
-    log_buffer.add_items(staged_logs, per_session * 256).await.expect("stage add");
-    log_buffer.force_flush().await.expect("stage flush");
-
-    let schema = writer.logs_schema().await.expect("schema");
-    let wal_writer = WalWriter::new(&config).await.expect("wal writer");
+    pipeline
+        .add_logs(staged_logs, per_session * 256)
+        .await
+        .expect("stage add");
+    pipeline.force_flush_logs().await.expect("stage flush");
     let mut wal_logs = Vec::new();
     for i in 0..per_session {
         wal_logs.push(LogData {
@@ -258,12 +259,12 @@ async fn perf_union_read_latency() {
             span_id: None,
         });
     }
-    wal_writer
-        .write_batch("logs", &wal_logs, per_session * 256, schema.as_ref(), logs_to_record_batch)
+    pipeline
+        .write_wal_logs(wal_logs, per_session * 256)
         .await
         .expect("wal write");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
     let warmup_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
@@ -271,7 +272,7 @@ async fn perf_union_read_latency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, config.duckdb.max_connections);
+    let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
@@ -383,11 +384,8 @@ async fn perf_union_read_concurrency() {
     }
     ensure_wal_bucket(&mut config);
 
-    let writer = Arc::new(storage::iceberg::IcebergWriter::new(&config).await.expect("writer"));
-    let ingest_engine = Arc::new(IngestEngine::new(&config, writer.clone()).await.expect("engine"));
-    let log_buffer = storage::create_log_buffer(&config, writer.clone(), Some(ingest_engine))
-        .await
-        .expect("log buffer");
+    let test_pipeline = TestPipeline::new(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()
@@ -422,7 +420,10 @@ async fn perf_union_read_concurrency() {
             span_id: None,
         });
     }
-    writer.write_log_batches(vec![base_logs]).await.expect("base write");
+    pipeline
+        .write_log_batches(vec![base_logs])
+        .await
+        .expect("base write");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -439,11 +440,11 @@ async fn perf_union_read_concurrency() {
             span_id: None,
         });
     }
-    log_buffer.add_items(staged_logs, per_session * 256).await.expect("stage add");
-    log_buffer.force_flush().await.expect("stage flush");
-
-    let schema = writer.logs_schema().await.expect("schema");
-    let wal_writer = WalWriter::new(&config).await.expect("wal writer");
+    pipeline
+        .add_logs(staged_logs, per_session * 256)
+        .await
+        .expect("stage add");
+    pipeline.force_flush_logs().await.expect("stage flush");
     let mut wal_logs = Vec::new();
     for i in 0..per_session {
         wal_logs.push(LogData {
@@ -459,12 +460,12 @@ async fn perf_union_read_concurrency() {
             span_id: None,
         });
     }
-    wal_writer
-        .write_batch("logs", &wal_logs, per_session * 256, schema.as_ref(), logs_to_record_batch)
+    pipeline
+        .write_wal_logs(wal_logs, per_session * 256)
         .await
         .expect("wal write");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
     let warmup_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
@@ -472,7 +473,7 @@ async fn perf_union_read_concurrency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, config.duckdb.max_connections);
+    let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine.execute_query(&warmup_sql).await.expect("warmup");
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
@@ -581,11 +582,8 @@ async fn perf_view_recreate_stability() {
     let mut config = load_perf_config();
     ensure_wal_bucket(&mut config);
 
-    let writer = Arc::new(storage::iceberg::IcebergWriter::new(&config).await.expect("writer"));
-    let ingest_engine = Arc::new(IngestEngine::new(&config, writer.clone()).await.expect("engine"));
-    let log_buffer = storage::create_log_buffer(&config, writer.clone(), Some(ingest_engine))
-        .await
-        .expect("log buffer");
+    let test_pipeline = TestPipeline::new(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     let per_session = 1000;
     let now = Utc::now();
@@ -608,7 +606,10 @@ async fn perf_view_recreate_stability() {
             span_id: None,
         });
     }
-    writer.write_log_batches(vec![base_logs]).await.expect("base write");
+    pipeline
+        .write_log_batches(vec![base_logs])
+        .await
+        .expect("base write");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -625,11 +626,11 @@ async fn perf_view_recreate_stability() {
             span_id: None,
         });
     }
-    log_buffer.add_items(staged_logs, per_session * 256).await.expect("stage add");
-    log_buffer.force_flush().await.expect("stage flush");
-
-    let schema = writer.logs_schema().await.expect("schema");
-    let wal_writer = WalWriter::new(&config).await.expect("wal writer");
+    pipeline
+        .add_logs(staged_logs, per_session * 256)
+        .await
+        .expect("stage add");
+    pipeline.force_flush_logs().await.expect("stage flush");
     let mut wal_logs = Vec::new();
     for i in 0..per_session {
         wal_logs.push(LogData {
@@ -645,12 +646,12 @@ async fn perf_view_recreate_stability() {
             span_id: None,
         });
     }
-    wal_writer
-        .write_batch("logs", &wal_logs, per_session * 256, schema.as_ref(), logs_to_record_batch)
+    pipeline
+        .write_wal_logs(wal_logs, per_session * 256)
         .await
         .expect("wal write");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = test_pipeline.query_engine();
     reset_view_counters();
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \

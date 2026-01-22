@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::query::cache::CacheSettings;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -6,9 +7,9 @@ use duckdb::{Connection, ToSql};
 use duckdb::types::Value as DuckValue;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
@@ -21,7 +22,7 @@ pub struct DuckDBQueryEngine {
 const CATALOG_ALIAS: &str = "iceberg_catalog";
 
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicU64};
 
 #[derive(Default)]
 struct ViewCounters {
@@ -32,8 +33,6 @@ struct ViewCounters {
 }
 
 static VIEW_COUNTERS: Lazy<ViewCounters> = Lazy::new(ViewCounters::default);
-static CACHE_PROFILE_INIT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
 #[derive(Debug, Clone)]
 pub struct ViewCounterSnapshot {
     pub iceberg_recreates: u64,
@@ -106,7 +105,7 @@ struct WalManifest {
 #[derive(Clone)]
 struct DuckDBCore {
     config: Config,
-    cache_dir: Option<PathBuf>,
+    cache: CacheSettings,
 }
 
 /// Query result containing columns and rows
@@ -120,7 +119,7 @@ impl DuckDBQueryEngine {
     pub async fn new(config: &Config) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
-            cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
+            cache: CacheSettings::new(config),
         };
         let base_connection = core.open_connection()?;
         core.install_extensions(&base_connection)?;
@@ -199,15 +198,14 @@ impl DuckDBCore {
         Connection::open_in_memory().map_err(|err| anyhow!("DuckDB open failed: {}", err))
     }
 
+    fn cache_dir(&self) -> Option<&Path> {
+        self.config.ingest_engine.cache_dir.as_deref().map(Path::new)
+    }
+
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch("INSTALL httpfs;")?;
         conn.execute_batch("INSTALL iceberg;")?;
         Ok(())
-    }
-
-    fn init_connection_state(&self) -> Result<ConnectionState> {
-        let conn = self.open_connection()?;
-        self.init_connection_state_with(conn)
     }
 
     fn init_connection_state_with(&self, conn: Connection) -> Result<ConnectionState> {
@@ -304,72 +302,12 @@ impl DuckDBCore {
         if let Err(err) = conn.execute("SET experimental_metadata_reuse = true;", []) {
             warn!("Failed to enable DuckDB metadata reuse: {}", err);
         }
-        if let Some(cache_dir) = &self.cache_dir {
-            if std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
-                return Ok(());
-            }
-            let cache_path = cache_dir.join("duckdb_http_cache");
-            if let Err(err) = std::fs::create_dir_all(&cache_path) {
-                warn!("Failed to create cache_httpfs dir {:?}: {}", cache_path, err);
-            }
-            let cache_dir_str = cache_path.to_string_lossy().to_string();
-            if let Err(err) = conn.execute("SET external_file_cache_directory = ?;", [&cache_dir_str as &dyn ToSql]) {
-                warn!("Failed to set external_file_cache_directory: {}", err);
-            }
-            if let Err(err) = conn.execute("SET external_file_cache_size = '2GB';", []) {
-                warn!("Failed to set external_file_cache_size: {}", err);
-            }
-            if let Err(err) = conn.execute("SET s3_cache_directory = ?;", [&cache_dir_str as &dyn ToSql]) {
-                warn!("Failed to set s3_cache_directory: {}", err);
-            }
-            if let Err(err) = conn.execute("SET s3_cache_size = '2GB';", []) {
-                warn!("Failed to set s3_cache_size: {}", err);
-            }
-            if let Err(err) = conn.execute_batch("LOAD cache_httpfs;") {
-                warn!("cache_httpfs extension unavailable: {}", err);
-                return Ok(());
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_cache_block_size = 8388608;", []) {
-                warn!("Failed to set cache_httpfs block size: {}", err);
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_max_in_mem_cache_block_count = 4096;", []) {
-                warn!("Failed to set cache_httpfs in-memory block count: {}", err);
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_disk_cache_reader_enable_memory_cache = 1;", []) {
-                warn!("Failed to enable cache_httpfs disk reader memory cache: {}", err);
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_disk_cache_reader_mem_cache_block_count = 4096;", []) {
-                warn!("Failed to set cache_httpfs disk reader memory cache size: {}", err);
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_cache_directory = ?;", [&cache_dir_str as &dyn ToSql]) {
-                warn!("Failed to set cache_httpfs directory: {}", err);
-            }
-            if let Err(err) = conn.execute("SET cache_httpfs_type = 'on_disk';", []) {
-                warn!("Failed to set cache_httpfs type: {}", err);
-            }
-            if let Err(err) = conn.execute("SELECT cache_httpfs_wrap_cache_filesystem('httpfs');", []) {
-                let message = err.to_string();
-                if !message.contains("already wrapped") {
-                    warn!("Failed to wrap httpfs with cache_httpfs: {}", err);
-                }
-            }
-            if let Err(err) = conn.execute("SELECT cache_httpfs_wrap_cache_filesystem('s3');", []) {
-                let message = err.to_string();
-                if !message.contains("already wrapped") {
-                    warn!("Failed to wrap s3 with cache_httpfs: {}", err);
-                }
-            }
-            if std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1") {
-                let first = !CACHE_PROFILE_INIT.swap(true, Ordering::Relaxed);
-                if first {
-                    if let Err(err) = conn.execute("SET cache_httpfs_profile_type = 'temp';", []) {
-                        warn!("Failed to enable cache_httpfs profile: {}", err);
-                    }
-                    if let Err(err) = conn.execute("SELECT cache_httpfs_clear_profile();", []) {
-                        warn!("Failed to clear cache_httpfs profile: {}", err);
-                    }
-                }
-            }
+        if self.cache.cache_dir.is_some() && std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+            return Ok(());
+        }
+
+        if let Err(err) = self.cache.configure(conn) {
+            warn!("Failed to configure cache_httpfs: {}", err);
         }
 
         Ok(())
@@ -814,7 +752,7 @@ impl DuckDBCore {
     }
 
     fn parquet_glob(&self, kind: &str) -> Option<String> {
-        let cache_dir = self.cache_dir.as_ref()?;
+        let cache_dir = self.cache_dir()?;
         let parquet_dir = cache_dir.join(kind);
         if !parquet_dir.exists() {
             return None;
@@ -827,7 +765,7 @@ impl DuckDBCore {
     }
 
     fn wal_files(&self, kind: &str) -> Vec<String> {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
+        let Some(cache_dir) = self.cache_dir() else {
             return Vec::new();
         };
         let wal_dir = cache_dir.join("wal").join(kind);
@@ -877,7 +815,7 @@ impl DuckDBCore {
     }
 
     fn wal_signature(&self, kind: &str, files: &[String]) -> String {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
+        let Some(cache_dir) = self.cache_dir() else {
             return String::new();
         };
         let manifest_path = cache_dir.join("wal_manifest").join(format!("{kind}.json"));
@@ -893,7 +831,7 @@ impl DuckDBCore {
     }
 
     fn read_wal_manifest(&self, kind: &str) -> Option<WalManifest> {
-        let cache_dir = self.cache_dir.as_ref()?;
+        let cache_dir = self.cache_dir()?;
         let manifest_path = cache_dir.join("wal_manifest").join(format!("{kind}.json"));
         let contents = std::fs::read_to_string(&manifest_path).ok()?;
         #[derive(serde::Deserialize)]
@@ -918,7 +856,7 @@ impl DuckDBCore {
     }
 
     fn wal_watermark(&self, kind: &str) -> DateTime<Utc> {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
+        let Some(cache_dir) = self.cache_dir() else {
             return DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH);
         };
         let sanitized = self.config.ingest_engine.wal_prefix.replace('/', "_");
@@ -938,7 +876,7 @@ impl DuckDBCore {
     }
 
     fn iceberg_pinned_metadata(&self, table: &str) -> Option<PinnedMetadata> {
-        let cache_dir = self.cache_dir.as_ref()?;
+        let cache_dir = self.cache_dir()?;
         let pointer_path = cache_dir.join("iceberg_metadata").join(format!("{table}.json"));
         let contents = std::fs::read_to_string(&pointer_path).ok()?;
         #[derive(serde::Deserialize)]

@@ -101,6 +101,15 @@ async fn resolve_catalog_api_base_url(
         request = request.bearer_auth(token);
     }
 
+    let diag = std::env::var("MAINT_DIAG").ok().as_deref() == Some("1");
+    if diag {
+        println!(
+            "MAINT_DIAG config_lookup url={} warehouse_param={}",
+            config_url,
+            if warehouse.is_empty() { "no" } else { "yes" }
+        );
+    }
+
     let response = request.send().await;
     let response = match response {
         Ok(resp) if resp.status().is_success() => resp,
@@ -109,15 +118,34 @@ async fn resolve_catalog_api_base_url(
                 "Catalog config lookup failed ({}), falling back to base URI",
                 resp.status()
             );
+            if diag {
+                println!(
+                    "MAINT_DIAG config_lookup_failed status={} fallback_base={}/v1",
+                    resp.status(),
+                    base_uri
+                );
+            }
             return Ok(format!("{}/v1", base_uri));
         }
         Err(err) => {
             warn!("Catalog config lookup failed ({}), falling back to base URI", err);
+            if diag {
+                println!(
+                    "MAINT_DIAG config_lookup_error err={} fallback_base={}/v1",
+                    err, base_uri
+                );
+            }
             return Ok(format!("{}/v1", base_uri));
         }
     };
 
-    let config: CatalogConfigResponse = response.json().await.unwrap_or_default();
+    let status = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if diag {
+        let preview = if raw.len() > 800 { &raw[..800] } else { raw.as_str() };
+        println!("MAINT_DIAG config_lookup_ok status={} body_preview={}", status, preview);
+    }
+    let config: CatalogConfigResponse = serde_json::from_str(&raw).unwrap_or_default();
     let resolved_uri = config
         .overrides
         .get("uri")
@@ -125,12 +153,27 @@ async fn resolve_catalog_api_base_url(
         .unwrap_or_else(|| base_uri.clone())
         .trim_end_matches('/')
         .to_string();
-    if let Some(prefix) = config.defaults.get("prefix") {
+    // Some catalogs (notably Cloudflare R2) return the resolved prefix under overrides instead
+    // of defaults (e.g. overrides: { "prefix": "<uuid>" }).
+    if let Some(prefix) = config
+        .overrides
+        .get("prefix")
+        .or_else(|| config.defaults.get("prefix"))
+    {
         if !prefix.is_empty() {
+            if diag {
+                println!(
+                    "MAINT_DIAG config_prefix prefix={} resolved_uri={}",
+                    prefix, resolved_uri
+                );
+            }
             return Ok(format!("{}/v1/{}", resolved_uri, prefix));
         }
     }
 
+    if diag {
+        println!("MAINT_DIAG config_no_prefix resolved_uri={}", resolved_uri);
+    }
     Ok(format!("{}/v1", resolved_uri))
 }
 
@@ -156,6 +199,14 @@ impl MaintenanceExecutor {
             catalog_token.as_deref(),
         )
         .await?;
+        if std::env::var("MAINT_DIAG").ok().as_deref() == Some("1") {
+            println!(
+                "MAINT_DIAG catalog_api_base_url={} catalog_uri={} warehouse={}",
+                catalog_api_base_url,
+                config.iceberg.catalog_uri.as_str(),
+                warehouse
+            );
+        }
 
         Ok(Self {
             config: config.clone(),
@@ -436,6 +487,9 @@ impl MaintenanceExecutor {
             table_ident.namespace().to_url_string(),
             table_ident.name()
         );
+        if std::env::var("MAINT_DIAG").ok().as_deref() == Some("1") {
+            println!("MAINT_DIAG post_table_commit url={}", url);
+        }
 
         let mut req = self.http_client.post(url).json(request);
         if let Some(token) = &self.catalog_token {
@@ -446,6 +500,13 @@ impl MaintenanceExecutor {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            if std::env::var("MAINT_DIAG").ok().as_deref() == Some("1") {
+                let preview = if body.len() > 800 { &body[..800] } else { body.as_str() };
+                println!(
+                    "MAINT_DIAG post_table_commit_failed status={} body_preview={}",
+                    status, preview
+                );
+            }
             return Err(anyhow!(
                 "Table commit failed for {}: {} - {}",
                 table_ident,

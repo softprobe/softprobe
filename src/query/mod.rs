@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::config::Config;
 
 pub mod duckdb;
+pub mod cache;
 
 #[derive(Clone)]
 pub struct QueryEngine {

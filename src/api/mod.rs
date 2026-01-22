@@ -3,8 +3,9 @@ pub mod query;
 pub mod health;
 
 use axum::{routing::{get, post}, Router};
-use crate::storage::{Storage, SpanBuffer, LogBuffer, MetricBuffer};
-use crate::query::QueryEngine;
+use crate::config::Config;
+use crate::storage::{IngestPipeline, Storage, SpanBuffer, LogBuffer, MetricBuffer};
+use crate::query::{self as query_engine, QueryEngine};
 use std::sync::Arc;
 
 // Unified application state for Axum router
@@ -15,6 +16,39 @@ pub struct AppState {
     pub span_buffer: Option<Arc<SpanBuffer>>,
     pub log_buffer: Option<Arc<LogBuffer>>,
     pub metric_buffer: Option<Arc<MetricBuffer>>,
+}
+
+pub struct AppPipeline {
+    pub storage: Storage,
+    pub query_engine: QueryEngine,
+    pub span_buffer: SpanBuffer,
+    pub log_buffer: LogBuffer,
+    pub metric_buffer: MetricBuffer,
+}
+
+impl AppPipeline {
+    pub async fn new(config: &Config) -> anyhow::Result<Self> {
+        let pipeline = IngestPipeline::new(config).await?;
+        let query_engine = query_engine::create_query_engine(config).await?;
+        Ok(Self {
+            storage: pipeline.storage,
+            query_engine,
+            span_buffer: pipeline.span_buffer,
+            log_buffer: pipeline.log_buffer,
+            metric_buffer: pipeline.metric_buffer,
+        })
+    }
+
+    pub async fn into_router(self) -> anyhow::Result<Router> {
+        create_router(
+            self.storage,
+            self.query_engine,
+            Some(self.span_buffer),
+            Some(self.log_buffer),
+            Some(self.metric_buffer),
+        )
+        .await
+    }
 }
 
 pub async fn create_router(

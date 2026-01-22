@@ -1,6 +1,9 @@
 use crate::config::Config;
 use crate::models::{Log, Metric, Span};
+use crate::ingest_engine::fs::list_parquet_files;
 use crate::storage::buffer::{Bufferable, FlushCallback, FlushFuture, PreAddCallback, PreAddFuture};
+
+mod fs;
 use crate::storage::iceberg::arrow::{logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch};
 use crate::storage::iceberg::IcebergWriter;
 use anyhow::Result;
@@ -60,9 +63,7 @@ impl IngestEngine {
             return Ok(Vec::new());
         };
         let wal_dir = cache_dir.join("wal").join(kind);
-        let mut files = Vec::new();
-        collect_parquet_files(&wal_dir, &mut files)?;
-        Ok(files)
+        Ok(list_parquet_files(&wal_dir)?)
     }
 
     pub fn list_staged_files(&self, kind: &str) -> Result<Vec<PathBuf>> {
@@ -70,9 +71,7 @@ impl IngestEngine {
             return Ok(Vec::new());
         };
         let staged_dir = cache_dir.join(kind);
-        let mut files = Vec::new();
-        collect_parquet_files(&staged_dir, &mut files)?;
-        Ok(files)
+        Ok(list_parquet_files(&staged_dir)?)
     }
 
     pub fn span_pre_add_callback(&self) -> Arc<PreAddCallback<Span>> {
@@ -512,8 +511,7 @@ impl WalWriter {
         })?;
         let wal_dir = cache_dir.join("wal").join(kind);
         let watermark = self.read_wal_watermark(kind);
-        let mut files = Vec::new();
-        collect_parquet_files(&wal_dir, &mut files)?;
+        let mut files = list_parquet_files(&wal_dir)?;
         files.sort();
 
         let mut batches = Vec::new();
@@ -764,25 +762,6 @@ fn write_parquet_cache(
     info!("Staged {} parquet cache file at {:?}", kind, cache_path);
 
     Ok(cache_path)
-}
-
-fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if file_type.is_file() {
-            if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-                out.push(path);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn write_parquet_bytes(schema: &IcebergSchema, record_batches: &[RecordBatch]) -> Result<Vec<u8>> {

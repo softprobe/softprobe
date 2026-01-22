@@ -1,174 +1,20 @@
 use softprobe_otlp_backend::config::Config;
 use softprobe_otlp_backend::models::{Span as SpanData, SpanEvent, Log as LogData};
-use softprobe_otlp_backend::query;
-use softprobe_otlp_backend::storage;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Instant;
-use tempfile::tempdir;
+use std::time::Duration;
+mod util;
+use util::iceberg::{ensure_wal_bucket, load_test_config};
+use util::pipeline::TestPipeline;
+use util::poll::wait_for;
+use util::perf::{PerformanceMetrics, Timer};
 
-// ========================================
-// Performance Metrics Collection Helpers
-// ========================================
+// Note: perf + config helpers live under `tests/util/`.
 
-#[derive(Debug, Clone)]
-struct PerformanceMetrics {
-    operation: String,
-    duration_ms: u128,
-    rows_processed: usize,
-    bytes_processed: Option<usize>,
-    files_scanned: Option<usize>,
-    partitions_scanned: Option<usize>,
-    throughput_rows_per_sec: f64,
-    throughput_mb_per_sec: Option<f64>,
-}
-
-impl PerformanceMetrics {
-    fn new(operation: &str) -> Self {
-        Self {
-            operation: operation.to_string(),
-            duration_ms: 0,
-            rows_processed: 0,
-            bytes_processed: None,
-            files_scanned: None,
-            partitions_scanned: None,
-            throughput_rows_per_sec: 0.0,
-            throughput_mb_per_sec: None,
-        }
-    }
-
-    fn with_duration(mut self, duration: std::time::Duration) -> Self {
-        self.duration_ms = duration.as_millis();
-        self.calculate_throughput();
-        self
-    }
-
-    fn with_rows(mut self, rows: usize) -> Self {
-        self.rows_processed = rows;
-        self.calculate_throughput();
-        self
-    }
-
-    fn calculate_throughput(&mut self) {
-        if self.duration_ms > 0 {
-            let duration_sec = self.duration_ms as f64 / 1000.0;
-            self.throughput_rows_per_sec = self.rows_processed as f64 / duration_sec;
-
-            if let Some(bytes) = self.bytes_processed {
-                let mb = bytes as f64 / (1024.0 * 1024.0);
-                self.throughput_mb_per_sec = Some(mb / duration_sec);
-            }
-        }
-    }
-
-    fn print_report(&self) {
-        println!("\n📊 Performance Metrics Report: {}", self.operation);
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("⏱️  Duration:              {} ms", self.duration_ms);
-        println!("📝 Rows Processed:        {}", self.rows_processed);
-
-        if let Some(bytes) = self.bytes_processed {
-            println!("💾 Bytes Processed:       {} ({:.2} MB)", bytes, bytes as f64 / (1024.0 * 1024.0));
-        }
-
-        if let Some(files) = self.files_scanned {
-            println!("📁 Files Scanned:         {}", files);
-        }
-
-        if let Some(partitions) = self.partitions_scanned {
-            println!("🗂️  Partitions Scanned:    {}", partitions);
-        }
-
-        println!("⚡ Throughput (rows/sec): {:.2}", self.throughput_rows_per_sec);
-
-        if let Some(mb_per_sec) = self.throughput_mb_per_sec {
-            println!("⚡ Throughput (MB/sec):   {:.2}", mb_per_sec);
-        }
-
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    }
-
-    fn assert_performance_target(&self, max_duration_ms: u128, target_name: &str) {
-        if self.duration_ms > max_duration_ms {
-            println!("⚠️  WARNING: {} exceeded target of {} ms (actual: {} ms)",
-                target_name, max_duration_ms, self.duration_ms);
-        } else {
-            println!("✅ {} within target of {} ms (actual: {} ms)",
-                target_name, max_duration_ms, self.duration_ms);
-        }
-    }
-}
-
-struct Timer {
-    start: Instant,
-    operation: String,
-}
-
-impl Timer {
-    fn start(operation: &str) -> Self {
-        println!("⏱️  Starting: {}", operation);
-        Self {
-            start: Instant::now(),
-            operation: operation.to_string(),
-        }
-    }
-
-    fn elapsed(&self) -> std::time::Duration {
-        self.start.elapsed()
-    }
-
-    fn stop(&self) -> std::time::Duration {
-        let duration = self.elapsed();
-        println!("⏹️  Completed: {} in {:?}", self.operation, duration);
-        duration
-    }
-}
-
-fn load_test_config() -> Config {
-    // Allow selecting test config via environment variable
-    // ICEBERG_TEST_TYPE=r2 cargo test  - for Cloudflare R2
-    // ICEBERG_TEST_TYPE=local cargo test - for local MinIO (default)
-    if let Ok(config_file) = std::env::var("CONFIG_FILE") {
-        if std::path::Path::new(&config_file).exists() {
-            println!("Loading test config from CONFIG_FILE: {}", config_file);
-            return Config::load().expect("Failed to load config");
-        }
-    }
-    let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
-
-    let config_file = match test_type.as_str() {
-        "r2" => "tests/config/test-r2.yaml",
-        _ => "tests/config/test.yaml",
-    };
-
-    println!("Loading test config from: {}", config_file);
-    std::env::set_var("CONFIG_FILE", config_file);
-    Config::load().expect("Failed to load test config")
-}
-
-fn ensure_wal_bucket(config: &mut Config) {
-    if config.ingest_engine.wal_bucket != "your-bucket-name" {
-        return;
-    }
-
-    let warehouse = config.iceberg.warehouse.trim();
-    let mut candidate = warehouse
-        .rsplit('/')
-        .next()
-        .unwrap_or(warehouse)
-        .to_string();
-    if let Some(after_underscore) = candidate.rsplit('_').next() {
-        if !after_underscore.is_empty() {
-            candidate = after_underscore.to_string();
-        }
-    }
-
-    assert!(
-        !candidate.is_empty() && candidate != "your-bucket-name",
-        "wal_bucket is a placeholder and could not be derived from iceberg.warehouse: {}",
-        warehouse
-    );
-    config.ingest_engine.wal_bucket = candidate;
+async fn build_test_pipeline(mut config: Config) -> TestPipeline {
+    ensure_wal_bucket(&mut config);
+    TestPipeline::new(config).await
 }
 
 #[tokio::test]
@@ -229,15 +75,13 @@ async fn test_config_loading() {
 #[tokio::test]
 async fn test_iceberg_writer_bulk_session_roundtrip() {
     let mut config = load_test_config();
-
-    let cache_dir = tempdir().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.span_buffering.max_buffer_spans = 10_000;
     config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
     config.span_buffering.flush_interval_seconds = 3600;
     config.ingest_engine.optimizer_interval_seconds = 3600;
 
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with spans to test multi-session row groups
     let num_sessions = 5;
@@ -342,8 +186,6 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     println!("✅ WAL write completed, querying back each session to verify row group isolation...");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
-
     // Query each session individually to verify row group isolation
     let mut total_query_duration = std::time::Duration::ZERO;
 
@@ -357,7 +199,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         );
 
         let query_timer = Timer::start(&format!("Query session {}", session_idx + 1));
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
 
         let query_duration = query_timer.stop();
@@ -383,7 +225,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
              LIMIT 1",
             escaped
         );
-        let http_result = query_engine.execute_query(&http_sql).await.expect("http query");
+        let http_result = test_pipeline.execute_query(&http_sql).await.expect("http query");
         assert_eq!(http_result.row_count, 1, "Expected HTTP fields row for session {}", session_id);
         let row = &http_result.rows[0];
         let method = row[0].as_str().unwrap_or("");
@@ -435,14 +277,13 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         staged_files_after
     );
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
     for (session_idx, session_id) in session_ids.iter().enumerate() {
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
             "SELECT COUNT(*) AS count FROM iceberg_spans WHERE session_id = '{}'",
             escaped
         );
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
             found,
@@ -467,7 +308,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
              LIMIT 1",
             escaped
         );
-        let http_result = query_engine.execute_query(&http_sql).await.expect("http query");
+        let http_result = test_pipeline.execute_query(&http_sql).await.expect("http query");
         assert_eq!(http_result.row_count, 1, "Expected HTTP fields row for session {}", session_id);
         let row = &http_result.rows[0];
         let method = row[0].as_str().unwrap_or("");
@@ -494,9 +335,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 async fn test_duckdb_union_read_realtime_performance() {
     let mut config = load_test_config();
     config.ingest_engine.enabled = false;
-    ensure_wal_bucket(&mut config);
-
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
     let base_session = format!("union-base-{}", uuid::Uuid::new_v4());
@@ -575,7 +415,7 @@ async fn test_duckdb_union_read_realtime_performance() {
         return;
     }
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = test_pipeline.query_engine();
     let escaped = wal_session.replace('\'', "''");
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
@@ -594,16 +434,13 @@ async fn test_duckdb_union_read_realtime_performance() {
 #[tokio::test]
 async fn test_iceberg_writer_bulk_log_roundtrip() {
     let mut config = load_test_config();
-    ensure_wal_bucket(&mut config);
-
-    let cache_dir = tempdir().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.span_buffering.max_buffer_spans = 10_000;
     config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
     config.span_buffering.flush_interval_seconds = 3600;
     config.ingest_engine.optimizer_interval_seconds = 3600;
 
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with logs to test multi-session row groups
     let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
@@ -690,15 +527,13 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 
     println!("✅ WAL write completed, querying back each session through DuckDB union view...");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
-
     for session_id in &session_ids {
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
             "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
             escaped
         );
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
             found,
@@ -721,14 +556,13 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         "Expected staged parquet cache files for logs"
     );
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
     for session_id in &session_ids {
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
             "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
             escaped
         );
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
             found,
@@ -749,14 +583,13 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         staged_files_after
     );
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
     for session_id in &session_ids {
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
             "SELECT COUNT(*) AS count FROM iceberg_logs WHERE session_id = '{}'",
             escaped
         );
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         assert_eq!(
             found,
@@ -775,16 +608,13 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     use softprobe_otlp_backend::models::Metric;
 
     let mut config = load_test_config();
-    ensure_wal_bucket(&mut config);
-
-    let cache_dir = tempdir().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.span_buffering.max_buffer_spans = 10_000;
     config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
     config.span_buffering.flush_interval_seconds = 3600;
     config.ingest_engine.optimizer_interval_seconds = 3600;
 
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     // Create multiple metric names with data points to test metric_name-based row groups
     let num_metric_names = 5;
@@ -863,8 +693,6 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
     println!("✅ WAL write completed, querying back each metric name via union_metrics...");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
-
     // Query each metric name individually to verify row group isolation (WAL path)
     let mut total_query_duration = std::time::Duration::ZERO;
 
@@ -878,7 +706,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         );
 
         let query_timer = Timer::start(&format!("Query metric {}", metric_idx + 1));
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         let values_sum = result.rows[0][1].as_f64().unwrap_or(0.0);
 
@@ -924,14 +752,13 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         staged_files_after
     );
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
     for (metric_idx, metric_name) in metric_names.iter().enumerate() {
         let escaped = metric_name.replace('\'', "''");
         let sql = format!(
             "SELECT COUNT(*) AS count, SUM(value) AS total FROM iceberg_metrics WHERE metric_name = '{}'",
             escaped
         );
-        let result = query_engine.execute_query(&sql).await.expect("query");
+        let result = test_pipeline.execute_query(&sql).await.expect("query");
         let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
         let values_sum = result.rows[0][1].as_f64().unwrap_or(0.0);
 
@@ -1012,7 +839,8 @@ async fn test_http_fields_in_span_model() {
 
     // Verify the span can be converted to Arrow RecordBatch
     let config = load_test_config();
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     // Write the span and verify it succeeds
     let result = pipeline.write_span_batches(vec![vec![span]]).await;
@@ -1025,14 +853,13 @@ async fn test_http_fields_in_span_model() {
 #[tokio::test]
 async fn test_pinned_metadata_updates_on_commit() {
     let mut config = load_test_config();
-    let cache_dir = tempdir().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.span_buffering.max_buffer_spans = 10_000;
     config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
     config.span_buffering.flush_interval_seconds = 3600;
     config.ingest_engine.optimizer_interval_seconds = 3600;
 
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
     let now = Utc::now();
 
     let mut spans = Vec::new();
@@ -1067,7 +894,11 @@ async fn test_pinned_metadata_updates_on_commit() {
     pipeline.force_flush_spans().await.expect("force flush");
     pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let pointer_path = cache_dir.path().join("iceberg_metadata").join("traces.json");
+    let pointer_path = test_pipeline
+        .cache_dir
+        .path()
+        .join("iceberg_metadata")
+        .join("traces.json");
     let first = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
     let first_json: serde_json::Value = serde_json::from_str(&first).expect("metadata json");
     let first_snapshot = first_json.get("snapshot_id").and_then(|v| v.as_i64());
@@ -1092,10 +923,9 @@ async fn test_pinned_metadata_updates_on_commit() {
 
 #[tokio::test]
 async fn test_duckdb_union_read_realtime_concurrency() {
-    let mut config = load_test_config();
-    ensure_wal_bucket(&mut config);
-
-    let pipeline = storage::IngestPipeline::new(&config).await.expect("ingest pipeline");
+    let config = load_test_config();
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
     let base_session = format!("perf-base-{}", uuid::Uuid::new_v4());
@@ -1164,7 +994,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .await
         .expect("wal write");
 
-    let query_engine = query::create_query_engine(&config).await.expect("query engine");
+    let query_engine = test_pipeline.query_engine().clone();
     let warmup_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
         staged_session.replace('\'', "''")
@@ -1196,4 +1026,289 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         let (_duration, count) = handle.await.expect("task");
         assert_eq!(count, per_session as i64, "Expected {} rows", per_session);
     }
+}
+
+#[tokio::test]
+async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
+    let mut config = load_test_config();
+    config.span_buffering.max_buffer_spans = 10_000;
+    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
+    config.span_buffering.flush_interval_seconds = 1;
+    config.ingest_engine.optimizer_interval_seconds = 3600;
+
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
+
+    let session_id = format!("sql-flush-{}", uuid::Uuid::new_v4());
+    let now = Utc::now();
+    let span = SpanData {
+        session_id: session_id.clone(),
+        trace_id: "trace-flush".to_string(),
+        span_id: "span-flush".to_string(),
+        parent_span_id: None,
+        app_id: "app-flush".to_string(),
+        organization_id: None,
+        tenant_id: None,
+        message_type: "span".to_string(),
+        span_kind: Some("server".to_string()),
+        timestamp: now,
+        end_timestamp: Some(now),
+        attributes: HashMap::from([("sp.session.id".to_string(), session_id.clone())]),
+        events: Vec::new(),
+        http_request_method: None,
+        http_request_path: None,
+        http_request_headers: None,
+        http_request_body: None,
+        http_response_status_code: None,
+        http_response_headers: None,
+        http_response_body: None,
+        status_code: None,
+        status_message: None,
+    };
+
+    pipeline.add_spans(vec![span], 256).await.expect("add spans");
+
+    let wal_files = pipeline.list_wal_files("spans").expect("wal files");
+    assert!(!wal_files.is_empty(), "expected WAL files after add_spans");
+
+    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
+        Ok(!pipeline.list_staged_files("spans")?.is_empty())
+    })
+    .await
+    .expect("staged files should appear after flush interval");
+
+    let escaped = session_id.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped
+    );
+    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
+        let result = test_pipeline.execute_query(&sql).await?;
+        let count = result.rows[0][0].as_i64().unwrap_or(0);
+        Ok(count == 1)
+    })
+    .await
+    .expect("union view should return exactly one row after flush");
+}
+
+#[tokio::test]
+async fn test_wal_replay_recovers_spans() {
+    use softprobe_otlp_backend::query;
+    use softprobe_otlp_backend::storage;
+    use tempfile::tempdir;
+
+    let mut config = load_test_config();
+    ensure_wal_bucket(&mut config);
+    config.ingest_engine.optimizer_interval_seconds = 1;
+    config.ingest_engine.wal_prefix = format!("test-wal-{}", uuid::Uuid::new_v4().simple());
+    config.ingest_engine.replay_wal_on_startup = false;
+
+    let cache_dir = tempdir().expect("tempdir");
+    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+
+    let session_id = format!("replay-{}", uuid::Uuid::new_v4());
+    let now = Utc::now();
+    let span = SpanData {
+        session_id: session_id.clone(),
+        trace_id: "trace-replay".to_string(),
+        span_id: "span-replay".to_string(),
+        parent_span_id: None,
+        app_id: "app-replay".to_string(),
+        organization_id: None,
+        tenant_id: None,
+        message_type: "span".to_string(),
+        span_kind: Some("server".to_string()),
+        timestamp: now,
+        end_timestamp: Some(now),
+        attributes: HashMap::new(),
+        events: Vec::new(),
+        http_request_method: None,
+        http_request_path: None,
+        http_request_headers: None,
+        http_request_body: None,
+        http_response_status_code: None,
+        http_response_headers: None,
+        http_response_body: None,
+        status_code: None,
+        status_message: None,
+    };
+
+    let pipeline = storage::IngestPipeline::new(&config).await.expect("pipeline");
+    pipeline
+        .write_wal_spans(vec![span], 256)
+        .await
+        .expect("write wal");
+    drop(pipeline);
+
+    config.ingest_engine.replay_wal_on_startup = true;
+    let storage = storage::create_storage(&config).await.expect("storage");
+    let wal_count = storage
+        .ingest_engine
+        .as_ref()
+        .and_then(|engine| engine.list_wal_files("spans").ok())
+        .map(|files| files.len())
+        .unwrap_or(0);
+    assert!(wal_count >= 1, "expected at least one WAL entry, found {}", wal_count);
+
+    if let Some(engine) = storage.ingest_engine.as_ref() {
+        engine.run_optimizer_once().await.expect("optimizer");
+    }
+
+    let query_engine = query::create_query_engine(&config).await.expect("query");
+    let escaped = session_id.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped
+    );
+
+    wait_for(Duration::from_secs(15), Duration::from_millis(500), || async {
+        let result = query_engine.execute_query(&sql).await?;
+        let count = result.rows[0][0].as_i64().unwrap_or(0);
+        Ok(count > 0)
+    })
+    .await
+    .expect("expected WAL replay to surface spans in union view");
+}
+
+#[tokio::test]
+async fn test_metadata_maintenance_job_expires_snapshots() {
+    use chrono::{Duration as ChronoDuration, Utc};
+    use iceberg::{Catalog, TableCreation, TableIdent};
+    use softprobe_otlp_backend::compaction::executor::{
+        ActionStatus, CompactionStatus, MaintenanceExecutor,
+    };
+    use softprobe_otlp_backend::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
+    use std::collections::HashMap;
+
+    let mut config = load_test_config();
+    ensure_wal_bucket(&mut config);
+    config.compaction.enabled = true;
+    config.compaction.min_files_to_compact = 1;
+    config.compaction.metadata_maintenance_enabled = true;
+    config.compaction.metadata_min_snapshots_to_keep = 1;
+    config.compaction.metadata_max_snapshot_age_seconds = 0;
+
+    let catalog = IcebergCatalog::new(&config).await.expect("catalog");
+    let namespace = iceberg::NamespaceIdent::from_strs([config.iceberg.namespace.as_str()])
+        .expect("namespace ident");
+    let _ = catalog
+        .catalog()
+        .create_namespace(&namespace, HashMap::new())
+        .await;
+
+    let table_name = format!("traces_maintenance_{}", uuid::Uuid::new_v4().simple());
+    let table_ident = TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
+        .expect("table ident");
+
+    let schema = TraceTable::schema();
+    let partition_spec = TraceTable::partition_spec(&schema).unwrap();
+    let sort_order = TraceTable::sort_order(&schema).unwrap();
+    let properties = TraceTable::table_properties();
+    let creation = TableCreation::builder()
+        .name(table_name.clone())
+        .schema(schema)
+        .partition_spec(partition_spec)
+        .sort_order(sort_order)
+        .properties(properties)
+        .build();
+    catalog
+        .catalog()
+        .create_table(&namespace, creation)
+        .await
+        .unwrap();
+
+    let writer = TableWriter::new(catalog.catalog().clone(), table_ident.clone());
+    let base_time = Utc::now();
+    for offset in 0..3 {
+        let timestamp = base_time + ChronoDuration::seconds(offset);
+        let span = SpanData {
+            session_id: format!("maint-{}", offset),
+            trace_id: format!("trace-{}", offset),
+            span_id: format!("span-{}", offset),
+            parent_span_id: None,
+            app_id: "app-test".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "span".to_string(),
+            span_kind: Some("server".to_string()),
+            timestamp,
+            end_timestamp: Some(timestamp + ChronoDuration::seconds(1)),
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: None,
+        };
+        writer
+            .write_batches(vec![vec![span]], SpanData::to_record_batch)
+            .await
+            .unwrap();
+    }
+
+    let table_before = catalog.catalog().load_table(&table_ident).await.unwrap();
+    let snapshot_count_before = table_before.metadata().snapshots().count();
+    assert!(
+        snapshot_count_before >= 3,
+        "expected at least 3 snapshots, found {}",
+        snapshot_count_before
+    );
+
+    let executor = MaintenanceExecutor::new(&config).await.unwrap();
+    let summary = executor
+        .run_once_for_tables(&[table_ident.clone()])
+        .await
+        .unwrap();
+    let result = summary.tables.first().unwrap();
+    assert!(
+        result.metadata.expired_snapshots >= 2,
+        "expected at least 2 snapshots expired, found {}",
+        result.metadata.expired_snapshots
+    );
+    assert!(
+        matches!(
+            result.compaction.status,
+            CompactionStatus::Completed | CompactionStatus::Unsupported
+        ),
+        "unexpected compaction status"
+    );
+    assert!(
+        matches!(
+            result.rewrite_manifests.status,
+            ActionStatus::Completed | ActionStatus::Unsupported
+        ),
+        "unexpected rewrite manifests status"
+    );
+    let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
+    if is_r2 {
+        // Cloudflare R2 Data Catalog: orphan file cleanup is not supported yet.
+        // See: https://developers.cloudflare.com/r2/data-catalog/table-maintenance/
+        assert!(
+            matches!(result.remove_orphan_files.status, ActionStatus::Unsupported),
+            "expected remove orphan files to be Unsupported on R2"
+        );
+    } else {
+        assert!(
+            matches!(
+                result.remove_orphan_files.status,
+                ActionStatus::Completed | ActionStatus::Unsupported
+            ),
+            "unexpected remove orphan files status"
+        );
+    }
+
+    wait_for(Duration::from_secs(5), Duration::from_millis(200), || async {
+        let table_after = catalog.catalog().load_table(&table_ident).await?;
+        let remaining = table_after.metadata().snapshots().count();
+        Ok(remaining <= config.compaction.metadata_min_snapshots_to_keep)
+    })
+    .await
+    .expect("snapshots should be expired down to configured minimum");
+
+    let _ = catalog.catalog().drop_table(&table_ident).await;
 }
