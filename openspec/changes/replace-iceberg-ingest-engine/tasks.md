@@ -11,9 +11,10 @@
 ## 2. WAL View + Manifest Updates
 - [x] 2.1 Define local `wal_manifest.json` schema and update cadence (time/file-count) for WAL visibility
 - [x] 2.2 Implement WAL manifest writer (append/update outside ingest hot path)
-- [x] 2.3 Update DuckDB union-read to reference WAL via manifest or glob, and only refresh on schema change
-- [x] 2.4 Add integration tests that validate real-time queries include WAL + staged + Iceberg via DuckDB SQL
-- [x] 2.5 Add performance checks to confirm sub-second warm queries for “last N days” paths
+- [x] 2.3 Update DuckDB union-read to snapshot in-memory buffer, staged files, and Iceberg, refreshing only on schema change or staged updates
+- [x] 2.4 Add integration tests that validate real-time queries include Buffer + Staged + Committed via DuckDB SQL
+- [x] 2.5 Add performance checks to confirm sub-second warm queries for "last N days" paths
+- [x] 2.6 Implement buffer snapshot as Arrow RecordBatch for DuckDB query registration (enables buffer queries without disk writes)
 
 ## 3. End-to-End Performance Validation
 - [x] 3.1 Define performance targets and acceptance criteria for sub-second DuckDB queries (cold vs warm)

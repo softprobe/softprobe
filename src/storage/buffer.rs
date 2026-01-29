@@ -34,6 +34,7 @@ pub type PreAddFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>>> + Send>>;
 pub type PreAddCallback<T> = dyn Fn(Vec<T>, usize) -> PreAddFuture<T> + Send + Sync;
 
 /// Generic buffer with size and time-based flushing
+#[derive(Clone)]
 pub struct SimpleBuffer<T: Bufferable> {
     name: String,             // For logging (e.g., "spans", "logs", "metrics")
     config: SpanBufferConfig, // TODO: Rename to BufferConfig
@@ -383,6 +384,15 @@ impl<T: Bufferable> SimpleBuffer<T> {
     pub async fn snapshot_items(&self) -> Vec<T> {
         let buffer = self.items.lock().await;
         buffer.clone()
+    }
+
+    /// Get a snapshot of current buffer items (sync, non-blocking)
+    /// Returns None if buffer is currently locked (rare, during flush)
+    pub fn snapshot_items_sync(&self) -> Option<Vec<T>> {
+        match self.items.try_lock() {
+            Ok(guard) => Some(guard.clone()),
+            Err(_) => None, // Buffer is being modified, skip for this query
+        }
     }
 
     /// Get the last flush watermark for snapshot consistency

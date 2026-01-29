@@ -99,6 +99,18 @@ impl IcebergWriter {
             .await?;
         self.update_metadata_pointer(&self.spans_table_ident, TraceTable::table_name())
             .await;
+        // Download files in background (non-blocking)
+        let table_ident = self.spans_table_ident.clone();
+        let table_name = TraceTable::table_name().to_string();
+        let cache_dir = self.cache_dir.clone();
+        let catalog = self.catalog.clone();
+        tokio::spawn(async move {
+            if let Some(cache_dir) = cache_dir {
+                if let Ok(table) = catalog.catalog().load_table(&table_ident).await {
+                    Self::download_files_in_background(&table, &cache_dir, &table_name).await;
+                }
+            }
+        });
         Ok(())
     }
 
@@ -110,6 +122,18 @@ impl IcebergWriter {
             .await?;
         self.update_metadata_pointer(&self.logs_table_ident, OtlpLogsTable::table_name())
             .await;
+        // Download files in background (non-blocking)
+        let table_ident = self.logs_table_ident.clone();
+        let table_name = OtlpLogsTable::table_name().to_string();
+        let cache_dir = self.cache_dir.clone();
+        let catalog = self.catalog.clone();
+        tokio::spawn(async move {
+            if let Some(cache_dir) = cache_dir {
+                if let Ok(table) = catalog.catalog().load_table(&table_ident).await {
+                    Self::download_files_in_background(&table, &cache_dir, &table_name).await;
+                }
+            }
+        });
         Ok(())
     }
 
@@ -121,6 +145,18 @@ impl IcebergWriter {
             .await?;
         self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name())
             .await;
+        // Download files in background (non-blocking)
+        let table_ident = self.metrics_table_ident.clone();
+        let table_name = OtlpMetricsTable::table_name().to_string();
+        let cache_dir = self.cache_dir.clone();
+        let catalog = self.catalog.clone();
+        tokio::spawn(async move {
+            if let Some(cache_dir) = cache_dir {
+                if let Ok(table) = catalog.catalog().load_table(&table_ident).await {
+                    Self::download_files_in_background(&table, &cache_dir, &table_name).await;
+                }
+            }
+        });
         Ok(())
     }
 
@@ -173,6 +209,161 @@ impl IcebergWriter {
             .await;
         self.update_metadata_pointer(&self.metrics_table_ident, OtlpMetricsTable::table_name())
             .await;
+    }
+
+    /// Download files in background after commit (static method for use in spawn)
+    async fn download_files_in_background(
+        table: &iceberg::table::Table,
+        cache_dir: &PathBuf,
+        table_name: &str,
+    ) {
+        let table_cache_dir = cache_dir.join("iceberg_metadata").join(table_name);
+        let data_dir = table_cache_dir.join("data");
+        if let Err(_) = std::fs::create_dir_all(&data_dir) {
+            return;
+        }
+
+        let mut downloaded_files = Vec::new();
+
+        if let Some(snapshot) = table.metadata().current_snapshot() {
+            match snapshot
+                .load_manifest_list(table.file_io(), table.metadata())
+                .await
+            {
+                Ok(manifest_list) => {
+                    for entry in manifest_list.entries() {
+                        if entry.content == iceberg::spec::ManifestContentType::Deletes {
+                            continue;
+                        }
+                        if let Ok(manifest) = entry.load_manifest(table.file_io()).await {
+                            let mut download_tasks = Vec::new();
+                            for manifest_entry in manifest.entries() {
+                                if manifest_entry.is_alive()
+                                    && manifest_entry.content_type() == iceberg::spec::DataContentType::Data
+                                {
+                                    let file_path = manifest_entry.file_path();
+                                    if file_path.contains("://") {
+                                        // Download in parallel
+                                        let file_path = file_path.to_string();
+                                        let data_dir = data_dir.clone();
+                                        let file_io = table.file_io().clone();
+                                        download_tasks.push(tokio::spawn(async move {
+                                            Self::download_single_file(&file_path, &data_dir, &file_io).await
+                                        }));
+                                    }
+                                }
+                            }
+                            // Wait for all downloads and collect results
+                            for task in download_tasks {
+                                if let Ok(Some(local)) = task.await {
+                                    downloaded_files.push(local);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Update data_files.json with downloaded local paths
+        if !downloaded_files.is_empty() {
+            let data_files_json_path = table_cache_dir.join("data_files.json");
+            if let Ok(existing) = std::fs::read_to_string(&data_files_json_path) {
+                if let Ok(mut data_files_value) = serde_json::from_str::<serde_json::Value>(&existing) {
+                    if let Some(files_array) = data_files_value.get_mut("files").and_then(|f| f.as_array_mut()) {
+                        // Replace S3 paths with local paths where available
+                        for file in files_array.iter_mut() {
+                            if let Some(s3_path) = file.as_str() {
+                                if s3_path.contains("://") {
+                                    // Check if this S3 path has a corresponding local file
+                                    for local_path in &downloaded_files {
+                                        // Extract filename from both paths and compare
+                                        let s3_filename = s3_path.rsplit('/').next().unwrap_or("");
+                                        let local_filename = local_path.rsplit('/').next().unwrap_or("");
+                                        if s3_filename == local_filename || local_path.contains(s3_filename) {
+                                            *file = serde_json::Value::String(local_path.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Write updated data_files.json
+                        let temp_path = data_files_json_path.with_extension("json.tmp");
+                        if let Ok(json_str) = serde_json::to_string(&data_files_value) {
+                            if std::fs::write(&temp_path, json_str).is_ok() {
+                                let _ = std::fs::rename(&temp_path, &data_files_json_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Download a single file in background, returns local path if successful
+    async fn download_single_file(
+        remote_path: &str,
+        data_dir: &PathBuf,
+        file_io: &iceberg::io::FileIO,
+    ) -> Option<String> {
+        let filename = remote_path
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                remote_path.hash(&mut hasher);
+                format!("{:x}.parquet", hasher.finish())
+            });
+
+        let local_path = data_dir.join(&filename);
+        if local_path.exists() {
+            return Some(local_path.to_string_lossy().to_string()); // Already cached
+        }
+
+        if let Ok(input) = file_io.new_input(remote_path) {
+            if let Ok(bytes) = input.read().await {
+                let temp_path = local_path.with_extension("parquet.tmp");
+                if std::fs::write(&temp_path, &bytes).is_ok() {
+                    if std::fs::rename(&temp_path, &local_path).is_ok() {
+                        return Some(local_path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a Parquet file exists in local cache, return local path if found
+    fn check_local_cache(&self, remote_path: &str, cache_dir: &PathBuf) -> Option<String> {
+        if !remote_path.contains("://") {
+            // Already a local path
+            return Some(remote_path.to_string());
+        }
+
+        // Extract filename from path
+        let filename = remote_path
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                remote_path.hash(&mut hasher);
+                format!("{:x}.parquet", hasher.finish())
+            });
+
+        let local_path = cache_dir.join("data").join(&filename);
+        if local_path.exists() {
+            Some(local_path.to_string_lossy().to_string())
+        } else {
+            None
+        }
     }
 
     async fn update_metadata_pointer(&self, table_ident: &TableIdent, table_name: &str) {
@@ -506,7 +697,13 @@ impl IcebergWriter {
                                     && manifest_entry.content_type() == DataContentType::Data
                                 {
                                     let file_path = normalize_data_path(manifest_entry.file_path());
-                                    data_files.push(file_path);
+                                    // Check if file is already cached locally
+                                    if let Some(local_path) = self.check_local_cache(&file_path, &table_cache_dir) {
+                                        data_files.push(local_path);
+                                    } else {
+                                        // Use remote path - files will be downloaded lazily on first query
+                                        data_files.push(file_path);
+                                    }
                                 }
                             }
                         }
@@ -560,7 +757,7 @@ impl IcebergWriter {
                                     local_manifest_list_path.to_string_lossy().to_string();
                                 match file_io.new_output(&output_path) {
                                     Ok(output) => {
-                                        let parent_snapshot_id = snapshot.parent_snapshot_id();
+                                        let parent_snapshot_id: Option<i64> = snapshot.parent_snapshot_id();
                                         let mut writer = match format_version {
                                             FormatVersion::V1 => ManifestListWriter::v1(
                                                 output,

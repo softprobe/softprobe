@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
 
     let pipeline = IngestPipeline::new(&config).await?;
     let pipeline = Arc::new(pipeline);
-    let query_engine = Arc::new(query::create_query_engine(&config).await?);
+    let query_engine = Arc::new(query::create_query_engine(&config, Some(pipeline.clone())).await?);
     let cache_dir_path = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
 
     let deadline = Instant::now() + Duration::from_secs(args.duration);

@@ -1,0 +1,50 @@
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600
+  worker_threads: null
+
+storage:
+  s3_region: "us-east-1"
+
+span_buffering:
+  max_buffer_bytes: 134217728
+  max_buffer_spans: 10000
+  flush_interval_seconds: 60
+
+ingest_engine:
+  enabled: true
+  wal_bucket: "datalake-benchmark-1769138020"
+  wal_prefix: "wal"
+  cache_dir: "/tmp/datalake-local-test/cache"
+  optimizer_interval_seconds: 300
+  replay_wal_on_startup: false
+
+compaction:
+  enabled: true
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864
+  compaction_interval_seconds: 300
+
+iceberg:
+  catalog_type: "rest"
+  catalog_uri: "http://localhost:8181/catalog"
+  warehouse: "local-test"
+  namespace: "default"
+  catalog_token: null
+  write_target_file_size_bytes: 134217728
+  write_row_group_size_bytes: 134217728
+  write_page_size_bytes: 1048576
+  force_close_after_append: false
+
+s3:
+  endpoint: null
+  access_key_id: null
+  secret_access_key: null
+
+duckdb:
+  max_connections: 2
+  max_memory_per_query: "2GB"
+  max_query_duration_seconds: 60
+  enable_spill_to_disk: true
+  spill_directory: "/tmp/datalake-local-test/duckdb_spill"

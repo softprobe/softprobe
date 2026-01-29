@@ -1,5 +1,6 @@
 use axum::extract::DefaultBodyLimit;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer, trace::TraceLayer};
 use tracing::{info, Level};
@@ -38,7 +39,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize storage components
     let storage = storage::create_storage(&config).await?;
-    let query_engine = query::create_query_engine(&config).await?;
 
     // Initialize span buffer with Iceberg writer
     let span_buffer = storage::create_span_buffer(
@@ -63,6 +63,16 @@ async fn main() -> anyhow::Result<()> {
         storage.ingest_engine.clone(),
     )
     .await?;
+
+    // Create IngestPipeline for query engine
+    let pipeline = Arc::new(storage::IngestPipeline {
+        storage: storage.clone(),
+        span_buffer: span_buffer.clone(),
+        log_buffer: log_buffer.clone(),
+        metric_buffer: metric_buffer.clone(),
+    });
+
+    let query_engine = query::create_query_engine(&config, Some(pipeline)).await?;
 
     // Start background maintenance jobs (metadata + compaction)
     if let Some(_handle) = compaction::scheduler::start_maintenance_scheduler(&config).await? {

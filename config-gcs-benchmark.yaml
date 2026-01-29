@@ -1,0 +1,62 @@
+# GCS Benchmark Configuration
+# For running full stress performance benchmarks on a server with Google Cloud Storage
+#
+# Setup:
+#   1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON key file
+#   2. Update warehouse bucket name and region below
+#   3. Update Iceberg catalog URI if using REST catalog
+#   4. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin perf_stress -- [args]
+
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600  # 100MB
+  worker_threads: null
+
+storage:
+  s3_region: "us-central1"  # GCP region (us-central1, us-east1, etc.)
+
+span_buffering:
+  max_buffer_bytes: 134217728  # 128MB
+  max_buffer_spans: 10000
+  flush_interval_seconds: 60
+
+ingest_engine:
+  enabled: true
+  wal_bucket: "YOUR-GCS-BUCKET-NAME"  # Update with your GCS bucket
+  wal_prefix: "wal"
+  cache_dir: "/var/tmp/datalake/cache"  # Server-local cache directory
+  optimizer_interval_seconds: 300
+  replay_wal_on_startup: false
+
+compaction:
+  enabled: true
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864  # 64MB
+  compaction_interval_seconds: 3600  # 1 hour
+
+duckdb:
+  max_connections: 16  # Higher for server benchmarks
+  max_memory_per_query: "4GB"  # More memory for server
+  max_query_duration_seconds: 60  # Longer timeout for complex queries
+  enable_spill_to_disk: true
+  spill_directory: "/var/tmp/datalake/duckdb_spill"
+
+# GCS Configuration
+# DuckDB uses Application Default Credentials (ADC) when endpoint is null
+# Set GOOGLE_APPLICATION_CREDENTIALS env var to your service account JSON key
+# Alternative: Use HMAC keys for S3-compatible API (set endpoint to storage.googleapis.com)
+s3:
+  endpoint: null  # null = use ADC, or set to "storage.googleapis.com" for HMAC
+  access_key_id: null  # Set if using HMAC keys instead of ADC
+  secret_access_key: null  # Set if using HMAC keys instead of ADC
+
+iceberg:
+  catalog_type: "rest"  # or "s3" for direct GCS access
+  catalog_uri: "https://YOUR-CATALOG-ENDPOINT/catalog"  # Update with your catalog URI
+  catalog_token: null  # Set if catalog requires authentication
+  warehouse: "gs://YOUR-GCS-BUCKET-NAME/warehouse"  # Update with your GCS bucket path
+  write_target_file_size_bytes: 134217728  # 128MB for production
+  write_row_group_size_bytes: 134217728  # 128MB
+  write_page_size_bytes: 1048576  # 1MB
+  force_close_after_append: false

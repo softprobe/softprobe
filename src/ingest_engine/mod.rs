@@ -79,23 +79,11 @@ impl IngestEngine {
     }
 
     pub fn span_pre_add_callback(&self) -> Arc<PreAddCallback<Span>> {
-        let wal_writer = self.wal_writer.clone();
-        let iceberg_writer = self.iceberg_writer.clone();
+        // WAL writes now happen during buffer flush, not per-request.
+        // This reduces small-file creation from 180K/hour to ~3.6K/hour at 50 QPS.
         Arc::new(
-            move |items: Vec<Span>, request_size: usize| -> PreAddFuture<Span> {
-                let wal_writer = wal_writer.clone();
-                let iceberg_writer = iceberg_writer.clone();
+            move |items: Vec<Span>, _request_size: usize| -> PreAddFuture<Span> {
                 Box::pin(async move {
-                    let schema = iceberg_writer.spans_schema().await?;
-                    wal_writer
-                        .write_batch(
-                            "spans",
-                            &items,
-                            request_size,
-                            schema.as_ref(),
-                            spans_to_record_batch,
-                        )
-                        .await?;
                     Ok(items)
                 })
             },
@@ -103,23 +91,11 @@ impl IngestEngine {
     }
 
     pub fn log_pre_add_callback(&self) -> Arc<PreAddCallback<Log>> {
-        let wal_writer = self.wal_writer.clone();
-        let iceberg_writer = self.iceberg_writer.clone();
+        // WAL writes now happen during buffer flush, not per-request.
+        // This reduces small-file creation from 180K/hour to ~3.6K/hour at 50 QPS.
         Arc::new(
-            move |items: Vec<Log>, request_size: usize| -> PreAddFuture<Log> {
-                let wal_writer = wal_writer.clone();
-                let iceberg_writer = iceberg_writer.clone();
+            move |items: Vec<Log>, _request_size: usize| -> PreAddFuture<Log> {
                 Box::pin(async move {
-                    let schema = iceberg_writer.logs_schema().await?;
-                    wal_writer
-                        .write_batch(
-                            "logs",
-                            &items,
-                            request_size,
-                            schema.as_ref(),
-                            logs_to_record_batch,
-                        )
-                        .await?;
                     Ok(items)
                 })
             },
@@ -127,23 +103,11 @@ impl IngestEngine {
     }
 
     pub fn metric_pre_add_callback(&self) -> Arc<PreAddCallback<Metric>> {
-        let wal_writer = self.wal_writer.clone();
-        let iceberg_writer = self.iceberg_writer.clone();
+        // WAL writes now happen during buffer flush, not per-request.
+        // This reduces small-file creation from 180K/hour to ~3.6K/hour at 50 QPS.
         Arc::new(
-            move |items: Vec<Metric>, request_size: usize| -> PreAddFuture<Metric> {
-                let wal_writer = wal_writer.clone();
-                let iceberg_writer = iceberg_writer.clone();
+            move |items: Vec<Metric>, _request_size: usize| -> PreAddFuture<Metric> {
                 Box::pin(async move {
-                    let schema = iceberg_writer.metrics_schema().await?;
-                    wal_writer
-                        .write_batch(
-                            "metrics",
-                            &items,
-                            request_size,
-                            schema.as_ref(),
-                            metrics_to_record_batch,
-                        )
-                        .await?;
                     Ok(items)
                 })
             },
@@ -155,14 +119,27 @@ impl IngestEngine {
         let queue = self.span_queue.clone();
         let engine = self.clone();
         let iceberg_writer = self.iceberg_writer.clone();
+        let wal_writer = self.wal_writer.clone();
         Arc::new(move |batches: Vec<Vec<Span>>| -> FlushFuture {
             let cache_dir = cache_dir.clone();
             let queue = queue.clone();
             let engine = engine.clone();
             let iceberg_writer = iceberg_writer.clone();
+            let wal_writer = wal_writer.clone();
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.spans_schema().await?;
+                
+                // Write to WAL for crash recovery (REQUIRED)
+                for batch in &batches {
+                    if !batch.is_empty() {
+                        wal_writer
+                            .write_batch("spans", batch, 0, schema.as_ref(), spans_to_record_batch)
+                            .await?;
+                    }
+                }
+                
+                // Write to staged cache for queries (REQUIRED)
                 stage_batches(
                     "spans",
                     schema.as_ref(),
@@ -183,14 +160,27 @@ impl IngestEngine {
         let queue = self.log_queue.clone();
         let engine = self.clone();
         let iceberg_writer = self.iceberg_writer.clone();
+        let wal_writer = self.wal_writer.clone();
         Arc::new(move |batches: Vec<Vec<Log>>| -> FlushFuture {
             let cache_dir = cache_dir.clone();
             let queue = queue.clone();
             let engine = engine.clone();
             let iceberg_writer = iceberg_writer.clone();
+            let wal_writer = wal_writer.clone();
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.logs_schema().await?;
+                
+                // Write to WAL for crash recovery (REQUIRED)
+                for batch in &batches {
+                    if !batch.is_empty() {
+                        wal_writer
+                            .write_batch("logs", batch, 0, schema.as_ref(), logs_to_record_batch)
+                            .await?;
+                    }
+                }
+                
+                // Write to staged cache for queries (REQUIRED)
                 stage_batches(
                     "logs",
                     schema.as_ref(),
@@ -211,14 +201,27 @@ impl IngestEngine {
         let queue = self.metric_queue.clone();
         let engine = self.clone();
         let iceberg_writer = self.iceberg_writer.clone();
+        let wal_writer = self.wal_writer.clone();
         Arc::new(move |batches: Vec<Vec<Metric>>| -> FlushFuture {
             let cache_dir = cache_dir.clone();
             let queue = queue.clone();
             let engine = engine.clone();
             let iceberg_writer = iceberg_writer.clone();
+            let wal_writer = wal_writer.clone();
             Box::pin(async move {
                 let watermark = Utc::now();
                 let schema = iceberg_writer.metrics_schema().await?;
+                
+                // Write to WAL for crash recovery (REQUIRED)
+                for batch in &batches {
+                    if !batch.is_empty() {
+                        wal_writer
+                            .write_batch("metrics", batch, 0, schema.as_ref(), metrics_to_record_batch)
+                            .await?;
+                    }
+                }
+                
+                // Write to staged cache for queries (REQUIRED)
                 stage_batches(
                     "metrics",
                     schema.as_ref(),
@@ -383,8 +386,79 @@ impl IngestEngine {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        
+        // Read the OLD watermark before updating (for cleanup)
+        let old_watermark = if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            chrono::DateTime::parse_from_rfc3339(&content)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        } else {
+            None
+        };
+        
+        // Write the NEW watermark
         let timestamp = watermark.to_rfc3339();
         tokio::fs::write(path, timestamp).await?;
+        
+        // Clean up WAL files older than the OLD watermark
+        // This ensures WAL files from previous flushes (which are now in staged) are deleted
+        // Add a small buffer (1 second) to account for filesystem timestamp precision
+        if let Some(old_watermark) = old_watermark {
+            let cleanup_threshold = old_watermark + chrono::Duration::seconds(1);
+            self.cleanup_old_wal_files(kind, cleanup_threshold).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn cleanup_old_wal_files(
+        &self,
+        kind: &str,
+        watermark: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let Some(cache_dir) = &self.cache_dir else {
+            return Ok(());
+        };
+        let wal_dir = cache_dir.join("wal").join(kind);
+        
+        let files = list_parquet_files(&wal_dir)?;
+        let mut deleted_count = 0;
+        let mut skipped_count = 0;
+        let mut error_count = 0;
+        
+        for file_path in files {
+            // Check file modification time
+            match std::fs::metadata(&file_path) {
+                Ok(metadata) => {
+                    if let Ok(modified) = metadata.modified() {
+                        let modified = DateTime::<Utc>::from(modified);
+                        // Delete files strictly older than watermark (not equal)
+                        // This ensures we keep the current flush's WAL files
+                        if modified < watermark {
+                            if let Err(err) = tokio::fs::remove_file(&file_path).await {
+                                error_count += 1;
+                                if error_count <= 3 {
+                                    warn!("Failed to remove old WAL file {:?}: {}", file_path, err);
+                                }
+                            } else {
+                                deleted_count += 1;
+                            }
+                        } else {
+                            skipped_count += 1;
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        
+        if deleted_count > 0 {
+            info!("Cleaned up {} old WAL files for {} (kept {} recent)", deleted_count, kind, skipped_count);
+        }
+        if error_count > 3 {
+            warn!("Failed to delete {} WAL files (showing first 3 errors)", error_count);
+        }
+        
         Ok(())
     }
 

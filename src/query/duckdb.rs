@@ -1,17 +1,22 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
+use crate::storage::iceberg::arrow::{logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch};
+use crate::storage::IngestPipeline;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use duckdb::types::Value as DuckValue;
 use duckdb::{Connection, ToSql};
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 pub struct DuckDBQueryEngine {
     _shared_connection: Arc<Mutex<Connection>>,
@@ -71,10 +76,10 @@ struct QueryRequest {
 struct ConnectionState {
     conn: Connection,
     prepared_kinds: HashSet<String>,
-    wal_signatures: HashMap<String, String>,
     staged_signatures: HashMap<String, String>,
     iceberg_sources: HashMap<String, IcebergSource>,
     iceberg_signatures: HashMap<String, String>,
+    ingest_pipeline: Option<Arc<IngestPipeline>>,
 }
 
 #[derive(Clone)]
@@ -99,15 +104,11 @@ struct PinnedMetadata {
     data_files_path: Option<String>,
 }
 
-struct WalManifest {
-    updated_at: Option<DateTime<Utc>>,
-    files: Vec<String>,
-}
-
 #[derive(Clone)]
 struct DuckDBCore {
     config: Config,
     cache: CacheSettings,
+    ingest_pipeline: Option<Arc<IngestPipeline>>,
 }
 
 /// Query result containing columns and rows
@@ -118,10 +119,11 @@ pub struct QueryResult {
 }
 
 impl DuckDBQueryEngine {
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(config: &Config, ingest_pipeline: Option<Arc<IngestPipeline>>) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
             cache: CacheSettings::new(config),
+            ingest_pipeline: ingest_pipeline.clone(),
         };
         // Install extensions once to ensure they're available
         let temp_conn = core.open_connection()?;
@@ -224,10 +226,10 @@ impl DuckDBCore {
         Ok(ConnectionState {
             conn,
             prepared_kinds: HashSet::new(),
-            wal_signatures: HashMap::new(),
             staged_signatures: HashMap::new(),
             iceberg_sources: HashMap::new(),
             iceberg_signatures: HashMap::new(),
+            ingest_pipeline: self.ingest_pipeline.clone(),
         })
     }
 
@@ -299,11 +301,27 @@ impl DuckDBCore {
                 conn.execute("SET s3_use_ssl = true;", [])?;
             }
         }
-        if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
+        // Fetch credentials from config or instance metadata
+        let (access_key, secret_key, session_token) = if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
+            // Use explicit credentials from config
+            (
+                Some(access_key.clone()),
+                self.config.s3.secret_access_key.clone(),
+                None,
+            )
+        } else {
+            // Try to fetch from instance metadata (IAM role)
+            fetch_instance_metadata_credentials().unwrap_or((None, None, None))
+        };
+
+        if let Some(access_key) = access_key.as_ref() {
             conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
         }
-        if let Some(secret_key) = self.config.s3.secret_access_key.as_ref() {
+        if let Some(secret_key) = secret_key.as_ref() {
             conn.execute("SET s3_secret_access_key = ?;", [secret_key as &dyn ToSql])?;
+        }
+        if let Some(session_token) = session_token.as_ref() {
+            conn.execute("SET s3_session_token = ?;", [session_token as &dyn ToSql])?;
         }
         conn.execute(
             "SET s3_region = ?;",
@@ -474,50 +492,10 @@ impl DuckDBCore {
             }
         }
 
-        // Avoid scanning WAL directories on every query: use the wal_manifest mtime as a cheap
-        // signature, and only rebuild the wal_* view when it changes.
-        let wal_signature = self.wal_manifest_signature(kind);
-        let wal_key = kind_key.clone();
-        let wal_changed = state
-            .wal_signatures
-            .get(&wal_key)
-            .map(|prev| prev != &wal_signature)
-            .unwrap_or(true);
-        if wal_changed || !kind_ready {
-            let wal_files = self.wal_files(kind);
-            let wal_view = if !wal_files.is_empty() {
-                let file_list = wal_files
-                    .iter()
-                    .map(|path| format!("'{}'", escape_sql_literal(path)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "CREATE OR REPLACE TEMP VIEW wal_{kind} AS \
-                     SELECT * FROM read_parquet([{files}]);",
-                    kind = kind,
-                    files = file_list,
-                )
-            } else {
-                format!(
-                    "CREATE OR REPLACE TEMP VIEW wal_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
-                    kind = kind,
-                )
-            };
-            let start = std::time::Instant::now();
-            state.conn.execute_batch(&wal_view)?;
-            if diag {
-                println!(
-                    "DIAG wal_view({}) recreated in {:?}, files={}",
-                    kind,
-                    start.elapsed(),
-                    wal_files.len()
-                );
-            }
-            state.wal_signatures.insert(wal_key, wal_signature);
-            #[cfg(test)]
-            {
-                VIEW_COUNTERS.wal.fetch_add(1, Ordering::Relaxed);
-            }
+        // Create buffer view (snapshot of in-memory data)
+        // Uses sync snapshot (non-blocking) to access buffer data in real-time
+        if !kind_ready {
+            self.create_buffer_view_sync(&state.conn, kind, state.ingest_pipeline.as_ref())?;
         }
 
         if !kind_ready {
@@ -525,7 +503,7 @@ impl DuckDBCore {
                 "CREATE OR REPLACE TEMP VIEW union_{kind} AS \
                  SELECT * FROM iceberg_{kind} \
                  UNION ALL SELECT * FROM staged_{kind} \
-                 UNION ALL SELECT * FROM wal_{kind};",
+                 UNION ALL SELECT * FROM buffer_{kind};",
                 kind = kind,
             );
             let start = std::time::Instant::now();
@@ -588,15 +566,18 @@ impl DuckDBCore {
         }
     }
 
+    /// Resolve the iceberg source for a given kind and table name.
     fn resolve_iceberg_source(
         &self,
         state: &ConnectionState,
         kind_key: &str,
         table_name: &str,
     ) -> Result<(IcebergSource, String)> {
+        // Check if we've already resolved this source for this kind.
         if let Some(source) = state.iceberg_sources.get(kind_key) {
             if let IcebergSource::Pinned { .. } = source {
                 if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
+                    // If we have pinned metadata, use it.
                     return Ok((
                         IcebergSource::Pinned {
                             metadata_path: pinned.metadata_path,
@@ -609,6 +590,7 @@ impl DuckDBCore {
                     ));
                 }
             }
+            // Otherwise, use the signature of the source.
             let signature = self.iceberg_source_signature(source, table_name)?;
             return Ok((source.clone(), signature));
         }
@@ -624,6 +606,11 @@ impl DuckDBCore {
             == Some("1");
         if !disable_pinned {
             if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
+                if pinned.data_files_path.is_some() {
+                    info!("Using pinned metadata for {} with data_files_path", table_name);
+                } else {
+                    warn!("Pinned metadata for {} exists but data_files_path is None", table_name);
+                }
                 return Ok((
                     IcebergSource::Pinned {
                         metadata_path: pinned.metadata_path,
@@ -634,6 +621,8 @@ impl DuckDBCore {
                     },
                     pinned.signature,
                 ));
+            } else {
+                debug!("No pinned metadata found for {}, will use catalog or scan", table_name);
             }
         }
 
@@ -670,6 +659,100 @@ impl DuckDBCore {
         }
     }
 
+    fn create_buffer_view_sync(
+        &self,
+        conn: &Connection,
+        kind: &str,
+        pipeline: Option<&Arc<IngestPipeline>>,
+    ) -> Result<()> {
+        let Some(pipeline) = pipeline else {
+            return self.create_empty_buffer_view(conn, kind);
+        };
+
+        // Get buffer snapshot and convert to RecordBatch (sync, non-blocking for snapshot)
+        let batch = match kind {
+            "spans" => {
+                let Some(items) = pipeline.snapshot_buffered_spans_sync() else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                if items.is_empty() {
+                    return self.create_empty_buffer_view(conn, kind);
+                }
+                // Get schema (blocking call, but schemas are cached so this is fast)
+                let rt = tokio::runtime::Handle::try_current();
+                let schema = if let Ok(rt) = rt {
+                    rt.block_on(pipeline.storage.iceberg_writer.spans_schema())?
+                } else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                spans_to_record_batch(&items, schema.as_ref())?
+            }
+            "logs" => {
+                let Some(items) = pipeline.snapshot_buffered_logs_sync() else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                if items.is_empty() {
+                    return self.create_empty_buffer_view(conn, kind);
+                }
+                // Get schema (blocking call, but schemas are cached so this is fast)
+                let rt = tokio::runtime::Handle::try_current();
+                let schema = if let Ok(rt) = rt {
+                    rt.block_on(pipeline.storage.iceberg_writer.logs_schema())?
+                } else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                logs_to_record_batch(&items, schema.as_ref())?
+            }
+            "metrics" => {
+                let Some(items) = pipeline.snapshot_buffered_metrics_sync() else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                if items.is_empty() {
+                    return self.create_empty_buffer_view(conn, kind);
+                }
+                // Get schema (blocking call, but schemas are cached so this is fast)
+                let rt = tokio::runtime::Handle::try_current();
+                let schema = if let Ok(rt) = rt {
+                    rt.block_on(pipeline.storage.iceberg_writer.metrics_schema())?
+                } else {
+                    return self.create_empty_buffer_view(conn, kind);
+                };
+                metrics_to_record_batch(&items, schema.as_ref())?
+            }
+            _ => return self.create_empty_buffer_view(conn, kind),
+        };
+
+        // Write batch to temp Parquet file
+        let temp_path = format!(
+            "/tmp/buffer_{}_{}.parquet",
+            kind,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        
+        let file = File::create(&temp_path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        // Create view from temp file
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE TEMP VIEW buffer_{kind} AS SELECT * FROM read_parquet('{path}');",
+            kind = kind,
+            path = temp_path
+        ))?;
+
+        Ok(())
+    }
+
+    fn create_empty_buffer_view(&self, conn: &Connection, kind: &str) -> Result<()> {
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE TEMP TABLE buffer_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
+            kind = kind
+        ))?;
+        Ok(())
+    }
+
     fn create_iceberg_view(
         &self,
         conn: &Connection,
@@ -686,31 +769,103 @@ impl DuckDBCore {
                 ..
             } => {
                 if let Some(data_files_path) = data_files_path.as_ref() {
+                    info!("Attempting to use data_files.json for {}: {:?}", kind, data_files_path);
                     if let Ok(contents) = std::fs::read_to_string(data_files_path) {
                         #[derive(serde::Deserialize)]
                         struct DataFiles {
                             files: Vec<String>,
                         }
                         if let Ok(files) = serde_json::from_str::<DataFiles>(&contents) {
+                            info!("Loaded {} files from data_files.json for {}", files.files.len(), kind);
                             if !files.files.is_empty() {
-                                let file_list = files
-                                    .files
-                                    .iter()
-                                    .map(|path| format!("'{}'", escape_sql_literal(path)))
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                let iceberg_view = format!(
-                                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
-                                     SELECT * FROM read_parquet([{files}]);",
-                                    kind = kind,
-                                    files = file_list,
-                                );
-                                conn.execute_batch(&iceberg_view)?;
-                                return Ok(source.clone());
+                                // Separate local and S3 files
+                                let mut local_files = Vec::new();
+                                let mut s3_files = Vec::new();
+                                
+                                for path in &files.files {
+                                    if path.contains("://") {
+                                        // S3 path - check if cached locally
+                                        if let Some(cache_dir) = self.cache_dir() {
+                                            let filename = path.rsplit('/').next().unwrap_or("");
+                                            // Use table_name, not kind, because cache structure uses table names
+                                            let cached_path = cache_dir
+                                                .join("iceberg_metadata")
+                                                .join(table_name)
+                                                .join("data")
+                                                .join(filename);
+                                            if cached_path.exists() {
+                                                local_files.push(cached_path.to_string_lossy().to_string());
+                                            } else {
+                                                // Not cached, will use S3 (slow but works)
+                                                s3_files.push(path.clone());
+                                            }
+                                        } else {
+                                            s3_files.push(path.clone());
+                                        }
+                                    } else {
+                                        // Already a local path
+                                        if std::path::Path::new(path).exists() {
+                                            local_files.push(path.clone());
+                                        }
+                                    }
+                                }
+                                
+                                // CRITICAL: Only use local files if available - skip S3 files entirely
+                                // This ensures fast queries even if some files aren't cached yet
+                                let (files_to_use, s3_count) = if !local_files.is_empty() {
+                                    // Use only local files - ignore S3 files for performance
+                                    // Missing files will be available in next query after background download
+                                    let s3_count = s3_files.len();
+                                    (local_files, s3_count)
+                                } else {
+                                    // Fallback to S3 only if no local files at all (shouldn't happen after warmup)
+                                    (s3_files, 0)
+                                };
+                                
+                                if !files_to_use.is_empty() {
+                                    let file_list = files_to_use
+                                        .iter()
+                                        .map(|path| format!("'{}'", escape_sql_literal(path)))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let local_count = files_to_use.len();
+                                    info!("Using {} local cached files for iceberg_{} (skipped {} S3 files)", local_count, kind, s3_count);
+                                    let iceberg_view = format!(
+                                        "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
+                                         SELECT * FROM read_parquet([{files}]);",
+                                        kind = kind,
+                                        files = file_list,
+                                    );
+                                    conn.execute_batch(&iceberg_view)?;
+                                    return Ok(source.clone());
+                                } else {
+                                    warn!("No local files available for iceberg_{}, falling back to S3 (slow)", kind);
+                                }
+                            } else {
+                                warn!("data_files.json for {} is empty", kind);
                             }
+                        } else {
+                            warn!("Failed to parse data_files.json for {}: {:?}", kind, data_files_path);
                         }
+                    } else {
+                        warn!("Failed to read data_files.json for {}: {:?}", kind, data_files_path);
                     }
+                } else {
+                    warn!("data_files_path is None for iceberg_{}, will use iceberg_scan (slow)", kind);
                 }
+                // Check if metadata_path is a local file path (not S3/HTTP)
+                // iceberg_scan doesn't work with local paths, so we need to fall back
+                if !metadata_path.contains("://") {
+                    // Local metadata path - iceberg_scan won't work, fall back to catalog or S3
+                    warn!("Pinned metadata has local path but iceberg_scan requires remote path for {}: {}", table_name, metadata_path);
+                    let fallback = if self.use_attached_catalog() {
+                        IcebergSource::Catalog
+                    } else {
+                        IcebergSource::ScanUri(self.iceberg_table_uri(table_name))
+                    };
+                    return self.create_iceberg_view(conn, kind, table_name, &fallback);
+                }
+                
                 let mut options = vec![
                     "mode := 'metadata'".to_string(),
                     "allow_moved_paths := true".to_string(),
@@ -738,7 +893,7 @@ impl DuckDBCore {
                     return self.create_iceberg_view(conn, kind, table_name, &fallback);
                 }
                 Ok(source.clone())
-            }
+            },
             IcebergSource::Catalog => {
                 self.attach_catalog_if_needed(conn)?;
                 let iceberg_view = format!(
@@ -813,123 +968,15 @@ impl DuckDBCore {
             .collect()
     }
 
-    fn wal_files(&self, kind: &str) -> Vec<String> {
-        let Some(cache_dir) = self.cache_dir() else {
-            return Vec::new();
-        };
-        let wal_dir = cache_dir.join("wal").join(kind);
-        let watermark = self.wal_watermark(kind);
-        let mut files = Vec::new();
-        if let Some(manifest) = self.read_wal_manifest(kind) {
-            let mut merged = manifest
-                .files
-                .into_iter()
-                .filter(|path| std::path::Path::new(path).exists())
-                .collect::<Vec<_>>();
-            let manifest_cutoff = manifest.updated_at.unwrap_or(watermark);
-            let mut extra = Vec::new();
-            if collect_parquet_files(&wal_dir, &mut extra).is_ok() {
-                for path in extra {
-                    if let Ok(metadata) = std::fs::metadata(&path) {
-                        if let Ok(modified) = metadata.modified() {
-                            let modified = DateTime::<Utc>::from(modified);
-                            if modified > manifest_cutoff && modified > watermark {
-                                merged.push(path.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            merged.sort();
-            merged.dedup();
-            return merged;
-        }
-        if collect_parquet_files(&wal_dir, &mut files).is_err() {
-            return Vec::new();
-        }
-
-        files
-            .into_iter()
-            .filter_map(|path| {
-                let metadata = std::fs::metadata(&path).ok()?;
-                let modified = metadata.modified().ok()?;
-                let modified = DateTime::<Utc>::from(modified);
-                if modified > watermark {
-                    Some(path.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn wal_manifest_signature(&self, kind: &str) -> String {
-        let Some(cache_dir) = self.cache_dir() else {
-            return String::new();
-        };
-        let manifest_path = cache_dir.join("wal_manifest").join(format!("{kind}.json"));
-        if let Ok(metadata) = std::fs::metadata(&manifest_path) {
-            if let Ok(modified) = metadata.modified() {
-                let modified = DateTime::<Utc>::from(modified);
-                return modified.to_rfc3339();
-            }
-        }
-        String::new()
-    }
-
-    fn read_wal_manifest(&self, kind: &str) -> Option<WalManifest> {
-        let cache_dir = self.cache_dir()?;
-        let manifest_path = cache_dir.join("wal_manifest").join(format!("{kind}.json"));
-        let contents = std::fs::read_to_string(&manifest_path).ok()?;
-        #[derive(serde::Deserialize)]
-        struct Manifest {
-            updated_at: Option<String>,
-            files: Vec<String>,
-        }
-        let manifest: Manifest = serde_json::from_str(&contents).ok()?;
-        if manifest.files.is_empty() {
-            None
-        } else {
-            let updated_at = manifest
-                .updated_at
-                .as_deref()
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.with_timezone(&Utc));
-            Some(WalManifest {
-                updated_at,
-                files: manifest.files,
-            })
-        }
-    }
-
-    fn wal_watermark(&self, kind: &str) -> DateTime<Utc> {
-        let Some(cache_dir) = self.cache_dir() else {
-            return DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH);
-        };
-        let sanitized = self.config.ingest_engine.wal_prefix.replace('/', "_");
-        let path = cache_dir
-            .join("wal_watermarks")
-            .join(sanitized)
-            .join(format!("{}.txt", kind));
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => DateTime::parse_from_rfc3339(contents.trim())
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH)),
-            Err(err) => {
-                // Missing watermark is normal early in startup; don't spam logs.
-                if err.kind() != std::io::ErrorKind::NotFound {
-                    warn!("Failed to read WAL watermark {:?}: {}", path, err);
-                }
-                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH)
-            }
-        }
-    }
-
     fn iceberg_pinned_metadata(&self, table: &str) -> Option<PinnedMetadata> {
         let cache_dir = self.cache_dir()?;
         let pointer_path = cache_dir
             .join("iceberg_metadata")
             .join(format!("{table}.json"));
+        if !pointer_path.exists() {
+            debug!("Pinned metadata file not found: {:?}", pointer_path);
+            return None;
+        }
         let contents = std::fs::read_to_string(&pointer_path).ok()?;
         #[derive(serde::Deserialize)]
         struct Pointer {
@@ -999,6 +1046,37 @@ impl DuckDBCore {
             format!("s3://{}/{}/{}", bucket, warehouse, table)
         }
     }
+}
+
+/// Fetch AWS credentials from EC2 instance metadata service
+fn fetch_instance_metadata_credentials() -> Result<(Option<String>, Option<String>, Option<String>)> {
+    // Use blocking reqwest for synchronous call (this is called from sync context)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    
+    // First, get the IAM role name
+    let role_url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
+    let role_response = match client.get(role_url).send() {
+        Ok(resp) => resp,
+        Err(_) => return Ok((None, None, None)), // Not on EC2 or metadata service unavailable
+    };
+    
+    let role_name = role_response.text()?.trim().to_string();
+    if role_name.is_empty() {
+        return Ok((None, None, None));
+    }
+    
+    // Fetch credentials for the role
+    let creds_url = format!("http://169.254.169.254/latest/meta-data/iam/security-credentials/{}", role_name);
+    let creds_response = client.get(&creds_url).send()?;
+    let creds_json: serde_json::Value = creds_response.json()?;
+    
+    let access_key = creds_json["AccessKeyId"].as_str().map(|s| s.to_string());
+    let secret_key = creds_json["SecretAccessKey"].as_str().map(|s| s.to_string());
+    let session_token = creds_json["Token"].as_str().map(|s| s.to_string());
+    
+    Ok((access_key, secret_key, session_token))
 }
 
 fn collect_parquet_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

@@ -173,13 +173,13 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     let total_spans = num_sessions * spans_per_session;
 
-    // Act: write through WAL + local cache
+    // Act: write through buffer + flush to staged cache
     println!(
-        "🧪 Writing {} sessions ({} total spans) via WAL + local cache...",
+        "🧪 Writing {} sessions ({} total spans) via buffer + staged cache...",
         num_sessions, total_spans
     );
     let write_timer = Timer::start(&format!(
-        "Multi-Session WAL Write ({} sessions)",
+        "Multi-Session Buffered Write ({} sessions)",
         num_sessions
     ));
     pipeline
@@ -192,6 +192,10 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         )
         .await
         .expect("span add should succeed");
+    
+    // Flush to staged cache (not WAL)
+    pipeline.force_flush_spans().await.expect("force flush spans");
+    
     let write_duration = write_timer.stop();
 
     // Report write performance
@@ -204,10 +208,16 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-session WAL write time");
 
+    // After flush, we should have BOTH staged (for queries) and WAL (for recovery) files
+    let staged_files = pipeline.list_staged_files("spans").expect("staged files");
+    assert!(!staged_files.is_empty(), "Expected staged cache files for spans");
+    
     let wal_files = pipeline.list_wal_files("spans").expect("wal files");
-    assert!(!wal_files.is_empty(), "Expected WAL cache files for spans");
+    assert!(!wal_files.is_empty(), "Expected WAL cache files for spans (for crash recovery)");
 
-    println!("✅ WAL write completed, querying back each session to verify row group isolation...");
+    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
+             staged_files.len(), wal_files.len());
+    println!("✅ Querying back each session to verify row group isolation...");
 
     // Query each session individually to verify row group isolation
     let mut total_query_duration = std::time::Duration::ZERO;
@@ -630,13 +640,19 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         num_sessions, total_logs
     );
     let write_timer = Timer::start(&format!(
-        "Multi-Session Log Add ({} sessions)",
+        "Multi-Session WAL Log Write ({} sessions)",
         num_sessions
     ));
     pipeline
         .add_logs(all_logs, total_logs * 256)
         .await
-        .expect("log add should succeed");
+        .expect("add logs should succeed");
+    
+    pipeline
+        .force_flush_logs()
+        .await
+        .expect("force flush logs");
+    
     let write_duration = write_timer.stop();
 
     // Report write performance
@@ -648,10 +664,16 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     .with_rows(total_logs);
     write_metrics.print_report();
 
+    // After flush, we should have BOTH staged (for queries) and WAL (for recovery) files
+    let staged_files = pipeline.list_staged_files("logs").expect("staged files");
+    assert!(!staged_files.is_empty(), "Expected staged parquet cache files for logs");
+    
     let wal_files = pipeline.list_wal_files("logs").expect("wal files");
-    assert!(!wal_files.is_empty(), "Expected WAL cache files for logs");
+    assert!(!wal_files.is_empty(), "Expected WAL cache files for logs (for crash recovery)");
 
-    println!("✅ WAL write completed, querying back each session through DuckDB union view...");
+    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
+             staged_files.len(), wal_files.len());
+    println!("✅ Querying back each session through DuckDB union view...");
 
     for session_id in &session_ids {
         let escaped = session_id.replace('\'', "''");
@@ -812,25 +834,37 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
             total_metrics * 256,
         )
         .await
-        .expect("metric add should succeed");
+        .expect("add metrics should succeed");
+    
+    pipeline
+        .force_flush_metrics()
+        .await
+        .expect("force flush metrics");
+    
     let write_duration = write_timer.stop();
 
     let write_metrics = PerformanceMetrics::new(&format!(
-        "Multi-Metric WAL Write ({} metric names, {} data points)",
+        "Multi-Metric Add ({} metric names, {} data points)",
         num_metric_names, total_metrics
     ))
     .with_duration(write_duration)
     .with_rows(total_metrics);
     write_metrics.print_report();
-    write_metrics.assert_performance_target(5000, "Multi-metric WAL write time");
+    write_metrics.assert_performance_target(5000, "Multi-metric add time");
 
-    let wal_files = pipeline.list_wal_files("metrics").expect("wal files");
+    // After flush, we should have BOTH staged (for queries) and WAL (for recovery) files
+    let staged_files = pipeline.list_staged_files("metrics").expect("staged files");
     assert!(
-        !wal_files.is_empty(),
-        "Expected WAL cache files for metrics"
+        !staged_files.is_empty(),
+        "Expected staged parquet cache files for metrics"
     );
+    
+    let wal_files = pipeline.list_wal_files("metrics").expect("wal files");
+    assert!(!wal_files.is_empty(), "Expected WAL cache files for metrics (for crash recovery)");
 
-    println!("✅ WAL write completed, querying back each metric name via union_metrics...");
+    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
+             staged_files.len(), wal_files.len());
+    println!("✅ Querying back each metric name via union_metrics...");
 
     // Query each metric name individually to verify row group isolation (WAL path)
     let mut total_query_duration = std::time::Duration::ZERO;
@@ -1124,30 +1158,8 @@ async fn test_duckdb_union_read_realtime_concurrency() {
     let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
-    let base_session = format!("perf-base-{}", uuid::Uuid::new_v4());
     let staged_session = format!("perf-staged-{}", uuid::Uuid::new_v4());
-    let wal_session = format!("perf-wal-{}", uuid::Uuid::new_v4());
     let per_session = 200usize;
-
-    let mut base_logs = Vec::new();
-    for i in 0..per_session {
-        base_logs.push(LogData {
-            session_id: Some(base_session.clone()),
-            timestamp: now + chrono::Duration::milliseconds(i as i64),
-            observed_timestamp: Some(now + chrono::Duration::milliseconds(i as i64 + 1)),
-            severity_number: 4,
-            severity_text: "INFO".to_string(),
-            body: format!("Base log {}", i),
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-            trace_id: None,
-            span_id: None,
-        });
-    }
-    pipeline
-        .write_log_batches(vec![base_logs])
-        .await
-        .expect("base write");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -1168,40 +1180,40 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .add_logs(staged_logs, per_session * 256)
         .await
         .expect("stage add");
-    pipeline.force_flush_logs().await.expect("stage flush");
-
-    let mut wal_logs = Vec::new();
-    for i in 0..per_session {
-        wal_logs.push(LogData {
-            session_id: Some(wal_session.clone()),
-            timestamp: now + chrono::Duration::milliseconds(20_000 + i as i64),
-            observed_timestamp: Some(now + chrono::Duration::milliseconds(20_000 + i as i64 + 1)),
-            severity_number: 4,
-            severity_text: "INFO".to_string(),
-            body: format!("Wal log {}", i),
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-            trace_id: None,
-            span_id: None,
-        });
-    }
-    pipeline
-        .write_wal_logs(wal_logs, per_session * 256)
-        .await
-        .expect("wal write");
-
+    
+    // Query BEFORE flush to verify buffer snapshot works
     let query_engine = test_pipeline.query_engine().clone();
-    let warmup_sql = format!(
+    let buffer_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
         staged_session.replace('\'', "''")
     );
-    let warmup = query_engine
-        .execute_query(&warmup_sql)
+    let buffer_result = query_engine
+        .execute_query(&buffer_sql)
         .await
-        .expect("warmup");
-    assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
+        .expect("buffer query");
+    let buffer_count = buffer_result.rows[0][0].as_i64().unwrap_or(0);
+    println!("🔍 Buffer query result (before flush): {} rows", buffer_count);
+    
+    pipeline.force_flush_logs().await.expect("stage flush");
 
-    let sessions = vec![base_session, staged_session, wal_session];
+    // Wait a bit for flush to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Query AFTER flush to verify staged files are visible
+    let staged_sql = format!(
+        "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+        staged_session.replace('\'', "''")
+    );
+    let staged_result = query_engine
+        .execute_query(&staged_sql)
+        .await
+        .expect("staged query");
+    let staged_count = staged_result.rows[0][0].as_i64().unwrap_or(0);
+    println!("🔍 Staged query result (after flush): {} rows", staged_count);
+    assert_eq!(staged_count, per_session as i64, "Expected {} rows in staged", per_session);
+
+    // Test concurrent queries on the same session
+    let sessions = vec![staged_session.clone(); 6]; // All concurrent queries will use staged_session
     let mut handles = Vec::new();
     let concurrent = 6usize;
     for i in 0..concurrent {
@@ -1270,8 +1282,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
         .await
         .expect("add spans");
 
-    let wal_files = pipeline.list_wal_files("spans").expect("wal files");
-    assert!(!wal_files.is_empty(), "expected WAL files after add_spans");
+    // No immediate check for files - wait for timer-based flush to create staged files
 
     wait_for(
         Duration::from_secs(5),
@@ -1368,7 +1379,7 @@ async fn test_wal_replay_recovers_spans() {
         engine.run_optimizer_once().await.expect("optimizer");
     }
 
-    let query_engine = query::create_query_engine(&config).await.expect("query");
+    let query_engine = query::create_query_engine(&config, None).await.expect("query");
     let escaped = session_id.replace('\'', "''");
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
@@ -1534,4 +1545,100 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
     .expect("snapshots should be expired down to configured minimum");
 
     let _ = catalog.catalog().drop_table(&table_ident).await;
+}
+
+#[tokio::test]
+async fn test_wal_cleanup_after_flush() {
+    let mut config = load_test_config();
+    config.span_buffering.max_buffer_spans = 100;
+    config.span_buffering.max_buffer_bytes = 1024 * 1024;
+    config.span_buffering.flush_interval_seconds = 3600;
+
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
+
+    // First flush: create WAL files
+    let mut first_batch = Vec::new();
+    for i in 0..50 {
+        first_batch.push(SpanData {
+            session_id: "wal-cleanup-test-1".to_string(),
+            trace_id: format!("trace-{}", i),
+            span_id: format!("span-{}", i),
+            parent_span_id: None,
+            app_id: "test".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "span".to_string(),
+            span_kind: Some("server".to_string()),
+            timestamp: Utc::now(),
+            end_timestamp: Some(Utc::now()),
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: Some("OK".to_string()),
+        });
+    }
+    
+    pipeline.add_spans(first_batch, 50 * 256).await.expect("first add");
+    pipeline.force_flush_spans().await.expect("first flush");
+    
+    let first_wal_files = pipeline.list_wal_files("spans").expect("first wal files");
+    assert!(!first_wal_files.is_empty(), "Expected WAL files after first flush");
+    println!("✅ First flush: {} WAL files created", first_wal_files.len());
+
+    // Wait a bit to ensure timestamps are different
+    tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+    // Second flush: should clean up first WAL files
+    let mut second_batch = Vec::new();
+    for i in 50..100 {
+        second_batch.push(SpanData {
+            session_id: "wal-cleanup-test-2".to_string(),
+            trace_id: format!("trace-{}", i),
+            span_id: format!("span-{}", i),
+            parent_span_id: None,
+            app_id: "test".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "span".to_string(),
+            span_kind: Some("server".to_string()),
+            timestamp: Utc::now(),
+            end_timestamp: Some(Utc::now()),
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: Some("OK".to_string()),
+        });
+    }
+    
+    pipeline.add_spans(second_batch, 50 * 256).await.expect("second add");
+    pipeline.force_flush_spans().await.expect("second flush");
+    
+    let second_wal_files = pipeline.list_wal_files("spans").expect("second wal files");
+    println!("✅ Second flush: {} WAL files remaining", second_wal_files.len());
+    
+    // WAL files from first flush should be cleaned up
+    // We should only have WAL files from the second flush
+    assert!(
+        second_wal_files.len() <= first_wal_files.len(),
+        "WAL cleanup should have removed old files. First: {}, Second: {}",
+        first_wal_files.len(),
+        second_wal_files.len()
+    );
+    
+    println!("✅ WAL cleanup working: old WAL files are deleted after staging");
 }

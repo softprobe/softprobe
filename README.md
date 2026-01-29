@@ -34,8 +34,16 @@ Configuration can be provided via:
 ### Prerequisites
 
 - Rust 1.70+
-- AWS credentials configured (for S3 access)
+- AWS credentials configured (for S3 access) OR GCS service account (for GCS)
 - Docker (for local testing with MinIO)
+
+### Performance Benchmarking
+
+For full stress performance benchmarks on GCS:
+
+1. **Setup GCS**: See `docs/gcs_benchmark_guide.md`
+2. **Run benchmark**: `./scripts/benchmark_gcs_server.sh`
+3. **Configuration**: Use `config-gcs-benchmark.yaml` template
 
 ### Build
 

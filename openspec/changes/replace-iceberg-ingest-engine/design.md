@@ -1,6 +1,13 @@
 ## Context
 We need a long-term architecture that avoids Iceberg metadata bloat and small-file churn while enabling sub-second read freshness. The Mooncake whitepaper proposes a write-aware ingestion engine with buffering, object-store WAL, and union-read semantics.
 
+The union-read query path must combine three data sources:
+1. **Buffer** (in-memory): Most recent data, not yet flushed
+2. **Staged** (local parquet): Flushed but not yet committed to Iceberg
+3. **Committed** (Iceberg): Durably committed to object store
+
+WAL (Write-Ahead Log) is for crash recovery only and is NOT part of the query path.
+
 ## Goals / Non-Goals
 - Goals:
   - Sub-second read freshness without frequent Iceberg commits
@@ -23,10 +30,49 @@ We need a long-term architecture that avoids Iceberg metadata bloat and small-fi
   - Why: DuckDB is the supported SQL interface and must interoperate with Iceberg catalogs (REST/Glue/etc.) without bespoke APIs.
 - Decision: Preserve session-based row-grouping when flushing Parquet for traces/logs.
   - Why: query performance depends on row groups clustered by session and must not regress.
-- Decision: Use stable DuckDB views for union-read that reference partitioned WAL/staged directories (glob-based) or a local WAL manifest, and only refresh on schema change.
-  - Why: avoids rebuilding views on every WAL write while keeping new data visible for real-time queries.
-- Decision: Update a small local `wal_manifest.json` on a cadence (time or file-count) instead of per-ingest.
-  - Why: keeps WAL ingestion hot path fast while bounding metadata churn and view refresh frequency.
+- Decision: Use stable DuckDB views for union-read that combine in-memory buffer snapshots, staged parquet files, and committed Iceberg data. Refresh only on schema change or staged file updates.
+  - Why: Sub-second freshness requires querying buffered data directly without disk writes. Avoids rebuilding views on every write while keeping new data visible for real-time queries.
+- Decision: WAL is for crash recovery only, written during buffer flush alongside staged files. WAL is NOT part of the query path.
+  - Why: Separates concerns - durability (WAL) vs visibility (buffer/staged). Prevents double-reads and maintains clear pipeline semantics.
+- Decision: Buffer snapshots are exposed as Arrow RecordBatches and registered with DuckDB as temp tables.
+  - Why: Enables querying in-memory data without disk I/O while maintaining Iceberg schema compatibility.
+
+## Architecture Diagram
+
+### Data Flow
+
+```mermaid
+flowchart TD
+    subgraph write [Write Path]
+        API[API Request] --> Buffer[Buffer In-Memory]
+        Buffer -->|time or size trigger| Flush[Flush Operation]
+        Flush --> Staged[Staged Local Parquet]
+        Flush --> WAL[WAL for Recovery]
+        Staged -->|background optimizer| Iceberg[Iceberg S3]
+    end
+    
+    subgraph query [Query Path - Real-Time]
+        Query[SQL Query] --> UnionView[Union View]
+        UnionView --> BufferView[Buffer View]
+        UnionView --> StagedView[Staged View]
+        UnionView --> IcebergView[Iceberg View]
+        BufferView -->|Arrow RecordBatch| Buffer
+        StagedView -->|read_parquet| Staged
+        IcebergView -->|iceberg_scan| Iceberg
+    end
+    
+    subgraph recovery [Recovery Path - Startup Only]
+        Startup[Startup] -->|read WAL files| WALRecovery[WAL Replay]
+        WAL -->|restore data| WALRecovery
+        WALRecovery -->|write to| StagedRecovery[Staged Cache]
+    end
+```
+
+**Key Separation**:
+- **Write Path**: Buffer → Staged + WAL (dual-write on flush)
+- **Query Path**: Buffer ∪ Staged ∪ Iceberg (no WAL)
+- **Recovery Path**: WAL → Staged (startup only)
+
 ## Deferred
 - Iceberg-native index files (Puffin) and deletion vectors are deferred until we have update/delete workloads (e.g., CDC, GDPR deletions, dedup).
 
@@ -37,6 +83,38 @@ We need a long-term architecture that avoids Iceberg metadata bloat and small-fi
 - Requires careful recovery semantics to reconcile WAL + buffer + Iceberg snapshots.
 - Union-read needs a DuckDB-accessible representation (e.g., temp tables/views) without breaking Iceberg catalog compatibility.
 - Session-based row group clustering constrains compaction and file merge policies.
+
+## Lessons Learned
+
+### Mistake: WAL in Query Path (2026-01-25)
+
+**What happened**: Initial implementation included WAL files in the DuckDB union view query path:
+- `union_spans = iceberg_spans UNION ALL staged_spans UNION ALL wal_spans`
+
+**Why it was wrong**:
+1. WAL is for crash recovery, not queries - mixing concerns
+2. Creates double-reads: data appears in both WAL and staged after flush
+3. Breaks the buffer → staged → committed pipeline semantics
+4. Tests expect immediate buffer visibility, not WAL-delayed visibility
+
+**Correct architecture**:
+```
+Write Path:     API → Buffer (in-memory) → [flush] → Staged (parquet) + WAL (recovery)
+Query Path:     Buffer (in-memory) ∪ Staged (parquet) ∪ Committed (Iceberg)
+Recovery Path:  Startup → Read WAL → Restore to Staged
+```
+
+**Why buffer must be queryable**:
+- Sub-second freshness requirement: queries must see buffered data immediately
+- Single-writer single-reader: no concurrency issues with buffer snapshots
+- Avoids write amplification: don't write to disk just to make data queryable
+
+**Impact**: Required rearchitecting query engine to snapshot buffer as Arrow RecordBatch and register with DuckDB, rather than reading WAL parquet files.
+
+**Prevention**: Explicit separation in design between:
+- Data durability path (buffer → WAL → staged)
+- Query visibility path (buffer → staged → committed)
+- Recovery path (WAL → staged)
 
 ## Migration Plan
 1. Implement new ingest engine behind a feature flag.

@@ -22,11 +22,13 @@ pub type LogBuffer = SimpleBuffer<Log>;
 pub type MetricBuffer = SimpleBuffer<Metric>;
 
 /// Simplified storage - only Iceberg writer needed
+#[derive(Clone)]
 pub struct Storage {
     pub iceberg_writer: Arc<IcebergWriter>,
     pub ingest_engine: Option<Arc<IngestEngine>>,
 }
 
+#[derive(Clone)]
 pub struct IngestPipeline {
     pub storage: Storage,
     pub span_buffer: SpanBuffer,
@@ -143,6 +145,39 @@ impl IngestPipeline {
                 metrics_to_record_batch,
             )
             .await
+    }
+
+    /// Get snapshot of buffered spans (for queries)
+    pub async fn snapshot_buffered_spans(&self) -> Vec<Span> {
+        self.span_buffer.snapshot_items().await
+    }
+
+    /// Get snapshot of buffered logs (for queries)
+    pub async fn snapshot_buffered_logs(&self) -> Vec<Log> {
+        self.log_buffer.snapshot_items().await
+    }
+
+    /// Get snapshot of buffered metrics (for queries)
+    pub async fn snapshot_buffered_metrics(&self) -> Vec<Metric> {
+        self.metric_buffer.snapshot_items().await
+    }
+
+    /// Get snapshot of buffered spans (sync, non-blocking)
+    /// Returns None if buffer is currently locked
+    pub fn snapshot_buffered_spans_sync(&self) -> Option<Vec<Span>> {
+        self.span_buffer.snapshot_items_sync()
+    }
+
+    /// Get snapshot of buffered logs (sync, non-blocking)
+    /// Returns None if buffer is currently locked
+    pub fn snapshot_buffered_logs_sync(&self) -> Option<Vec<Log>> {
+        self.log_buffer.snapshot_items_sync()
+    }
+
+    /// Get snapshot of buffered metrics (sync, non-blocking)
+    /// Returns None if buffer is currently locked
+    pub fn snapshot_buffered_metrics_sync(&self) -> Option<Vec<Metric>> {
+        self.metric_buffer.snapshot_items_sync()
     }
 
     pub async fn force_flush_spans(&self) -> Result<()> {

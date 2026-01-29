@@ -32,7 +32,7 @@ pub struct AppPipeline {
 impl AppPipeline {
     pub async fn new(config: &Config) -> anyhow::Result<Self> {
         let pipeline = IngestPipeline::new(config).await?;
-        let query_engine = query_engine::create_query_engine(config).await?;
+        let query_engine = query_engine::create_query_engine(config, Some(Arc::new(pipeline.clone()))).await?;
         Ok(Self {
             storage: pipeline.storage,
             query_engine,
