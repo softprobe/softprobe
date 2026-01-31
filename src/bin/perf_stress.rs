@@ -2,16 +2,23 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use opentelemetry_proto::tonic::collector::{
+    logs::v1::ExportLogsServiceRequest,
+    metrics::v1::ExportMetricsServiceRequest,
+    trace::v1::ExportTraceServiceRequest,
+};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span as OtlpSpan, Status};
+use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+use opentelemetry_proto::tonic::metrics::v1::{Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics};
 
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::models::{Log, Metric, Span};
-use softprobe_otlp_backend::query;
-use softprobe_otlp_backend::storage::IngestPipeline;
-use tracing::{info, warn};
+use splake::models::{Log, Metric, Span};
 use tracing_subscriber;
 
 #[derive(Parser)]
@@ -51,6 +58,10 @@ struct Args {
     /// Seconds to wait for WAL watermarks/warm-up before recording steady-state query stats.
     #[arg(long, default_value_t = 10)]
     warmup_secs: u64,
+
+    /// Service URL for API (e.g., http://localhost:8090). Required.
+    #[arg(long)]
+    service_url: String,
 }
 
 #[derive(Default)]
@@ -142,21 +153,10 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt::init();
 
-    println!(
-        "Loading config (CONFIG_FILE={:?})",
-        std::env::var("CONFIG_FILE").ok()
-    );
-    let config = Config::load()?;
-    println!(
-        "Config loaded. Cache dir: {:?}",
-        config.ingest_engine.cache_dir
-    );
+    let base_url = args.service_url.trim_end_matches('/').to_string();
+    println!("Using service API at: {}", base_url);
 
-    let pipeline = IngestPipeline::new(&config).await?;
-    let pipeline = Arc::new(pipeline);
-    let query_engine = Arc::new(query::create_query_engine(&config, Some(pipeline.clone())).await?);
-    let cache_dir_path = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
-
+    let http_client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(args.duration);
     let span_stats = Arc::new(ProducerStats::default());
     let log_stats = Arc::new(ProducerStats::default());
@@ -169,48 +169,37 @@ async fn main() -> Result<()> {
     let mut tasks = Vec::new();
 
     if args.span_qps > 0 {
-        tasks.push(tokio::spawn(run_span_writer(
-            Arc::clone(&pipeline),
+        tasks.push(tokio::spawn(run_span_writer_http(
+            http_client.clone(),
+            base_url.clone(),
             args.span_qps,
             deadline,
             Arc::clone(&span_stats),
         )));
     }
     if args.log_qps > 0 {
-        tasks.push(tokio::spawn(run_log_writer(
-            Arc::clone(&pipeline),
+        tasks.push(tokio::spawn(run_log_writer_http(
+            http_client.clone(),
+            base_url.clone(),
             args.log_qps,
             deadline,
             Arc::clone(&log_stats),
         )));
     }
     if args.metric_qps > 0 {
-        tasks.push(tokio::spawn(run_metric_writer(
-            Arc::clone(&pipeline),
+        tasks.push(tokio::spawn(run_metric_writer_http(
+            http_client.clone(),
+            base_url.clone(),
             args.metric_qps,
             deadline,
             Arc::clone(&metric_stats),
         )));
     }
 
-    if let Some(cache_dir) = &cache_dir_path {
-        // In real systems, buffers flush on size/time. For perf_stress, we force a flush
-        // after a short warm-up so queries can exercise staged parquet + WAL manifests.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ = pipeline.force_flush_spans().await;
-        let _ = pipeline.force_flush_logs().await;
-        let _ = pipeline.force_flush_metrics().await;
-
-        wait_for_wal_watermarks(cache_dir, &config.ingest_engine.wal_prefix, warmup_duration).await;
-        wait_for_ready_parquet(cache_dir, warmup_duration).await;
-        info!("Warm-up guard completed after {warmup_secs} seconds");
-    } else {
-        warn!("No ingest cache_dir configured; query workers may hit cold WAL files");
-    }
-
     for idx in 0..args.query_concurrency {
-        tasks.push(tokio::spawn(run_query_worker(
-            Arc::clone(&query_engine),
+        tasks.push(tokio::spawn(run_query_worker_http(
+            http_client.clone(),
+            base_url.clone(),
             args.query_interval_ms,
             deadline,
             Arc::clone(&query_stats),
@@ -226,8 +215,269 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_span_writer(
-    pipeline: Arc<IngestPipeline>,
+// Helper functions to convert internal models to OTLP format
+fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
+    let trace_id_bytes = hex::decode(&span.trace_id).unwrap_or_else(|_| {
+        // If not hex, treat as UUID string and convert
+        uuid::Uuid::parse_str(&span.trace_id)
+            .map(|u| u.as_bytes().to_vec())
+            .unwrap_or_else(|_| vec![0u8; 16])
+    });
+    let span_id_bytes = hex::decode(&span.span_id).unwrap_or_else(|_| {
+        uuid::Uuid::parse_str(&span.span_id)
+            .map(|u| u.as_bytes().to_vec())
+            .unwrap_or_else(|_| vec![0u8; 8])
+    });
+    let parent_span_id_bytes = span.parent_span_id.as_ref().map(|id| {
+        hex::decode(id).unwrap_or_else(|_| {
+            uuid::Uuid::parse_str(id)
+                .map(|u| u.as_bytes().to_vec())
+                .unwrap_or_else(|_| vec![0u8; 8])
+        })
+    }).unwrap_or_default();
+
+    let mut attributes = vec![];
+    for (k, v) in &span.attributes {
+        attributes.push(KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        });
+    }
+
+    let status_code = match span.status_code.as_deref() {
+        Some("ERROR") => 2, // Status_StatusCode_ERROR
+        _ => 1, // Status_StatusCode_OK
+    };
+
+    let otlp_span = OtlpSpan {
+        trace_id: trace_id_bytes,
+        span_id: span_id_bytes,
+        parent_span_id: parent_span_id_bytes,
+        name: span.message_type.clone(),
+        kind: span.span_kind.as_ref()
+            .and_then(|k| match k.as_str() {
+                "SERVER" => Some(span::SpanKind::Server as i32),
+                "CLIENT" => Some(span::SpanKind::Client as i32),
+                _ => Some(span::SpanKind::Internal as i32),
+            })
+            .unwrap_or(span::SpanKind::Internal as i32),
+        start_time_unix_nano: span.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
+        end_time_unix_nano: span.end_timestamp
+            .map(|t| t.timestamp_nanos_opt().unwrap_or(0) as u64)
+            .unwrap_or(0),
+        attributes,
+        events: vec![],
+        status: Some(Status {
+            code: status_code,
+            message: span.status_message.clone().unwrap_or_default(),
+        }),
+        ..Default::default()
+    };
+
+    let mut resource_attributes = vec![
+        KeyValue {
+            key: "sp.app.id".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(span.app_id.clone())),
+            }),
+        },
+    ];
+
+    if let Some(ref org_id) = span.organization_id {
+        resource_attributes.push(KeyValue {
+            key: "sp.organization.id".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(org_id.clone())),
+            }),
+        });
+    }
+    if let Some(ref tenant_id) = span.tenant_id {
+        resource_attributes.push(KeyValue {
+            key: "sp.tenant.id".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(tenant_id.clone())),
+            }),
+        });
+    }
+
+    let resource = Resource {
+        attributes: resource_attributes,
+        dropped_attributes_count: 0,
+    };
+
+    let scope = ScopeSpans {
+        scope: Some(InstrumentationScope {
+            name: "softprobe.stress".to_string(),
+            version: "1.0.0".to_string(),
+            ..Default::default()
+        }),
+        spans: vec![otlp_span],
+        schema_url: String::new(),
+    };
+
+    let resource_spans = ResourceSpans {
+        resource: Some(resource),
+        scope_spans: vec![scope],
+        schema_url: String::new(),
+    };
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![resource_spans],
+    }
+}
+
+fn log_to_otlp(log: &Log) -> ExportLogsServiceRequest {
+    let trace_id_bytes = log.trace_id.as_ref().map(|id| {
+        hex::decode(id).unwrap_or_else(|_| {
+            uuid::Uuid::parse_str(id)
+                .map(|u| u.as_bytes().to_vec())
+                .unwrap_or_else(|_| vec![0u8; 16])
+        })
+    }).unwrap_or_default();
+    let span_id_bytes = log.span_id.as_ref().map(|id| {
+        hex::decode(id).unwrap_or_else(|_| {
+            uuid::Uuid::parse_str(id)
+                .map(|u| u.as_bytes().to_vec())
+                .unwrap_or_else(|_| vec![0u8; 8])
+        })
+    }).unwrap_or_default();
+
+    let mut attributes = vec![];
+    for (k, v) in &log.attributes {
+        attributes.push(KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        });
+    }
+
+    let log_record = LogRecord {
+        time_unix_nano: log.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
+        observed_time_unix_nano: log.observed_timestamp
+            .map(|t| t.timestamp_nanos_opt().unwrap_or(0) as u64)
+            .unwrap_or(0),
+        severity_number: log.severity_number as i32,
+        severity_text: log.severity_text.clone(),
+        body: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(log.body.clone())),
+        }),
+        attributes,
+        trace_id: trace_id_bytes,
+        span_id: span_id_bytes,
+        flags: 0,
+        ..Default::default()
+    };
+
+    let mut resource_attributes = vec![];
+    for (k, v) in &log.resource_attributes {
+        resource_attributes.push(KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        });
+    }
+
+    let resource = Resource {
+        attributes: resource_attributes,
+        dropped_attributes_count: 0,
+    };
+
+    let scope = ScopeLogs {
+        scope: Some(InstrumentationScope {
+            name: "softprobe.stress".to_string(),
+            version: "1.0.0".to_string(),
+            ..Default::default()
+        }),
+        log_records: vec![log_record],
+        schema_url: String::new(),
+    };
+
+    let resource_logs = ResourceLogs {
+        resource: Some(resource),
+        scope_logs: vec![scope],
+        schema_url: String::new(),
+    };
+
+    ExportLogsServiceRequest {
+        resource_logs: vec![resource_logs],
+    }
+}
+
+fn metric_to_otlp(metric: &Metric) -> ExportMetricsServiceRequest {
+    let mut attributes = vec![];
+    for (k, v) in &metric.attributes {
+        attributes.push(KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        });
+    }
+
+    let data_point = NumberDataPoint {
+        attributes,
+        start_time_unix_nano: 0,
+        time_unix_nano: metric.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
+        value: Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(metric.value)),
+        exemplars: vec![],
+        flags: 0,
+    };
+
+    let otlp_metric = OtlpMetric {
+        name: metric.metric_name.clone(),
+        description: metric.description.clone(),
+        unit: metric.unit.clone(),
+        data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
+            opentelemetry_proto::tonic::metrics::v1::Gauge {
+                data_points: vec![data_point],
+            }
+        )),
+        metadata: vec![],
+    };
+
+    let mut resource_attributes = vec![];
+    for (k, v) in &metric.resource_attributes {
+        resource_attributes.push(KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        });
+    }
+
+    let resource = Resource {
+        attributes: resource_attributes,
+        dropped_attributes_count: 0,
+    };
+
+    let scope = ScopeMetrics {
+        scope: Some(InstrumentationScope {
+            name: "softprobe.stress".to_string(),
+            version: "1.0.0".to_string(),
+            ..Default::default()
+        }),
+        metrics: vec![otlp_metric],
+        schema_url: String::new(),
+    };
+
+    let resource_metrics = ResourceMetrics {
+        resource: Some(resource),
+        scope_metrics: vec![scope],
+        schema_url: String::new(),
+    };
+
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![resource_metrics],
+    }
+}
+
+async fn run_span_writer_http(
+    client: reqwest::Client,
+    base_url: String,
     qps: u32,
     deadline: Instant,
     stats: Arc<ProducerStats>,
@@ -237,13 +487,30 @@ async fn run_span_writer(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut counter = 0u64;
+    let url = format!("{}/v1/traces", base_url);
     while Instant::now() < deadline {
         ticker.tick().await;
         let span = sample_span(counter);
-        match pipeline.add_spans(vec![span], 256).await {
-            Ok(_) => stats.inc_success(1),
+        let request = span_to_otlp(&span);
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    stats.inc_success(1);
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    tracing::warn!("span write HTTP error {}: {}", status, error_text);
+                    stats.inc_error();
+                }
+            }
             Err(err) => {
-                tracing::warn!("span write error: {}", err);
+                tracing::warn!("span write HTTP request error: {}", err);
                 stats.inc_error();
             }
         }
@@ -252,8 +519,9 @@ async fn run_span_writer(
     Ok(())
 }
 
-async fn run_log_writer(
-    pipeline: Arc<IngestPipeline>,
+async fn run_log_writer_http(
+    client: reqwest::Client,
+    base_url: String,
     qps: u32,
     deadline: Instant,
     stats: Arc<ProducerStats>,
@@ -263,13 +531,30 @@ async fn run_log_writer(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut counter = 0u64;
+    let url = format!("{}/v1/logs", base_url);
     while Instant::now() < deadline {
         ticker.tick().await;
         let log = sample_log(counter);
-        match pipeline.add_logs(vec![log], 256).await {
-            Ok(_) => stats.inc_success(1),
+        let request = log_to_otlp(&log);
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    stats.inc_success(1);
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    tracing::warn!("log write HTTP error {}: {}", status, error_text);
+                    stats.inc_error();
+                }
+            }
             Err(err) => {
-                tracing::warn!("log write error: {}", err);
+                tracing::warn!("log write HTTP request error: {}", err);
                 stats.inc_error();
             }
         }
@@ -278,8 +563,9 @@ async fn run_log_writer(
     Ok(())
 }
 
-async fn run_metric_writer(
-    pipeline: Arc<IngestPipeline>,
+async fn run_metric_writer_http(
+    client: reqwest::Client,
+    base_url: String,
     qps: u32,
     deadline: Instant,
     stats: Arc<ProducerStats>,
@@ -289,13 +575,30 @@ async fn run_metric_writer(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut counter = 0u64;
+    let url = format!("{}/v1/metrics", base_url);
     while Instant::now() < deadline {
         ticker.tick().await;
         let metric = sample_metric(counter);
-        match pipeline.add_metrics(vec![metric], 256).await {
-            Ok(_) => stats.inc_success(1),
+        let request = metric_to_otlp(&metric);
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    stats.inc_success(1);
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    tracing::warn!("metric write HTTP error {}: {}", status, error_text);
+                    stats.inc_error();
+                }
+            }
             Err(err) => {
-                tracing::warn!("metric write error: {}", err);
+                tracing::warn!("metric write HTTP request error: {}", err);
                 stats.inc_error();
             }
         }
@@ -304,8 +607,22 @@ async fn run_metric_writer(
     Ok(())
 }
 
-async fn run_query_worker(
-    engine: Arc<query::QueryEngine>,
+#[derive(Debug, Serialize)]
+struct SqlQueryRequest {
+    sql: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SqlQueryResponse {
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    row_count: usize,
+}
+
+async fn run_query_worker_http(
+    client: reqwest::Client,
+    base_url: String,
     interval_ms: u64,
     deadline: Instant,
     stats: Arc<QueryStats>,
@@ -314,22 +631,46 @@ async fn run_query_worker(
     let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms.max(100)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut idx = 0;
+    let url = format!("{}/v1/query/sql", base_url);
     while Instant::now() < deadline {
         ticker.tick().await;
         let seed = (idx as u64).wrapping_add((worker_id as u64) * 1_000_000);
         let case = pick_query_case(seed);
         let (label, sql) = build_query(case, seed);
         let start = Instant::now();
-        match engine.execute_query(&sql).await {
-            Ok(_) => {
+        let request = SqlQueryRequest { sql };
+        match client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
                 let elapsed = start.elapsed();
-                stats.record(label, elapsed).await;
+                if response.status().is_success() {
+                    match response.json::<SqlQueryResponse>().await {
+                        Ok(_) => {
+                            stats.record(label, elapsed).await;
+                        }
+                        Err(err) => {
+                            stats.record(label, elapsed).await;
+                            tracing::warn!("query worker {worker_id} {label} JSON parse error: {}", err);
+                            stats.record_error(label).await;
+                        }
+                    }
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    stats.record(label, elapsed).await;
+                    tracing::warn!("query worker {worker_id} {label} HTTP error {}: {}", status, error_text);
+                    stats.record_error(label).await;
+                }
             }
             Err(err) => {
                 let elapsed = start.elapsed();
                 // Record latency even for failures: alerts still pay the cost, and we want to see it.
                 stats.record(label, elapsed).await;
-                tracing::warn!("query worker {worker_id} {label} error: {}", err);
+                tracing::warn!("query worker {worker_id} {label} HTTP request error: {}", err);
                 stats.record_error(label).await;
             }
         }
@@ -349,12 +690,14 @@ enum QueryCase {
     LogSessionRecent,
     MetricLatencyTimeseries10m,
     MetricLatencyMax5m,
+    SpanErrorRate24h,
+    MetricLatencyTimeseries24h,
 }
 
 fn pick_query_case(seed: u64) -> QueryCase {
     // Deterministic, interleaved schedule so short runs (or slow queries) still cover
     // many query types instead of getting "stuck" on the first weight bucket.
-    const SCHEDULE: [QueryCase; 16] = [
+    const SCHEDULE: [QueryCase; 18] = [
         QueryCase::SpanErrorRate5m,
         QueryCase::LogErrorRate5m,
         QueryCase::MetricLatencyMax5m,
@@ -371,6 +714,8 @@ fn pick_query_case(seed: u64) -> QueryCase {
         QueryCase::SpanTop5xxPaths15m,
         QueryCase::SpanP95LatencyByPath5m,
         QueryCase::MetricLatencyTimeseries10m,
+        QueryCase::SpanErrorRate24h,
+        QueryCase::MetricLatencyTimeseries24h,
     ];
     SCHEDULE[(seed as usize) % SCHEDULE.len()]
 }
@@ -491,6 +836,28 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND metric_name = 'stress.metric.latency'"
+            ),
+        ),
+        QueryCase::SpanErrorRate24h => (
+            "span_error_rate_24h",
+            format!(
+                "SELECT COUNT(*) AS errors \
+                 FROM union_spans \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
+                   AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
+            ),
+        ),
+        QueryCase::MetricLatencyTimeseries24h => (
+            "metric_latency_timeseries_24h",
+            format!(
+                "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
+                 FROM union_metrics \
+                 WHERE record_date >= DATE '{date_filter}' \
+                   AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
+                   AND metric_name = 'stress.metric.latency' \
+                 GROUP BY 1 \
+                 ORDER BY 1"
             ),
         ),
     }
@@ -708,96 +1075,6 @@ async fn print_report(
         println!("---------------------------------------");
     }
     println!("=========================================");
-}
-
-async fn wait_for_wal_watermarks(cache_dir: &Path, wal_prefix: &str, timeout: Duration) {
-    let start = Instant::now();
-    let wal_dir = cache_dir
-        .join("wal_watermarks")
-        .join(wal_prefix.replace('/', "_"));
-    let required = ["logs", "spans", "metrics"];
-    while start.elapsed() < timeout {
-        if required
-            .iter()
-            .all(|kind| wal_dir.join(format!("{kind}.txt")).exists())
-        {
-            info!(
-                "Detected WAL watermarks at {:?} after {:?}",
-                wal_dir,
-                start.elapsed()
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    warn!(
-        "Timed out waiting for WAL watermarks at {:?}; queries may hit cold files",
-        wal_dir
-    );
-}
-
-async fn wait_for_ready_parquet(cache_dir: &Path, timeout: Duration) {
-    let start = Instant::now();
-    let mut ready = false;
-    while start.elapsed() < timeout {
-        ready = ["spans", "logs", "metrics"]
-            .iter()
-            .all(|kind| has_stable_parquet(cache_dir, kind));
-        if ready {
-            info!(
-                "Found ready parquet files for all kinds after {:?}",
-                start.elapsed()
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    if !ready {
-        warn!(
-            "Timed out waiting for stable parquet files at {:?}",
-            cache_dir.join("spans")
-        );
-    }
-}
-
-fn has_stable_parquet(cache_dir: &Path, kind: &str) -> bool {
-    let kind_dir = cache_dir.join(kind);
-    if !kind_dir.exists() {
-        return false;
-    }
-    let mut found = Vec::new();
-    if collect_parquet_files(&kind_dir, &mut found).is_ok() {
-        for path in found {
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                // Be permissive: during warm-up, even small parquet files are valid.
-                // The real correctness guard is atomic rename on write.
-                if metadata.len() >= 512 {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified.elapsed().unwrap_or_default() >= Duration::from_millis(500) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn collect_parquet_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn print_producer_summary(label: &str, stats: Arc<ProducerStats>) {

@@ -144,6 +144,166 @@ SET s3_region='auto';
 
 ---
 
+## Configuration via HTTP API (Recommended for Real-Time Queries)
+
+### Why Use HTTP API?
+
+The HTTP API datasource provides access to **union views** that combine:
+- **Buffer** (in-memory): Most recent data, not yet flushed
+- **Staged** (local parquet): Flushed but not yet committed to Iceberg
+- **Committed** (Iceberg): Durably committed to object store
+
+This enables **sub-second read freshness** for real-time monitoring and alerting, which direct DuckDB file access cannot provide.
+
+### Architecture with HTTP API
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Grafana UI                             │
+│  Dashboards for monitoring, debugging, analytics            │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ HTTP API (JSON)
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│              OTLP Backend Service                            │
+│  - /v1/query/sql endpoint                                   │
+│  - DuckDB with union views (buffer ∪ staged ∪ committed)  │
+│  - Real-time query execution                                │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ Union Views
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Data Sources                                    │
+│  - Buffer (in-memory)                                       │
+│  - Staged (local parquet)                                   │
+│  - Committed (Iceberg S3/R2)                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Setup HTTP API Datasource
+
+#### Option 1: Using JSON API Datasource Plugin
+
+1. **Install JSON API Plugin:**
+   ```bash
+   grafana-cli plugins install marcusolsson-json-datasource
+   ```
+
+2. **Configure Data Source:**
+   - Navigate: Configuration → Data Sources → Add data source
+   - Search: `JSON API`
+   - Select: JSON API by Marcus Olsson
+
+3. **Data Source Settings:**
+   | Field | Value |
+   |-------|-------|
+   | **Name** | `OTLP Backend API` |
+   | **URL** | `http://localhost:8090` |
+   | **Method** | `POST` |
+   | **Headers** | `Content-Type: application/json` |
+
+4. **Query Configuration:**
+   - **Query Type:** `JSONPath`
+   - **Path:** `$.rows[*]`
+   - **Body:**
+   ```json
+   {
+     "sql": "SELECT * FROM union_spans WHERE timestamp >= NOW() - INTERVAL '5 minutes' LIMIT 100"
+   }
+   ```
+
+#### Option 2: Using HTTP API Datasource (Community Plugin)
+
+1. **Install HTTP API Plugin:**
+   ```bash
+   grafana-cli plugins install yesoreyeram-grafana-json-datasource
+   ```
+
+2. **Configure Data Source:**
+   - Navigate: Configuration → Data Sources → Add data source
+   - Search: `JSON`
+   - Select: JSON API by Yesoreyeram
+
+3. **Data Source Settings:**
+   | Field | Value |
+   |-------|-------|
+   | **Name** | `OTLP Backend API` |
+   | **URL** | `http://localhost:8090/v1/query/sql` |
+   | **Method** | `POST` |
+   | **Headers** | `Content-Type: application/json` |
+
+4. **Query Editor:**
+   ```json
+   {
+     "sql": "${query}"
+   }
+   ```
+   Where `${query}` is a Grafana variable containing your SQL.
+
+### Query Examples with HTTP API
+
+#### 1. Real-Time Error Rate (5 minutes)
+
+**Query Body:**
+```json
+{
+  "sql": "SELECT COUNT(*) AS errors FROM union_spans WHERE timestamp >= (CAST(CURRENT_TIMESTAMP AS TIMESTAMP) - INTERVAL '5 minutes') AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
+}
+```
+
+**Grafana Panel:**
+- **Type:** Stat
+- **Value:** `errors`
+- **Refresh:** 10s
+
+#### 2. Recent Spans by Session
+
+**Query Body:**
+```json
+{
+  "sql": "SELECT trace_id, span_id, timestamp, http_request_path, http_response_status_code FROM union_spans WHERE record_date >= DATE '2025-01-01' AND session_id = '${session_id}' ORDER BY timestamp DESC LIMIT 50"
+}
+```
+
+**Grafana Panel:**
+- **Type:** Table
+- **Variables:** `session_id` (text input)
+
+#### 3. Time Series - Request Rate with Union Views
+
+**Query Body:**
+```json
+{
+  "sql": "SELECT date_trunc('minute', timestamp) AS time, COUNT(*) AS requests FROM union_spans WHERE timestamp >= (CAST(CURRENT_TIMESTAMP AS TIMESTAMP) - INTERVAL '1 hour') GROUP BY 1 ORDER BY 1"
+}
+```
+
+**Grafana Panel:**
+- **Type:** Time series
+- **X-Axis:** `time`
+- **Y-Axis:** `requests`
+
+### Benefits of HTTP API Approach
+
+✅ **Real-time data access** - Queries include buffered data not yet committed  
+✅ **Unified query interface** - Single endpoint for all data sources  
+✅ **Sub-second freshness** - No waiting for Iceberg commits  
+✅ **Service integration** - Queries go through the same path as other APIs  
+✅ **Error handling** - Service-level error responses and validation  
+
+### When to Use Each Approach
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| **Real-time monitoring/alerts** | HTTP API (union views) |
+| **Historical analysis** | Direct DuckDB (Iceberg only) |
+| **Ad-hoc exploration** | HTTP API (union views) |
+| **Batch reporting** | Direct DuckDB (Iceberg only) |
+
+---
+
 ## Query Examples
 
 ### 1. Time Series - Request Rate

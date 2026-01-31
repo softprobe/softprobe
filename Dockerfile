@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the binary from builder
-COPY --from=builder /app/target/release/softprobe-otlp-backend /app/softprobe-otlp-backend
+COPY --from=builder /app/target/release/splake /app/splake
 
 # Create a non-root user
 RUN useradd -m -u 1000 softprobe && \
@@ -50,4 +50,4 @@ ENV RUST_LOG=info
 # ENV SERVER__HOST=0.0.0.0
 
 # Run the binary
-CMD ["/app/softprobe-otlp-backend", "--config", "/app/config.yaml"]
+CMD ["/app/splake", "--config", "/app/config.yaml"]

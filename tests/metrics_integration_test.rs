@@ -7,10 +7,10 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message;
 use reqwest::Client;
 use reqwest::StatusCode;
-use softprobe_otlp_backend::api;
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::query;
-use softprobe_otlp_backend::storage;
+use splake::api;
+use splake::config::Config;
+use splake::query;
+use splake::ingest_engine::IngestPipeline;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -33,23 +33,22 @@ async fn start_test_server() -> String {
     std::env::set_var("S3_SECRET_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");
 
-    // Initialize storage components
-    let storage = storage::create_storage(&config).await.unwrap();
-    let query_engine = query::create_query_engine(&config).await.unwrap();
+    let pipeline = IngestPipeline::new(&config).await.unwrap();
+    let pipeline = std::sync::Arc::new(pipeline);
+    let query_engine = query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
+        .await
+        .unwrap();
 
-    // Initialize metric buffer
-    let metric_buffer = storage::create_metric_buffer(
-        &config,
-        storage.iceberg_writer.clone(),
-        storage.ingest_engine.clone(),
+    // Create router
+    let app = api::create_router(
+        pipeline.storage.clone(),
+        query_engine,
+        Some(pipeline.storage.span_buffer.clone()),
+        Some(pipeline.storage.log_buffer.clone()),
+        Some(pipeline.storage.metric_buffer.clone()),
     )
     .await
     .unwrap();
-
-    // Create router
-    let app = api::create_router(storage, query_engine, None, None, Some(metric_buffer))
-        .await
-        .unwrap();
 
     // Bind to a random available port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

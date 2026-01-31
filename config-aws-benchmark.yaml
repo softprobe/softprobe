@@ -20,10 +20,10 @@ span_buffering:
   flush_interval_seconds: 60
 
 ingest_engine:
-  enabled: true
   wal_bucket: "YOUR-S3-BUCKET-NAME"  # Update with your S3 bucket name
   wal_prefix: "wal"
   cache_dir: "/var/tmp/datalake/cache"  # Server-local cache directory
+  wal_dir: "/var/tmp/datalake/wal"  # WAL-only directory
   optimizer_interval_seconds: 300
   replay_wal_on_startup: false
 

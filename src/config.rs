@@ -35,14 +35,14 @@ pub struct SpanBufferConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestEngineConfig {
-    #[serde(default = "default_ingest_engine_enabled")]
-    pub enabled: bool,
     #[serde(default = "default_wal_bucket")]
     pub wal_bucket: String,
     #[serde(default = "default_wal_prefix")]
     pub wal_prefix: String,
     #[serde(default = "default_ingest_cache_dir")]
     pub cache_dir: Option<String>,
+    #[serde(default = "default_wal_dir")]
+    pub wal_dir: Option<String>,
     #[serde(default = "default_wal_manifest_update_interval_seconds")]
     pub wal_manifest_update_interval_seconds: u64,
     #[serde(default = "default_wal_manifest_max_pending_files")]
@@ -119,10 +119,6 @@ fn default_metadata_maintenance_enabled() -> bool {
     true
 }
 
-fn default_ingest_engine_enabled() -> bool {
-    true
-}
-
 fn default_wal_bucket() -> String {
     "warehouse".to_string()
 }
@@ -133,6 +129,10 @@ fn default_wal_prefix() -> String {
 
 fn default_ingest_cache_dir() -> Option<String> {
     Some("/var/tmp/softprobe/duckdb".to_string())
+}
+
+fn default_wal_dir() -> Option<String> {
+    default_ingest_cache_dir()
 }
 
 fn default_wal_manifest_update_interval_seconds() -> u64 {
@@ -189,10 +189,10 @@ impl Default for Config {
                 flush_interval_seconds: 60,
             },
             ingest_engine: IngestEngineConfig {
-                enabled: true,
                 wal_bucket: "warehouse".to_string(),
                 wal_prefix: "wal".to_string(),
                 cache_dir: default_ingest_cache_dir(),
+                wal_dir: default_wal_dir(),
                 wal_manifest_update_interval_seconds: default_wal_manifest_update_interval_seconds(
                 ),
                 wal_manifest_max_pending_files: default_wal_manifest_max_pending_files(),

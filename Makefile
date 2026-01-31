@@ -14,7 +14,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test perf perf-local perf-full setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
 # Default target
 help:
@@ -26,11 +26,6 @@ help:
 	@echo "  make test-ci         - Run tests in CI environment (auto-setup)"
 	@echo "  make test-quick      - Run unit tests only (no integration)"
 	@echo "  make test-all        - Run all tests (unit + integration)"
-	@echo ""
-	@echo "Performance Testing:"
-	@echo "  make perf            - Run performance tests (quick, 60s)"
-	@echo "  make perf-local      - Run perf tests with local infrastructure"
-	@echo "  make perf-full       - Run comprehensive performance tests (5min)"
 	@echo ""
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
@@ -73,7 +68,7 @@ build-release:
 
 publish-docker:
 	@echo "🔨 Publishing Docker image..."
-	docker buildx build --platform linux/amd64 --push -t gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/softprobe-otlp-backend:latest .
+	docker buildx build --platform linux/amd64 --push -t gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/splake:latest .
 
 # Code quality targets
 lint:
@@ -314,56 +309,3 @@ stress-test: setup-local
 		cargo run --bin perf_stress -- \
 		--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500
 	@$(MAKE) teardown-local
-
-# Performance testing targets
-perf:
-	@echo "⚡ Running quick performance test (60s)..."
-	@echo "📝 Using existing configuration (set CONFIG_FILE to override)"
-	@echo ""
-	@cargo build --release --bin perf_stress
-	@CONFIG_FILE=$${CONFIG_FILE:-config.yaml} \
-		./target/release/perf_stress \
-		--duration 60 \
-		--warmup-secs 10 \
-		--span-qps 50 \
-		--log-qps 70 \
-		--metric-qps 70 \
-		--query-concurrency 4 \
-		--query-interval-ms 500
-
-perf-local: check-local build-release
-	@echo "⚡ Running performance test with local MinIO..."
-	@echo "📝 Configuration: config.yaml"
-	@echo "🗄️  Backend: MinIO (localhost:9002) + Lakekeeper REST (localhost:8181)"
-	@echo ""
-	@CONFIG_FILE=config.yaml \
-		./target/release/perf_stress \
-		--duration 120 \
-		--warmup-secs 15 \
-		--span-qps 100 \
-		--log-qps 150 \
-		--metric-qps 150 \
-		--query-concurrency 8 \
-		--query-interval-ms 500
-
-perf-full: check-local build-release
-	@echo "⚡ Running comprehensive performance test (5 minutes)..."
-	@echo "📝 Configuration: config.yaml"
-	@echo "🗄️  Backend: MinIO (localhost:9002) + Lakekeeper REST (localhost:8181)"
-	@echo ""
-	@echo "This test will:"
-	@echo "  - Run for 300 seconds (5 minutes)"
-	@echo "  - Ingest at high rates (200 QPS total)"
-	@echo "  - Execute concurrent queries (16 workers)"
-	@echo "  - Test buffer → staged → Iceberg pipeline"
-	@echo "  - Generate detailed performance report"
-	@echo ""
-	@CONFIG_FILE=config.yaml \
-		./target/release/perf_stress \
-		--duration 300 \
-		--warmup-secs 30 \
-		--span-qps 100 \
-		--log-qps 150 \
-		--metric-qps 150 \
-		--query-concurrency 16 \
-		--query-interval-ms 250

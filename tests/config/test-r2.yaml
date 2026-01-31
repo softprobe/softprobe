@@ -24,7 +24,6 @@ span_buffering:
   flush_interval_seconds: 1  # Flush every second
 
 ingest_engine:
-  enabled: true
   wal_bucket: "your-bucket-name"
   wal_prefix: "wal"
   cache_dir: "/var/tmp/softprobe/duckdb"

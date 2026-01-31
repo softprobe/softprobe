@@ -1,4 +1,4 @@
-use softprobe_otlp_backend::config::Config;
+use splake::config::Config;
 
 pub fn load_test_config() -> Config {
     if let Ok(config_file) = std::env::var("CONFIG_FILE") {

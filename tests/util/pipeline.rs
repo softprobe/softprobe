@@ -1,6 +1,6 @@
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::query::{self, QueryEngine};
-use softprobe_otlp_backend::storage::IngestPipeline;
+use splake::config::Config;
+use splake::query::{self, QueryEngine};
+use splake::ingest_engine::IngestPipeline;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -16,10 +16,12 @@ impl TestPipeline {
     pub async fn new(mut config: Config) -> Self {
         let cache_dir = TempDir::new().expect("tempdir");
         config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+        config.ingest_engine.wal_dir =
+            Some(cache_dir.path().join("wal").to_string_lossy().to_string());
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
         
-        // Pass pipeline to query engine so it can access buffer snapshots
-        let query_engine = query::create_query_engine(&config, Some(Arc::new(pipeline.clone())))
+        // Pass tiered storage to query engine so it can access buffer snapshots
+        let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");
         
@@ -34,7 +36,7 @@ impl TestPipeline {
     pub async fn execute_query(
         &self,
         sql: &str,
-    ) -> anyhow::Result<softprobe_otlp_backend::query::duckdb::QueryResult> {
+    ) -> anyhow::Result<splake::query::duckdb::QueryResult> {
         self.query_engine.execute_query(sql).await
     }
 

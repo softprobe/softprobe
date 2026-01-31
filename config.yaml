@@ -14,10 +14,10 @@ span_buffering:
   flush_interval_seconds: 60
 
 ingest_engine:
-  enabled: true
   wal_bucket: "warehouse"
   wal_prefix: "wal"
   cache_dir: "/tmp/ingest-cache"
+  wal_dir: "/tmp/ingest-wal"
   optimizer_interval_seconds: 300
   replay_wal_on_startup: false
 

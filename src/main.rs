@@ -37,42 +37,10 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     info!("Configuration loaded: {:?}", config);
 
-    // Initialize storage components
-    let storage = storage::create_storage(&config).await?;
-
-    // Initialize span buffer with Iceberg writer
-    let span_buffer = storage::create_span_buffer(
-        &config,
-        storage.iceberg_writer.clone(),
-        storage.ingest_engine.clone(),
-    )
-    .await?;
-
-    // Initialize log buffer with Iceberg writer
-    let log_buffer = storage::create_log_buffer(
-        &config,
-        storage.iceberg_writer.clone(),
-        storage.ingest_engine.clone(),
-    )
-    .await?;
-
-    // Initialize metric buffer with Iceberg writer
-    let metric_buffer = storage::create_metric_buffer(
-        &config,
-        storage.iceberg_writer.clone(),
-        storage.ingest_engine.clone(),
-    )
-    .await?;
-
-    // Create IngestPipeline for query engine
-    let pipeline = Arc::new(storage::IngestPipeline {
-        storage: storage.clone(),
-        span_buffer: span_buffer.clone(),
-        log_buffer: log_buffer.clone(),
-        metric_buffer: metric_buffer.clone(),
-    });
-
-    let query_engine = query::create_query_engine(&config, Some(pipeline)).await?;
+    let pipeline = ingest_engine::IngestPipeline::new(&config).await?;
+    let storage = pipeline.storage.clone();
+    let query_engine =
+        query::create_query_engine(&config, Arc::new(storage.clone())).await?;
 
     // Start background maintenance jobs (metadata + compaction)
     if let Some(_handle) = compaction::scheduler::start_maintenance_scheduler(&config).await? {
@@ -83,9 +51,9 @@ async fn main() -> anyhow::Result<()> {
     let app = api::create_router(
         storage,
         query_engine,
-        Some(span_buffer),
-        Some(log_buffer),
-        Some(metric_buffer),
+        Some(pipeline.storage.span_buffer.clone()),
+        Some(pipeline.storage.log_buffer.clone()),
+        Some(pipeline.storage.metric_buffer.clone()),
     )
     .await?
     .layer(

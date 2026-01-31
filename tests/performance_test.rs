@@ -1,12 +1,13 @@
 use chrono::Utc;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::models::Log as LogData;
-use softprobe_otlp_backend::query;
-use softprobe_otlp_backend::query::duckdb::{reset_view_counters, view_counters_snapshot};
-use softprobe_otlp_backend::storage;
-use softprobe_otlp_backend::storage::iceberg::arrow::logs_to_record_batch;
+use splake::config::Config;
+use splake::models::Log as LogData;
+use splake::query;
+use splake::query::duckdb::{reset_view_counters, view_counters_snapshot};
+use splake::ingest_engine::IngestPipeline;
+use splake::storage;
+use splake::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -89,7 +90,7 @@ fn profile_enabled() -> bool {
     std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1")
 }
 
-fn format_result(result: &softprobe_otlp_backend::query::duckdb::QueryResult) -> String {
+fn format_result(result: &splake::query::duckdb::QueryResult) -> String {
     let mut output = String::new();
     output.push_str(&format!("columns: {:?}\n", result.columns));
     for row in &result.rows {
@@ -98,7 +99,7 @@ fn format_result(result: &softprobe_otlp_backend::query::duckdb::QueryResult) ->
     output
 }
 
-async fn maybe_log_cache_profile(engine: &softprobe_otlp_backend::query::QueryEngine, label: &str) {
+async fn maybe_log_cache_profile(engine: &splake::query::QueryEngine, label: &str) {
     if !profile_enabled() {
         return;
     }
@@ -138,7 +139,7 @@ async fn maybe_log_cache_profile(engine: &softprobe_otlp_backend::query::QueryEn
 }
 
 async fn explain_analyze(
-    engine: &softprobe_otlp_backend::query::QueryEngine,
+    engine: &splake::query::QueryEngine,
     label: &str,
     sql: &str,
 ) {
@@ -155,7 +156,7 @@ async fn explain_analyze(
 }
 
 async fn run_diagnostics(
-    engine: &softprobe_otlp_backend::query::QueryEngine,
+    engine: &splake::query::QueryEngine,
     label: &str,
     sql: &str,
 ) {
@@ -200,7 +201,7 @@ async fn perf_union_read_latency() {
     let now = Utc::now();
     let base_session = format!("perf-base-{}", uuid::Uuid::new_v4());
     let staged_session = format!("perf-staged-{}", uuid::Uuid::new_v4());
-    let wal_session = format!("perf-wal-{}", uuid::Uuid::new_v4());
+    let buffer_session = format!("perf-buffer-{}", uuid::Uuid::new_v4());
 
     let mut base_logs = Vec::new();
     for i in 0..per_session {
@@ -242,15 +243,15 @@ async fn perf_union_read_latency() {
         .await
         .expect("stage add");
     pipeline.force_flush_logs().await.expect("stage flush");
-    let mut wal_logs = Vec::new();
+    let mut buffer_logs = Vec::new();
     for i in 0..per_session {
-        wal_logs.push(LogData {
-            session_id: Some(wal_session.clone()),
+        buffer_logs.push(LogData {
+            session_id: Some(buffer_session.clone()),
             timestamp: now + chrono::Duration::milliseconds(20_000 + i as i64),
             observed_timestamp: Some(now + chrono::Duration::milliseconds(20_000 + i as i64 + 1)),
             severity_number: 4,
             severity_text: "INFO".to_string(),
-            body: format!("Wal log {}", i),
+            body: format!("Buffer log {}", i),
             attributes: HashMap::new(),
             resource_attributes: HashMap::new(),
             trace_id: None,
@@ -258,9 +259,9 @@ async fn perf_union_read_latency() {
         });
     }
     pipeline
-        .write_wal_logs(wal_logs, per_session * 256)
+        .add_logs(buffer_logs, per_session * 256)
         .await
-        .expect("wal write");
+        .expect("buffer add");
 
     let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
@@ -307,7 +308,7 @@ async fn perf_union_read_latency() {
     let warmup_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
-        wal_session.replace('\'', "''"),
+        buffer_session.replace('\'', "''"),
         record_date_start(days_back),
     );
     for _ in 0..warmup_workers {
@@ -321,7 +322,7 @@ async fn perf_union_read_latency() {
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
-        wal_session.replace('\'', "''"),
+        buffer_session.replace('\'', "''"),
         record_date_start(days_back),
     );
     for _ in 0..2 {
@@ -355,15 +356,15 @@ async fn perf_union_read_latency() {
             staged_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        let wal_sql = format!(
-            "SELECT COUNT(*) AS count FROM wal_logs \
-             WHERE session_id = '{}' AND record_date >= DATE '{}'",
-            wal_session.replace('\'', "''"),
-            record_date_start(days_back),
-        );
         run_diagnostics(&query_engine, "iceberg_logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
-        run_diagnostics(&query_engine, "wal_logs", &wal_sql).await;
+        let buffer_sql = format!(
+            "SELECT COUNT(*) AS count FROM buffer_logs \
+             WHERE session_id = '{}' AND record_date >= DATE '{}'",
+            buffer_session.replace('\'', "''"),
+            record_date_start(days_back),
+        );
+        run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
         run_diagnostics(&query_engine, "union_logs", &sql).await;
     }
     println!("p95 warm union_logs latency: {:?}", p95);
@@ -403,7 +404,7 @@ async fn perf_union_read_concurrency() {
     let now = Utc::now();
     let base_session = format!("perf-base-{}", uuid::Uuid::new_v4());
     let staged_session = format!("perf-staged-{}", uuid::Uuid::new_v4());
-    let wal_session = format!("perf-wal-{}", uuid::Uuid::new_v4());
+    let buffer_session = format!("perf-buffer-{}", uuid::Uuid::new_v4());
 
     let mut base_logs = Vec::new();
     for i in 0..per_session {
@@ -445,15 +446,15 @@ async fn perf_union_read_concurrency() {
         .await
         .expect("stage add");
     pipeline.force_flush_logs().await.expect("stage flush");
-    let mut wal_logs = Vec::new();
+    let mut buffer_logs = Vec::new();
     for i in 0..per_session {
-        wal_logs.push(LogData {
-            session_id: Some(wal_session.clone()),
+        buffer_logs.push(LogData {
+            session_id: Some(buffer_session.clone()),
             timestamp: now + chrono::Duration::milliseconds(20_000 + i as i64),
             observed_timestamp: Some(now + chrono::Duration::milliseconds(20_000 + i as i64 + 1)),
             severity_number: 4,
             severity_text: "INFO".to_string(),
-            body: format!("Wal log {}", i),
+            body: format!("Buffer log {}", i),
             attributes: HashMap::new(),
             resource_attributes: HashMap::new(),
             trace_id: None,
@@ -461,9 +462,9 @@ async fn perf_union_read_concurrency() {
         });
     }
     pipeline
-        .write_wal_logs(wal_logs, per_session * 256)
+        .add_logs(buffer_logs, per_session * 256)
         .await
-        .expect("wal write");
+        .expect("buffer add");
 
     let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
@@ -499,7 +500,7 @@ async fn perf_union_read_concurrency() {
     let warmup_sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
-        wal_session.replace('\'', "''"),
+        buffer_session.replace('\'', "''"),
         record_date_start(days_back),
     );
     for _ in 0..warmup_workers {
@@ -513,7 +514,7 @@ async fn perf_union_read_concurrency() {
     let sessions = vec![
         base_session.clone(),
         staged_session.clone(),
-        wal_session.clone(),
+        buffer_session.clone(),
     ];
     let mut handles = Vec::new();
     for i in 0..concurrency {
@@ -559,21 +560,21 @@ async fn perf_union_read_concurrency() {
             staged_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        let wal_sql = format!(
-            "SELECT COUNT(*) AS count FROM wal_logs \
+        let buffer_sql = format!(
+            "SELECT COUNT(*) AS count FROM buffer_logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
-            wal_session.replace('\'', "''"),
+            buffer_session.replace('\'', "''"),
             record_date_start(days_back),
         );
         let union_sql = format!(
             "SELECT COUNT(*) AS count FROM union_logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
-            wal_session.replace('\'', "''"),
+            buffer_session.replace('\'', "''"),
             record_date_start(days_back),
         );
         run_diagnostics(&query_engine, "iceberg_logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
-        run_diagnostics(&query_engine, "wal_logs", &wal_sql).await;
+        run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
         run_diagnostics(&query_engine, "union_logs", &union_sql).await;
     }
     println!("p95 warm union_logs latency: {:?}", p95);
@@ -598,7 +599,7 @@ async fn perf_view_recreate_stability() {
     let now = Utc::now();
     let base_session = format!("perf-base-{}", uuid::Uuid::new_v4());
     let staged_session = format!("perf-staged-{}", uuid::Uuid::new_v4());
-    let wal_session = format!("perf-wal-{}", uuid::Uuid::new_v4());
+    let buffer_session = format!("perf-buffer-{}", uuid::Uuid::new_v4());
 
     let mut base_logs = Vec::new();
     for i in 0..per_session {
@@ -640,15 +641,15 @@ async fn perf_view_recreate_stability() {
         .await
         .expect("stage add");
     pipeline.force_flush_logs().await.expect("stage flush");
-    let mut wal_logs = Vec::new();
+    let mut buffer_logs = Vec::new();
     for i in 0..per_session {
-        wal_logs.push(LogData {
-            session_id: Some(wal_session.clone()),
+        buffer_logs.push(LogData {
+            session_id: Some(buffer_session.clone()),
             timestamp: now + chrono::Duration::milliseconds(20_000 + i as i64),
             observed_timestamp: Some(now + chrono::Duration::milliseconds(20_000 + i as i64 + 1)),
             severity_number: 4,
             severity_text: "INFO".to_string(),
-            body: format!("Wal log {}", i),
+            body: format!("Buffer log {}", i),
             attributes: HashMap::new(),
             resource_attributes: HashMap::new(),
             trace_id: None,
@@ -656,16 +657,16 @@ async fn perf_view_recreate_stability() {
         });
     }
     pipeline
-        .write_wal_logs(wal_logs, per_session * 256)
+        .add_logs(buffer_logs, per_session * 256)
         .await
-        .expect("wal write");
+        .expect("buffer add");
 
     let query_engine = test_pipeline.query_engine();
     reset_view_counters();
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
-        wal_session.replace('\'', "''"),
+        buffer_session.replace('\'', "''"),
         record_date_start(7),
     );
     let first = query_engine.execute_query(&sql).await.expect("query");
@@ -685,10 +686,6 @@ async fn perf_view_recreate_stability() {
         "Staged view should not be recreated between warm queries"
     );
     assert_eq!(
-        snapshot_after_first.wal_recreates, snapshot_after_second.wal_recreates,
-        "WAL view should not be recreated between warm queries"
-    );
-    assert_eq!(
         snapshot_after_first.union_recreates, snapshot_after_second.union_recreates,
         "Union view should not be recreated between warm queries"
     );
@@ -701,6 +698,8 @@ async fn view_recreate_stability_local_stub() {
     let mut config = Config::load().expect("config");
     let cache_dir = tempdir().expect("temp cache dir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+    config.ingest_engine.wal_dir =
+        Some(cache_dir.path().join("wal").to_string_lossy().to_string());
 
     let stub_dir = tempdir().expect("stub dir");
     let stub_path = stub_dir.path().join("iceberg_stub.parquet");
@@ -733,7 +732,10 @@ async fn view_recreate_stability_local_stub() {
     );
     reset_view_counters();
 
-    let query_engine = query::create_query_engine(&config)
+    let pipeline = IngestPipeline::new(&config)
+        .await
+        .expect("pipeline");
+    let query_engine = query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
         .await
         .expect("query engine");
     let sql = "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = 'stub-session'";
@@ -750,7 +752,6 @@ async fn view_recreate_stability_local_stub() {
         after_second.iceberg_recreates
     );
     assert_eq!(after_first.staged_recreates, after_second.staged_recreates);
-    assert_eq!(after_first.wal_recreates, after_second.wal_recreates);
     assert_eq!(after_first.union_recreates, after_second.union_recreates);
 
     std::env::remove_var("DUCKDB_TEST_ICEBERG_FALLBACK_PATH");

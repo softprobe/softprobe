@@ -24,7 +24,6 @@ span_buffering:
   flush_interval_seconds: 60  # Production: 60s timeout
 
 ingest_engine:
-  enabled: true
   wal_bucket: "softprobe-iceberg-warehouse"
   wal_prefix: "wal"
   cache_dir: "/var/tmp/softprobe/duckdb"

@@ -1,0 +1,241 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Test type to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - latency
+          - concurrency
+          - stability
+
+jobs:
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      # MinIO for S3-compatible storage
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9002:9000  # Map to 9002 to match test.yaml
+          - 9001:9001  # Console
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        command: server /data --console-address ":9001"
+
+      # PostgreSQL for Lakekeeper
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      # Lakekeeper REST catalog
+      lakekeeper:
+        image: vakamo/lakekeeper:latest
+        ports:
+          - 8181:8181
+        env:
+          LAKEKEEPER__PG_ENCRYPTION_KEY: "This-is-NOT-Secure!"
+          LAKEKEEPER__PG_DATABASE_URL_READ: "postgresql://postgres:postgres@postgres:5432/postgres"
+          LAKEKEEPER__PG_DATABASE_URL_WRITE: "postgresql://postgres:postgres@postgres:5432/postgres"
+          RUST_LOG: info
+        options: >-
+          --health-cmd "sleep 5 && /home/nonroot/lakekeeper healthcheck || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 30s
+        depends-on: postgres
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl postgresql-client
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for services to be ready..."
+          
+          # Wait for MinIO
+          echo "Waiting for MinIO..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:9002/minio/health/live > /dev/null 2>&1; then
+              echo "✅ MinIO is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "❌ MinIO failed to start"
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Wait for PostgreSQL
+          echo "Waiting for PostgreSQL..."
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U postgres > /dev/null 2>&1; then
+              echo "✅ PostgreSQL is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "❌ PostgreSQL failed to start"
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Run Lakekeeper migration (using service network)
+          echo "Running Lakekeeper migration..."
+          docker run --rm \
+            --network host \
+            -e LAKEKEEPER__PG_ENCRYPTION_KEY="This-is-NOT-Secure!" \
+            -e LAKEKEEPER__PG_DATABASE_URL_READ="postgresql://postgres:postgres@localhost:5432/postgres" \
+            -e LAKEKEEPER__PG_DATABASE_URL_WRITE="postgresql://postgres:postgres@localhost:5432/postgres" \
+            vakamo/lakekeeper:latest migrate || echo "Migration may have already run"
+          
+          # Wait for Lakekeeper
+          echo "Waiting for Lakekeeper..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8181/catalog/v1/config?warehouse=default > /dev/null 2>&1; then
+              echo "✅ Lakekeeper is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "❌ Lakekeeper failed to start"
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Configure Lakekeeper storage profile
+        run: |
+          echo "Configuring Lakekeeper storage profile..."
+          storage_status=$(curl -s -o /tmp/lakekeeper_storage.json -w "%{http_code}" \
+            -X POST http://localhost:8181/catalog/v1/storage-profiles \
+            -H "Content-Type: application/json" \
+            -d '{
+              "storage-profile": {
+                "type": "s3",
+                "bucket": "warehouse",
+                "key-prefix": "iceberg",
+                "endpoint": "http://localhost:9002",
+                "region": "us-east-1",
+                "path-style-access": true,
+                "flavor": "minio",
+                "sts-enabled": false
+              },
+              "storage-credential": {
+                "type": "s3",
+                "credential-type": "access-key",
+                "aws-access-key-id": "minioadmin",
+                "aws-secret-access-key": "minioadmin"
+              }
+            }')
+          
+          if [ "$storage_status" = "200" ] || [ "$storage_status" = "409" ]; then
+            echo "✅ Lakekeeper storage profile configured (status: $storage_status)"
+          else
+            echo "⚠️  Lakekeeper storage configuration returned status: $storage_status"
+            cat /tmp/lakekeeper_storage.json
+            # Don't fail - profile may already exist
+          fi
+
+      - name: Build project
+        run: cargo build --release
+
+      - name: Run performance tests
+        env:
+          CONFIG_FILE: tests/config/test.yaml
+          ICEBERG_TEST_TYPE: local
+          PERF_TARGET_MS: 1000
+          PERF_CONCURRENCY: 8
+          PERF_EVENTS_PER_SESSION: 1000
+          PERF_DAYS_BACK: 7
+        run: |
+          echo "Running performance tests..."
+          echo "Test type: ${{ inputs.test_type || 'all' }}"
+          
+          case "${{ inputs.test_type || 'all' }}" in
+            latency)
+              cargo test --test performance_test perf_union_read_latency -- --ignored --nocapture
+              ;;
+            concurrency)
+              cargo test --test performance_test perf_union_read_concurrency -- --ignored --nocapture
+              ;;
+            stability)
+              cargo test --test performance_test perf_view_recreate_stability -- --ignored --nocapture
+              cargo test --test performance_test view_recreate_stability_local_stub -- --nocapture
+              ;;
+            all|*)
+              # Use make test-perf for consistency with local development
+              make test-perf
+              ;;
+          esac
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-test-results
+          path: |
+            target/release/
+          retention-days: 7

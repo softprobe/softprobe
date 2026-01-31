@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::storage::IngestPipeline;
+use crate::storage::TieredStorage;
 use std::sync::Arc;
 
 pub mod cache;
@@ -12,9 +12,9 @@ pub struct QueryEngine {
 
 pub async fn create_query_engine(
     config: &Config,
-    ingest_pipeline: Option<Arc<IngestPipeline>>,
+    tiered_storage: Arc<dyn TieredStorage>,
 ) -> anyhow::Result<QueryEngine> {
-    let duckdb = Arc::new(duckdb::DuckDBQueryEngine::new(config, ingest_pipeline).await?);
+    let duckdb = Arc::new(duckdb::DuckDBQueryEngine::new(config, tiered_storage).await?);
 
     Ok(QueryEngine { duckdb })
 }

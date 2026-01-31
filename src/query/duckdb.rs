@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
 use crate::storage::iceberg::arrow::{logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch};
-use crate::storage::IngestPipeline;
+use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -25,6 +25,7 @@ pub struct DuckDBQueryEngine {
 }
 
 const CATALOG_ALIAS: &str = "iceberg_catalog";
+const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
 use once_cell::sync::Lazy;
 use std::sync::atomic::AtomicU64;
@@ -34,7 +35,6 @@ use std::sync::atomic::AtomicBool;
 struct ViewCounters {
     iceberg: AtomicU64,
     staged: AtomicU64,
-    wal: AtomicU64,
     union_view: AtomicU64,
 }
 
@@ -44,14 +44,12 @@ static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::n
 pub struct ViewCounterSnapshot {
     pub iceberg_recreates: u64,
     pub staged_recreates: u64,
-    pub wal_recreates: u64,
     pub union_recreates: u64,
 }
 
 pub fn reset_view_counters() {
     VIEW_COUNTERS.iceberg.store(0, Ordering::Relaxed);
     VIEW_COUNTERS.staged.store(0, Ordering::Relaxed);
-    VIEW_COUNTERS.wal.store(0, Ordering::Relaxed);
     VIEW_COUNTERS.union_view.store(0, Ordering::Relaxed);
 }
 
@@ -59,7 +57,6 @@ pub fn view_counters_snapshot() -> ViewCounterSnapshot {
     ViewCounterSnapshot {
         iceberg_recreates: VIEW_COUNTERS.iceberg.load(Ordering::Relaxed),
         staged_recreates: VIEW_COUNTERS.staged.load(Ordering::Relaxed),
-        wal_recreates: VIEW_COUNTERS.wal.load(Ordering::Relaxed),
         union_recreates: VIEW_COUNTERS.union_view.load(Ordering::Relaxed),
     }
 }
@@ -79,7 +76,10 @@ struct ConnectionState {
     staged_signatures: HashMap<String, String>,
     iceberg_sources: HashMap<String, IcebergSource>,
     iceberg_signatures: HashMap<String, String>,
-    ingest_pipeline: Option<Arc<IngestPipeline>>,
+    tiered_storage: Arc<dyn TieredStorage>,
+    cache_httpfs_wrap_supported: bool,
+    cache_httpfs_wrapped_s3: bool,
+    cache_httpfs_wrapped_httpfs: bool,
 }
 
 #[derive(Clone)]
@@ -108,7 +108,8 @@ struct PinnedMetadata {
 struct DuckDBCore {
     config: Config,
     cache: CacheSettings,
-    ingest_pipeline: Option<Arc<IngestPipeline>>,
+    tiered_storage: Arc<dyn TieredStorage>,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 /// Query result containing columns and rows
@@ -119,11 +120,15 @@ pub struct QueryResult {
 }
 
 impl DuckDBQueryEngine {
-    pub async fn new(config: &Config, ingest_pipeline: Option<Arc<IngestPipeline>>) -> Result<Self> {
+    pub async fn new(
+        config: &Config,
+        tiered_storage: Arc<dyn TieredStorage>,
+    ) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
             cache: CacheSettings::new(config),
-            ingest_pipeline: ingest_pipeline.clone(),
+            tiered_storage: tiered_storage.clone(),
+            runtime_handle: tokio::runtime::Handle::current(),
         };
         // Install extensions once to ensure they're available
         let temp_conn = core.open_connection()?;
@@ -187,19 +192,6 @@ impl DuckDBQueryEngine {
         rx.await
             .map_err(|_| anyhow!("DuckDB worker dropped response"))?
     }
-
-    pub async fn query_metadata(
-        &self,
-        _query: &str,
-        _params: &[&dyn std::any::Any],
-    ) -> Result<Vec<crate::api::query::RecordingMetadata>> {
-        // TODO: Execute DuckDB query on Iceberg table (Phase 1.2)
-        // - Use iceberg_scan() function
-        // - Apply partition pruning automatically (record_date, category_type)
-        // - Return metadata records with payload_file_uri, payload_file_offset, payload_row_group_index
-        // See: docs/migration-to-iceberg-design.md lines 993-1004 for query pattern
-        todo!("Implement DuckDB query execution - see design document v1.7")
-    }
 }
 
 impl DuckDBCore {
@@ -229,7 +221,10 @@ impl DuckDBCore {
             staged_signatures: HashMap::new(),
             iceberg_sources: HashMap::new(),
             iceberg_signatures: HashMap::new(),
-            ingest_pipeline: self.ingest_pipeline.clone(),
+            tiered_storage: self.tiered_storage.clone(),
+            cache_httpfs_wrap_supported: true,
+            cache_httpfs_wrapped_s3: false,
+            cache_httpfs_wrapped_httpfs: false,
         })
     }
 
@@ -241,6 +236,7 @@ impl DuckDBCore {
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
         let prepare_start = std::time::Instant::now();
         self.prepare_union_views_for_query(state, query)?;
+        self.try_wrap_cache_httpfs_filesystems(state);
         if diag {
             let elapsed = prepare_start.elapsed();
             println!("DIAG prepare_union_views: {:?}", elapsed);
@@ -279,10 +275,74 @@ impl DuckDBCore {
         Ok(result)
     }
 
+    fn try_wrap_cache_httpfs_filesystems(&self, state: &mut ConnectionState) {
+        if self.cache.cache_dir.is_none() {
+            return;
+        }
+        if std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+            return;
+        }
+        if !state.cache_httpfs_wrap_supported {
+            return;
+        }
+
+        if !state.cache_httpfs_wrapped_s3 {
+            match state
+                .conn
+                .execute("SELECT cache_httpfs_wrap_cache_filesystem('s3');", [])
+            {
+                Ok(_) => {
+                    state.cache_httpfs_wrapped_s3 = true;
+                    info!("cache_httpfs wrapped filesystem: s3");
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    if message.contains("already wrapped") {
+                        state.cache_httpfs_wrapped_s3 = true;
+                        info!("cache_httpfs wrapped filesystem: s3 (already wrapped)");
+                    } else if message.contains("hasn't been registered yet") {
+                        // Will retry later once filesystem is registered by real usage.
+                    } else if message.contains("does not exist")
+                        || message.contains("Catalog Error")
+                            && message.contains("cache_httpfs_wrap_cache_filesystem")
+                    {
+                        state.cache_httpfs_wrap_supported = false;
+                        warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    }
+                }
+            }
+        }
+
+        if !state.cache_httpfs_wrapped_httpfs && state.cache_httpfs_wrap_supported {
+            match state
+                .conn
+                .execute("SELECT cache_httpfs_wrap_cache_filesystem('httpfs');", [])
+            {
+                Ok(_) => {
+                    state.cache_httpfs_wrapped_httpfs = true;
+                    info!("cache_httpfs wrapped filesystem: httpfs");
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    if message.contains("already wrapped") {
+                        state.cache_httpfs_wrapped_httpfs = true;
+                        info!("cache_httpfs wrapped filesystem: httpfs (already wrapped)");
+                    } else if message.contains("hasn't been registered yet") {
+                        // Will retry later once filesystem is registered by real usage.
+                    } else if message.contains("does not exist")
+                        || message.contains("Catalog Error")
+                            && message.contains("cache_httpfs_wrap_cache_filesystem")
+                    {
+                        state.cache_httpfs_wrap_supported = false;
+                        warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    }
+                }
+            }
+        }
+    }
+
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
-        conn.execute_batch("LOAD httpfs;")?;
-        conn.execute_batch("LOAD iceberg;")?;
-        conn.execute_batch("SET unsafe_enable_version_guessing = true;")?;
+        conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
 
         // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
         if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {
@@ -379,7 +439,7 @@ impl DuckDBCore {
         let uses_spans = sql.contains("union_spans")
             || sql.contains("iceberg_spans")
             || sql.contains("staged_spans")
-            || sql.contains("wal_spans");
+            || sql.contains("buffer_spans");
         if uses_spans {
             self.prepare_union_view(state, "spans", "traces")?;
             prepared_any = true;
@@ -388,7 +448,7 @@ impl DuckDBCore {
         let uses_logs = sql.contains("union_logs")
             || sql.contains("iceberg_logs")
             || sql.contains("staged_logs")
-            || sql.contains("wal_logs");
+            || sql.contains("buffer_logs");
         if uses_logs {
             self.prepare_union_view(state, "logs", "logs")?;
             prepared_any = true;
@@ -397,7 +457,7 @@ impl DuckDBCore {
         let uses_metrics = sql.contains("union_metrics")
             || sql.contains("iceberg_metrics")
             || sql.contains("staged_metrics")
-            || sql.contains("wal_metrics");
+            || sql.contains("buffer_metrics");
         if uses_metrics {
             self.prepare_union_view(state, "metrics", "metrics")?;
             prepared_any = true;
@@ -495,7 +555,7 @@ impl DuckDBCore {
         // Create buffer view (snapshot of in-memory data)
         // Uses sync snapshot (non-blocking) to access buffer data in real-time
         if !kind_ready {
-            self.create_buffer_view_sync(&state.conn, kind, state.ingest_pipeline.as_ref())?;
+            self.create_buffer_view_sync(&state.conn, kind, &state.tiered_storage)?;
         }
 
         if !kind_ready {
@@ -663,60 +723,47 @@ impl DuckDBCore {
         &self,
         conn: &Connection,
         kind: &str,
-        pipeline: Option<&Arc<IngestPipeline>>,
+        tiered_storage: &Arc<dyn TieredStorage>,
     ) -> Result<()> {
-        let Some(pipeline) = pipeline else {
-            return self.create_empty_buffer_view(conn, kind);
-        };
-
         // Get buffer snapshot and convert to RecordBatch (sync, non-blocking for snapshot)
         let batch = match kind {
             "spans" => {
-                let Some(items) = pipeline.snapshot_buffered_spans_sync() else {
+                let Some(items) = tiered_storage.snapshot_buffered_spans_sync() else {
                     return self.create_empty_buffer_view(conn, kind);
                 };
                 if items.is_empty() {
                     return self.create_empty_buffer_view(conn, kind);
                 }
-                // Get schema (blocking call, but schemas are cached so this is fast)
-                let rt = tokio::runtime::Handle::try_current();
-                let schema = if let Ok(rt) = rt {
-                    rt.block_on(pipeline.storage.iceberg_writer.spans_schema())?
-                } else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
+                // Get schema via shared runtime handle (cached, fast).
+                let schema = self
+                    .runtime_handle
+                    .block_on(tiered_storage.iceberg_writer().spans_schema())?;
                 spans_to_record_batch(&items, schema.as_ref())?
             }
             "logs" => {
-                let Some(items) = pipeline.snapshot_buffered_logs_sync() else {
+                let Some(items) = tiered_storage.snapshot_buffered_logs_sync() else {
                     return self.create_empty_buffer_view(conn, kind);
                 };
                 if items.is_empty() {
                     return self.create_empty_buffer_view(conn, kind);
                 }
-                // Get schema (blocking call, but schemas are cached so this is fast)
-                let rt = tokio::runtime::Handle::try_current();
-                let schema = if let Ok(rt) = rt {
-                    rt.block_on(pipeline.storage.iceberg_writer.logs_schema())?
-                } else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
+                // Get schema via shared runtime handle (cached, fast).
+                let schema = self
+                    .runtime_handle
+                    .block_on(tiered_storage.iceberg_writer().logs_schema())?;
                 logs_to_record_batch(&items, schema.as_ref())?
             }
             "metrics" => {
-                let Some(items) = pipeline.snapshot_buffered_metrics_sync() else {
+                let Some(items) = tiered_storage.snapshot_buffered_metrics_sync() else {
                     return self.create_empty_buffer_view(conn, kind);
                 };
                 if items.is_empty() {
                     return self.create_empty_buffer_view(conn, kind);
                 }
-                // Get schema (blocking call, but schemas are cached so this is fast)
-                let rt = tokio::runtime::Handle::try_current();
-                let schema = if let Ok(rt) = rt {
-                    rt.block_on(pipeline.storage.iceberg_writer.metrics_schema())?
-                } else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
+                // Get schema via shared runtime handle (cached, fast).
+                let schema = self
+                    .runtime_handle
+                    .block_on(tiered_storage.iceberg_writer().metrics_schema())?;
                 metrics_to_record_batch(&items, schema.as_ref())?
             }
             _ => return self.create_empty_buffer_view(conn, kind),
@@ -810,16 +857,12 @@ impl DuckDBCore {
                                     }
                                 }
                                 
-                                // CRITICAL: Only use local files if available - skip S3 files entirely
-                                // This ensures fast queries even if some files aren't cached yet
-                                let (files_to_use, s3_count) = if !local_files.is_empty() {
-                                    // Use only local files - ignore S3 files for performance
-                                    // Missing files will be available in next query after background download
-                                    let s3_count = s3_files.len();
-                                    (local_files, s3_count)
+                                // Prefer local cache. If no local files exist, fall back to S3/HTTP paths.
+                                let (files_to_use, skipped_s3_count, using_remote) = if !local_files.is_empty() {
+                                    let skipped = s3_files.len();
+                                    (local_files, skipped, false)
                                 } else {
-                                    // Fallback to S3 only if no local files at all (shouldn't happen after warmup)
-                                    (s3_files, 0)
+                                    (s3_files, 0, true)
                                 };
                                 
                                 if !files_to_use.is_empty() {
@@ -828,8 +871,18 @@ impl DuckDBCore {
                                         .map(|path| format!("'{}'", escape_sql_literal(path)))
                                         .collect::<Vec<_>>()
                                         .join(", ");
-                                    let local_count = files_to_use.len();
-                                    info!("Using {} local cached files for iceberg_{} (skipped {} S3 files)", local_count, kind, s3_count);
+                                    let used_count = files_to_use.len();
+                                    if using_remote {
+                                        info!(
+                                            "Using {} remote files for iceberg_{} (no local cache available)",
+                                            used_count, kind
+                                        );
+                                    } else {
+                                        info!(
+                                            "Using {} local cached files for iceberg_{} (skipped {} S3 files)",
+                                            used_count, kind, skipped_s3_count
+                                        );
+                                    }
                                     let iceberg_view = format!(
                                         "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
                                          SELECT * FROM read_parquet([{files}]);",
@@ -937,33 +990,18 @@ impl DuckDBCore {
     }
 
     fn staged_watermark_signature(&self, kind: &str) -> String {
-        let Some(cache_dir) = self.cache_dir() else {
-            return String::new();
-        };
-        let marker_path = cache_dir
-            .join("staged_watermarks")
-            .join(format!("{kind}.txt"));
-        if let Ok(metadata) = std::fs::metadata(&marker_path) {
-            if let Ok(modified) = metadata.modified() {
-                let modified = DateTime::<Utc>::from(modified);
-                return modified.to_rfc3339();
-            }
-        }
-        String::new()
+        self.tiered_storage.staged_watermark_signature(kind)
     }
 
     fn staged_files(&self, kind: &str) -> Vec<String> {
-        let Some(cache_dir) = self.cache_dir() else {
-            return Vec::new();
+        let mut files = match self.tiered_storage.list_staged_files(kind) {
+            Ok(files) => files,
+            Err(_) => return Vec::new(),
         };
-        let staged_dir = cache_dir.join(kind);
-        let mut files = Vec::new();
-        if collect_parquet_files(&staged_dir, &mut files).is_err() {
-            return Vec::new();
-        }
         files.sort();
         files.dedup();
-        files.into_iter()
+        files
+            .into_iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect()
     }
@@ -1079,22 +1117,6 @@ fn fetch_instance_metadata_credentials() -> Result<(Option<String>, Option<Strin
     Ok((access_key, secret_key, session_token))
 }
 
-fn collect_parquet_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 fn duck_value_to_json(value: DuckValue) -> Value {
     match value {
         DuckValue::Null => Value::Null,
@@ -1148,4 +1170,25 @@ fn duck_value_to_json(value: DuckValue) -> Value {
 
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_init_sql_contains_required_loads() {
+        assert!(
+            DUCKDB_SESSION_INIT_SQL.contains("LOAD httpfs;"),
+            "expected session init to load httpfs"
+        );
+        assert!(
+            DUCKDB_SESSION_INIT_SQL.contains("LOAD iceberg;"),
+            "expected session init to load iceberg"
+        );
+        assert!(
+            DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = true;"),
+            "expected session init to enable unsafe_enable_version_guessing"
+        );
+    }
 }

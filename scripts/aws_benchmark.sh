@@ -574,7 +574,6 @@ span_buffering:
   flush_interval_seconds: 60
 
 ingest_engine:
-  enabled: true
   wal_bucket: "BUCKET_NAME_PLACEHOLDER"
   wal_prefix: "wal"
   cache_dir: "/var/tmp/datalake/cache"

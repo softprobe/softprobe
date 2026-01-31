@@ -4,7 +4,8 @@ pub mod query;
 
 use crate::config::Config;
 use crate::query::{self as query_engine, QueryEngine};
-use crate::storage::{IngestPipeline, LogBuffer, MetricBuffer, SpanBuffer, Storage};
+use crate::ingest_engine::IngestPipeline;
+use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
 use axum::{
     routing::{get, post},
     Router,
@@ -32,13 +33,15 @@ pub struct AppPipeline {
 impl AppPipeline {
     pub async fn new(config: &Config) -> anyhow::Result<Self> {
         let pipeline = IngestPipeline::new(config).await?;
-        let query_engine = query_engine::create_query_engine(config, Some(Arc::new(pipeline.clone()))).await?;
+        let storage = pipeline.storage.clone();
+        let query_engine =
+            query_engine::create_query_engine(config, Arc::new(storage.clone())).await?;
         Ok(Self {
-            storage: pipeline.storage,
+            storage,
             query_engine,
-            span_buffer: pipeline.span_buffer,
-            log_buffer: pipeline.log_buffer,
-            metric_buffer: pipeline.metric_buffer,
+            span_buffer: pipeline.storage.span_buffer,
+            log_buffer: pipeline.storage.log_buffer,
+            metric_buffer: pipeline.storage.metric_buffer,
         })
     }
 
@@ -76,8 +79,7 @@ pub async fn create_router(
         .route("/v1/traces", post(ingestion::traces::ingest_traces))
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
-        .route("/query", post(query::query_recordings))
-        .route("/retrieve", post(query::retrieve_payloads))
+        .route("/v1/query/sql", post(query::execute_sql))
         .with_state(state);
 
     Ok(router)

@@ -1,6 +1,6 @@
 use chrono::Utc;
-use softprobe_otlp_backend::config::Config;
-use softprobe_otlp_backend::models::{Log as LogData, Span as SpanData, SpanEvent};
+use splake::config::Config;
+use splake::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -27,7 +27,7 @@ async fn test_iceberg_writer_initialization() {
     let timer = Timer::start("Iceberg Writer Initialization");
 
     // Test that the Iceberg writer can be initialized with real REST catalog
-    let result = softprobe_otlp_backend::storage::iceberg::IcebergWriter::new(&config).await;
+    let result = splake::storage::iceberg::IcebergWriter::new(&config).await;
 
     let init_duration = timer.stop();
 
@@ -75,6 +75,63 @@ async fn test_config_loading() {
         config.span_buffering.max_buffer_spans, 1,
         "Should have test buffer config"
     );
+}
+
+#[tokio::test]
+async fn test_ingestion_perf_5000_spans_under_one_second() {
+    let mut config = load_test_config();
+    // Allow buffering without forcing flush during perf check
+    config.span_buffering.max_buffer_spans = 10_000;
+    config.span_buffering.max_buffer_bytes = 128 * 1024 * 1024;
+    config.span_buffering.flush_interval_seconds = 3600;
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
+
+    let now = Utc::now();
+    let count = 5_000usize;
+    let mut spans = Vec::with_capacity(count);
+    for i in 0..count {
+        let mut attributes = HashMap::new();
+        attributes.insert("sp.session.id".to_string(), "perf-session".to_string());
+        attributes.insert("span.index".to_string(), i.to_string());
+        spans.push(SpanData {
+            session_id: "perf-session".to_string(),
+            trace_id: format!("trace-perf-{}", i),
+            span_id: format!("span-perf-{}", i),
+            parent_span_id: None,
+            app_id: "app-perf".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "perf".to_string(),
+            span_kind: Some("SERVER".to_string()),
+            timestamp: now + chrono::Duration::milliseconds(i as i64),
+            end_timestamp: Some(now + chrono::Duration::milliseconds(i as i64 + 1)),
+            attributes,
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: Some("OK".to_string()),
+        });
+    }
+
+    let timer = Timer::start("Ingest 5000 spans");
+    pipeline
+        .add_spans(spans, count * 256)
+        .await
+        .expect("ingest spans");
+    let duration = timer.stop();
+
+    let metrics = PerformanceMetrics::new("Ingest 5000 spans")
+        .with_duration(duration)
+        .with_rows(count);
+    metrics.print_report();
+    metrics.assert_performance_target(1000, "5000 spans ingest");
 }
 
 #[tokio::test]
@@ -455,13 +512,17 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 #[tokio::test]
 async fn test_duckdb_union_read_realtime_performance() {
     let mut config = load_test_config();
-    config.ingest_engine.enabled = false;
+    config.span_buffering.max_buffer_spans = 10_000;
+    config.span_buffering.max_buffer_bytes = 128 * 1024 * 1024;
+    config.span_buffering.flush_interval_seconds = 3600;
+    config.ingest_engine.optimizer_interval_seconds = 3600;
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
     let base_session = format!("union-base-{}", uuid::Uuid::new_v4());
-    let wal_session = format!("union-wal-{}", uuid::Uuid::new_v4());
+    let staged_session = format!("union-staged-{}", uuid::Uuid::new_v4());
+    let buffer_session = format!("union-buffer-{}", uuid::Uuid::new_v4());
 
     let mut base_spans = Vec::new();
     for i in 0..200 {
@@ -496,24 +557,29 @@ async fn test_duckdb_union_read_realtime_performance() {
     }
 
     pipeline
-        .write_span_batches(vec![base_spans])
+        .add_spans(base_spans, 200 * 512)
         .await
-        .expect("base write");
+        .expect("base add");
+    pipeline.force_flush_spans().await.expect("base flush");
+    pipeline
+        .run_optimizer_once()
+        .await
+        .expect("base optimize");
 
-    let mut wal_spans = Vec::new();
+    let mut staged_spans = Vec::new();
     for i in 0..100 {
         let mut attributes = HashMap::new();
-        attributes.insert("sp.session.id".to_string(), wal_session.clone());
+        attributes.insert("sp.session.id".to_string(), staged_session.clone());
         attributes.insert("span.index".to_string(), i.to_string());
-        wal_spans.push(SpanData {
-            session_id: wal_session.clone(),
-            trace_id: format!("trace-wal-{}", i),
-            span_id: format!("span-wal-{}", i),
+        staged_spans.push(SpanData {
+            session_id: staged_session.clone(),
+            trace_id: format!("trace-staged-{}", i),
+            span_id: format!("span-staged-{}", i),
             parent_span_id: None,
             app_id: "app-union".to_string(),
             organization_id: None,
             tenant_id: None,
-            message_type: "union_wal".to_string(),
+            message_type: "union_staged".to_string(),
             span_kind: Some("SERVER".to_string()),
             timestamp: now + chrono::Duration::milliseconds(10_000 + i as i64),
             end_timestamp: Some(now + chrono::Duration::milliseconds(10_000 + i as i64 + 1)),
@@ -531,28 +597,88 @@ async fn test_duckdb_union_read_realtime_performance() {
         });
     }
 
-    if let Err(err) = pipeline.write_wal_spans(wal_spans, 1024).await {
-        println!(
-            "⚠️  Skipping WAL union-read performance test: WAL write failed: {}",
-            err
-        );
-        return;
+    pipeline
+        .add_spans(staged_spans, 100 * 512)
+        .await
+        .expect("staged add");
+    pipeline.force_flush_spans().await.expect("staged flush");
+
+    let mut buffer_spans = Vec::new();
+    for i in 0..50 {
+        let mut attributes = HashMap::new();
+        attributes.insert("sp.session.id".to_string(), buffer_session.clone());
+        attributes.insert("span.index".to_string(), i.to_string());
+        buffer_spans.push(SpanData {
+            session_id: buffer_session.clone(),
+            trace_id: format!("trace-buffer-{}", i),
+            span_id: format!("span-buffer-{}", i),
+            parent_span_id: None,
+            app_id: "app-union".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "union_buffer".to_string(),
+            span_kind: Some("SERVER".to_string()),
+            timestamp: now + chrono::Duration::milliseconds(20_000 + i as i64),
+            end_timestamp: Some(now + chrono::Duration::milliseconds(20_000 + i as i64 + 1)),
+            attributes,
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: Some("OK".to_string()),
+        });
     }
+    pipeline
+        .add_spans(buffer_spans, 50 * 512)
+        .await
+        .expect("buffer add");
 
     let query_engine = test_pipeline.query_engine();
-    let escaped = wal_session.replace('\'', "''");
-    let sql = format!(
+
+    let base_sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
-        escaped
+        base_session.replace('\'', "''")
+    );
+    let staged_sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        staged_session.replace('\'', "''")
+    );
+    let buffer_sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        buffer_session.replace('\'', "''")
     );
 
-    let warmup = query_engine.execute_query(&sql).await.expect("warmup");
-    let warmup_count = warmup.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(warmup_count, 100, "Warmup should see WAL rows");
+    let base_count = query_engine
+        .execute_query(&base_sql)
+        .await
+        .expect("base query")
+        .rows[0][0]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(base_count, 200, "Union-read should see committed rows");
 
-    let result = query_engine.execute_query(&sql).await.expect("query");
-    let total_count = result.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(total_count, 100, "Union-read should return WAL rows");
+    let staged_count = query_engine
+        .execute_query(&staged_sql)
+        .await
+        .expect("staged query")
+        .rows[0][0]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(staged_count, 100, "Union-read should see staged rows");
+
+    let buffer_count = query_engine
+        .execute_query(&buffer_sql)
+        .await
+        .expect("buffer query")
+        .rows[0][0]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(buffer_count, 50, "Union-read should see buffered rows");
 }
 
 #[tokio::test]
@@ -751,7 +877,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_metric_roundtrip() {
-    use softprobe_otlp_backend::models::Metric;
+    use splake::models::Metric;
 
     let mut config = load_test_config();
     config.span_buffering.max_buffer_spans = 10_000;
@@ -981,7 +1107,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 #[tokio::test]
 async fn test_http_fields_in_span_model() {
     use chrono::Utc;
-    use softprobe_otlp_backend::models::Span as SpanData;
+    use splake::models::Span as SpanData;
     use std::collections::HashMap;
 
     println!("🧪 Testing HTTP fields in Span model...");
@@ -1312,8 +1438,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 
 #[tokio::test]
 async fn test_wal_replay_recovers_spans() {
-    use softprobe_otlp_backend::query;
-    use softprobe_otlp_backend::storage;
+    use splake::query;
     use tempfile::tempdir;
 
     let mut config = load_test_config();
@@ -1324,6 +1449,8 @@ async fn test_wal_replay_recovers_spans() {
 
     let cache_dir = tempdir().expect("tempdir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+    config.ingest_engine.wal_dir =
+        Some(cache_dir.path().join("wal").to_string_lossy().to_string());
 
     let session_id = format!("replay-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
@@ -1352,7 +1479,7 @@ async fn test_wal_replay_recovers_spans() {
         status_message: None,
     };
 
-    let pipeline = storage::IngestPipeline::new(&config)
+    let pipeline = splake::ingest_engine::IngestPipeline::new(&config)
         .await
         .expect("pipeline");
     pipeline
@@ -1362,11 +1489,11 @@ async fn test_wal_replay_recovers_spans() {
     drop(pipeline);
 
     config.ingest_engine.replay_wal_on_startup = true;
-    let storage = storage::create_storage(&config).await.expect("storage");
-    let wal_count = storage
-        .ingest_engine
-        .as_ref()
-        .and_then(|engine| engine.list_wal_files("spans").ok())
+    let pipeline = splake::ingest_engine::IngestPipeline::new(&config)
+        .await
+        .expect("pipeline");
+    let wal_count = pipeline
+        .list_wal_files("spans")
         .map(|files| files.len())
         .unwrap_or(0);
     assert!(
@@ -1375,11 +1502,14 @@ async fn test_wal_replay_recovers_spans() {
         wal_count
     );
 
-    if let Some(engine) = storage.ingest_engine.as_ref() {
-        engine.run_optimizer_once().await.expect("optimizer");
-    }
+    pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let query_engine = query::create_query_engine(&config, None).await.expect("query");
+    let query_engine = query::create_query_engine(
+        &config,
+        std::sync::Arc::new(pipeline.storage.clone()),
+    )
+        .await
+        .expect("query");
     let escaped = session_id.replace('\'', "''");
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
@@ -1403,10 +1533,10 @@ async fn test_wal_replay_recovers_spans() {
 async fn test_metadata_maintenance_job_expires_snapshots() {
     use chrono::{Duration as ChronoDuration, Utc};
     use iceberg::{Catalog, TableCreation, TableIdent};
-    use softprobe_otlp_backend::compaction::executor::{
+    use splake::compaction::executor::{
         ActionStatus, CompactionStatus, MaintenanceExecutor,
     };
-    use softprobe_otlp_backend::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
+    use splake::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
     use std::collections::HashMap;
 
     let mut config = load_test_config();
@@ -1641,4 +1771,248 @@ async fn test_wal_cleanup_after_flush() {
     );
     
     println!("✅ WAL cleanup working: old WAL files are deleted after staging");
+}
+
+#[tokio::test]
+async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_count() {
+    // This test verifies the complete commit flow:
+    // 1. Data is written and flushed to staged files
+    // 2. Union view shows data from staged files
+    // 3. Optimizer commits staged data to Iceberg
+    // 4. Metadata pinning is updated
+    // 5. Staged files are removed
+    // 6. Union view doesn't double count (data appears once, not in both staged and Iceberg)
+    // 7. Data appears in Iceberg view
+    // 8. Union view still returns correct count after commit
+
+    let mut config = load_test_config();
+    config.span_buffering.max_buffer_spans = 10_000;
+    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
+    config.span_buffering.flush_interval_seconds = 3600;
+    config.ingest_engine.optimizer_interval_seconds = 3600;
+
+    let test_pipeline = build_test_pipeline(config).await;
+    let pipeline = &test_pipeline.pipeline;
+    let now = Utc::now();
+
+    // Create a unique session ID for this test
+    let session_id = format!("commit-test-{}", uuid::Uuid::new_v4());
+    let expected_count = 100usize;
+
+    // Step 1: Write data and flush to staged
+    println!("📝 Step 1: Writing {} spans to buffer...", expected_count);
+    let mut spans = Vec::new();
+    for i in 0..expected_count {
+        let mut attributes = HashMap::new();
+        attributes.insert("sp.session.id".to_string(), session_id.clone());
+        attributes.insert("span.index".to_string(), i.to_string());
+        spans.push(SpanData {
+            session_id: session_id.clone(),
+            trace_id: format!("trace-commit-{}", i),
+            span_id: format!("span-commit-{}", i),
+            parent_span_id: None,
+            app_id: "app-commit-test".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "commit_test".to_string(),
+            span_kind: Some("SERVER".to_string()),
+            timestamp: now + chrono::Duration::milliseconds(i as i64),
+            end_timestamp: Some(now + chrono::Duration::milliseconds(i as i64 + 1)),
+            attributes,
+            events: Vec::new(),
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+            status_code: Some("OK".to_string()),
+            status_message: Some("OK".to_string()),
+        });
+    }
+
+    pipeline
+        .add_spans(spans, expected_count * 256)
+        .await
+        .expect("add spans");
+    pipeline.force_flush_spans().await.expect("force flush");
+
+    // Step 2: Verify staged files exist
+    println!("📁 Step 2: Verifying staged files exist...");
+    let staged_files_before = pipeline
+        .list_staged_files("spans")
+        .expect("list staged files");
+    assert!(
+        !staged_files_before.is_empty(),
+        "Expected staged files to exist after flush, found {:?}",
+        staged_files_before
+    );
+    println!("✅ Found {} staged files", staged_files_before.len());
+
+    // Step 3: Verify union view shows data from staged files
+    println!("🔍 Step 3: Verifying union view shows data from staged files...");
+    let escaped = session_id.replace('\'', "''");
+    let union_sql = format!(
+        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        escaped
+    );
+    let union_result_before = test_pipeline
+        .execute_query(&union_sql)
+        .await
+        .expect("query union view");
+    let union_count_before = union_result_before.rows[0][0].as_i64().unwrap_or(0) as usize;
+    assert_eq!(
+        union_count_before, expected_count,
+        "Expected union view to show {} spans from staged files, found {}",
+        expected_count, union_count_before
+    );
+    println!("✅ Union view shows {} spans (from staged)", union_count_before);
+
+    // Step 4: Get initial metadata pinning state
+    println!("📌 Step 4: Capturing initial metadata pinning state...");
+    let pointer_path = test_pipeline
+        .cache_dir
+        .path()
+        .join("iceberg_metadata")
+        .join("traces.json");
+    
+    let initial_metadata = if pointer_path.exists() {
+        let contents = std::fs::read_to_string(&pointer_path).expect("read metadata pointer");
+        let json: serde_json::Value = serde_json::from_str(&contents).expect("parse metadata json");
+        Some((
+            json.get("snapshot_id").and_then(|v| v.as_i64()),
+            json.get("metadata_location")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        ))
+    } else {
+        None
+    };
+    println!("✅ Initial metadata state: {:?}", initial_metadata);
+
+    // Step 5: Run optimizer to commit staged data to Iceberg
+    println!("⚙️  Step 5: Running optimizer to commit staged data to Iceberg...");
+    pipeline.run_optimizer_once().await.expect("optimizer");
+    println!("✅ Optimizer completed");
+
+    // Step 6: Verify staged files are removed
+    println!("🗑️  Step 6: Verifying staged files are removed...");
+    let staged_files_after = pipeline
+        .list_staged_files("spans")
+        .expect("list staged files after");
+    assert!(
+        staged_files_after.is_empty(),
+        "Expected staged files to be removed after optimizer, found {:?}",
+        staged_files_after
+    );
+    println!("✅ Staged files removed (found {} files)", staged_files_after.len());
+
+    // Step 7: Verify metadata pinning is updated
+    println!("📌 Step 7: Verifying metadata pinning is updated...");
+    assert!(
+        pointer_path.exists(),
+        "Expected metadata pointer file to exist after commit"
+    );
+    let updated_contents = std::fs::read_to_string(&pointer_path).expect("read updated metadata pointer");
+    let updated_json: serde_json::Value =
+        serde_json::from_str(&updated_contents).expect("parse updated metadata json");
+    let updated_snapshot = updated_json.get("snapshot_id").and_then(|v| v.as_i64());
+    let updated_location = updated_json
+        .get("metadata_location")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    assert!(
+        updated_snapshot.is_some(),
+        "Expected snapshot_id in updated metadata pointer"
+    );
+    assert!(
+        updated_location.is_some(),
+        "Expected metadata_location in updated metadata pointer"
+    );
+
+    // Verify metadata was updated (either snapshot_id or location changed)
+    if let Some((initial_snapshot, initial_location)) = initial_metadata {
+        let metadata_updated = updated_snapshot != initial_snapshot
+            || updated_location != initial_location;
+        assert!(
+            metadata_updated,
+            "Expected metadata pinning to be updated after commit. Initial: {:?}, Updated: {:?}",
+            (initial_snapshot, initial_location),
+            (updated_snapshot, updated_location)
+        );
+        println!(
+            "✅ Metadata pinning updated: snapshot_id {:?} -> {:?}, location changed: {}",
+            initial_snapshot,
+            updated_snapshot,
+            updated_location != initial_location
+        );
+    } else {
+        println!("✅ Metadata pinning created: snapshot_id {:?}", updated_snapshot);
+    }
+
+    // Step 8: Verify union view doesn't double count (should still be expected_count, not 2x)
+    println!("🔍 Step 8: Verifying union view doesn't double count...");
+    let union_result_after = test_pipeline
+        .execute_query(&union_sql)
+        .await
+        .expect("query union view after commit");
+    let union_count_after = union_result_after.rows[0][0].as_i64().unwrap_or(0) as usize;
+    assert_eq!(
+        union_count_after, expected_count,
+        "Expected union view to show {} spans (not doubled), found {}. This indicates double counting!",
+        expected_count, union_count_after
+    );
+    assert_eq!(
+        union_count_before, union_count_after,
+        "Union view count should remain {} after commit (not increase due to double counting)",
+        expected_count
+    );
+    println!(
+        "✅ Union view shows {} spans (no double counting)",
+        union_count_after
+    );
+
+    // Step 9: Verify data appears in Iceberg view
+    println!("🧊 Step 9: Verifying data appears in Iceberg view...");
+    let iceberg_sql = format!(
+        "SELECT COUNT(*) AS count FROM iceberg_spans WHERE session_id = '{}'",
+        escaped
+    );
+    let iceberg_result = test_pipeline
+        .execute_query(&iceberg_sql)
+        .await
+        .expect("query iceberg view");
+    let iceberg_count = iceberg_result.rows[0][0].as_i64().unwrap_or(0) as usize;
+    assert_eq!(
+        iceberg_count, expected_count,
+        "Expected Iceberg view to show {} spans after commit, found {}",
+        expected_count, iceberg_count
+    );
+    println!("✅ Iceberg view shows {} spans", iceberg_count);
+
+    // Step 10: Verify union view still returns correct count (final check)
+    println!("🔍 Step 10: Final verification - union view still returns correct count...");
+    let final_union_result = test_pipeline
+        .execute_query(&union_sql)
+        .await
+        .expect("final union view query");
+    let final_union_count = final_union_result.rows[0][0].as_i64().unwrap_or(0) as usize;
+    assert_eq!(
+        final_union_count, expected_count,
+        "Final check: Expected union view to show {} spans, found {}",
+        expected_count, final_union_count
+    );
+    println!("✅ Final union view count: {} (correct, no double counting)", final_union_count);
+
+    println!("\n✅ All checks passed! Commit flow verified:");
+    println!("  ✓ Staged files created");
+    println!("  ✓ Union view shows data from staged");
+    println!("  ✓ Optimizer committed to Iceberg");
+    println!("  ✓ Staged files removed");
+    println!("  ✓ Metadata pinning updated");
+    println!("  ✓ Union view doesn't double count");
+    println!("  ✓ Data appears in Iceberg view");
+    println!("  ✓ Union view returns correct count after commit");
 }

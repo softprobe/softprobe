@@ -1,10 +1,11 @@
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue};
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use prost::Message;
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde_json;
-use std::time::Duration;
 use uuid::Uuid;
 mod util;
 use util::http::start_test_server;
