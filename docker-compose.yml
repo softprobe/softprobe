@@ -7,7 +7,7 @@ services:
     image: minio/minio:latest
     container_name: minio
     ports:
-      - "9002:9000"   # API
+      - "9000:9000"   # API
       - "9001:9001"   # Console
     environment:
       - MINIO_ROOT_USER=minioadmin

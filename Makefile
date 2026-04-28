@@ -96,7 +96,7 @@ setup-local:
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
-	@curl -sf http://localhost:9002/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
 	@echo "🪣 Creating MinIO bucket 'warehouse'..."
 	@docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin > /dev/null 2>&1 || true
 	@docker exec minio mc mb local/warehouse > /dev/null 2>&1 || \
@@ -149,7 +149,7 @@ setup-local:
 	@echo ""
 	@echo "Services available:"
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
-	@echo "  - MinIO API: http://localhost:9002"
+	@echo "  - MinIO API: http://localhost:9000"
 	@echo "  - Lakekeeper REST: http://localhost:8181/catalog"
 
 teardown-local:
@@ -159,7 +159,7 @@ teardown-local:
 
 check-local:
 	@echo "🔍 Checking local infrastructure..."
-	@curl -sf http://localhost:9002/minio/health/live > /dev/null && echo "✅ MinIO is running" || echo "❌ MinIO is not running (run 'make setup-local')"
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || echo "❌ MinIO is not running (run 'make setup-local')"
 	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 && echo "✅ Lakekeeper REST is running" || echo "❌ Lakekeeper REST is not running (run 'make setup-local')"
 
 # Test targets
@@ -170,9 +170,9 @@ test-quick:
 test-local: check-local
 	@echo "🧪 Running integration tests with local MinIO..."
 	@echo "📝 Configuration: tests/config/test.yaml"
-	@echo "🗄️  Backend: MinIO (localhost:9002) + Lakekeeper REST (localhost:8181)"
+	@echo "🗄️  Backend: MinIO (localhost:9000) + Lakekeeper REST (localhost:8181)"
 	@echo ""
-	ICEBERG_TEST_TYPE=local cargo test --test iceberg_integration_test -- --test-threads=1 --nocapture
+	ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1 --nocapture
 
 test-r2:
 	@echo "🧪 Running integration tests with Cloudflare R2..."
@@ -184,15 +184,15 @@ test-r2:
 		echo "🔒 Detecting environment..."; \
 		if curl -sf https://www.google.com > /dev/null 2>&1; then \
 			echo "✅ Direct internet access available"; \
-			ICEBERG_TEST_TYPE=r2 cargo test --test iceberg_integration_test -- --test-threads=1 --nocapture; \
+			ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
 		else \
 			echo "⚠️  Detected restricted/sandboxed environment"; \
 			echo "⚠️  Enabling TLS validation bypass for testing"; \
-			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test --test iceberg_integration_test -- --test-threads=1 --nocapture; \
+			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
 		fi \
 	else \
 		echo "🔓 TLS validation bypass already enabled"; \
-		ICEBERG_TEST_TYPE=r2 cargo test --test iceberg_integration_test -- --test-threads=1 --nocapture; \
+		ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
 	fi
 
 test-ci:
@@ -202,7 +202,7 @@ test-ci:
 	@if curl -sf http://localhost:8181/catalog/v1/config?warehouse=default > /dev/null 2>&1; then \
 		echo "✅ Lakekeeper REST catalog detected"; \
 		echo "🧪 Running integration tests with local catalog..."; \
-		ICEBERG_TEST_TYPE=local cargo test --test iceberg_integration_test -- --test-threads=1; \
+		ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1; \
 	else \
 		echo "⚠️  No local catalog found, running unit tests only"; \
 		cargo test --lib; \

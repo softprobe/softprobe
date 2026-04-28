@@ -11,9 +11,9 @@ use splake::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::tempdir;
+use anyhow::Result;
 
-mod util;
-use util::pipeline::TestPipeline;
+use crate::util::pipeline::TestPipeline;
 
 // ========================================
 // Performance test goals (tunable via env):
@@ -177,8 +177,56 @@ async fn run_diagnostics(
     explain_analyze(engine, label, sql).await;
 }
 
+/// Retry a query with exponential backoff to handle R2 eventual consistency
+/// Returns the query result once it succeeds, or the last error after max retries
+async fn retry_query_until_count(
+    engine: &splake::query::QueryEngine,
+    sql: &str,
+    expected_count: i64,
+    max_retries: u32,
+) -> Result<splake::query::duckdb::QueryResult, anyhow::Error> {
+    let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
+    let max_retries = if is_r2 { max_retries.max(10) } else { max_retries };
+    
+    for attempt in 0..max_retries {
+        match engine.execute_query(sql).await {
+            Ok(result) => {
+                let count = result.rows[0][0].as_i64().unwrap_or(0);
+                if count == expected_count {
+                    return Ok(result);
+                }
+                if attempt < max_retries - 1 {
+                    let delay_ms = 100 * (1 << attempt.min(5)); // Exponential backoff, max 3.2s
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+            Err(e) => {
+                if attempt < max_retries - 1 {
+                    let delay_ms = 100 * (1 << attempt.min(5));
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                } else {
+                    return Err(anyhow::anyhow!("Query failed after {} retries: {}", max_retries, e));
+                }
+            }
+        }
+    }
+    
+    // Final attempt
+    let result = engine.execute_query(sql).await?;
+    let count = result.rows[0][0].as_i64().unwrap_or(0);
+    if count == expected_count {
+        Ok(result)
+    } else {
+        Err(anyhow::anyhow!(
+            "Query returned {} rows, expected {} after {} retries",
+            count,
+            expected_count,
+            max_retries
+        ))
+    }
+}
+
 #[tokio::test]
-#[ignore]
 async fn perf_union_read_latency() {
     let mut config = load_perf_config();
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
@@ -285,6 +333,18 @@ async fn perf_union_read_latency() {
         base_session.replace('\'', "''"),
         record_date_start(days_back),
     );
+    // Retry query to handle R2 eventual consistency after write_log_batches
+    let warmup = retry_query_until_count(
+        &query_engine,
+        &warmup_iceberg_sql,
+        per_session as i64,
+        15,
+    )
+    .await
+    .expect("iceberg warmup should eventually return data");
+    assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
+    
+    // Now run additional warmup queries (data should be visible now)
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_iceberg_sql)
@@ -377,7 +437,6 @@ async fn perf_union_read_latency() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn perf_union_read_concurrency() {
     let mut config = load_perf_config();
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
@@ -489,6 +548,18 @@ async fn perf_union_read_concurrency() {
         base_session.replace('\'', "''"),
         record_date_start(days_back),
     );
+    // Retry query to handle R2 eventual consistency after write_log_batches
+    let warmup = retry_query_until_count(
+        &query_engine,
+        &warmup_sql,
+        per_session as i64,
+        15,
+    )
+    .await
+    .expect("warmup should eventually return data");
+    assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
+    
+    // Now run additional warmup queries (data should be visible now)
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -587,7 +658,6 @@ async fn perf_union_read_concurrency() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn perf_view_recreate_stability() {
     let mut config = load_perf_config();
     ensure_wal_bucket(&mut config);
@@ -717,7 +787,7 @@ async fn view_recreate_stability_local_stub() {
         trace_id: None,
         span_id: None,
     };
-    let schema = storage::iceberg::OtlpLogsTable::schema();
+    let schema = storage::iceberg::OtlpLogsTable::schema(None);
     let record_batch = logs_to_record_batch(&[log], &schema).expect("record batch");
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(&stub_path).expect("stub file");

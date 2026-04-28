@@ -8,7 +8,7 @@ INSTALL iceberg;
 LOAD iceberg;
 
 -- Configure S3 for MinIO
-SET s3_endpoint='localhost:9002';
+SET s3_endpoint='localhost:9000';
 SET s3_access_key_id='minioadmin';
 SET s3_secret_access_key='minioadmin';
 SET s3_use_ssl=false;

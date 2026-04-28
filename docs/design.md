@@ -112,6 +112,89 @@ Bodies are stored separately from metadata to avoid expensive read/write operati
 | **Query Engine** | Direct Iceberg scans with predicates | iceberg-rust, DuckDB |
 | **Object Storage** | S3-compatible backend | MinIO/S3/R2 |
 
+### 2.3 Ingest Engine Architecture
+
+The system uses a write-aware ingestion engine that decouples read freshness from Iceberg commit frequency, avoiding metadata bloat while enabling sub-second query freshness.
+
+#### Data Flow
+
+```mermaid
+flowchart TD
+    subgraph write [Write Path]
+        API[API Request] --> Buffer[Buffer In-Memory]
+        Buffer -->|time or size trigger| Flush[Flush Operation]
+        Flush --> Staged[Staged Local Parquet]
+        Flush --> WAL[WAL for Recovery]
+        Staged -->|background optimizer| Iceberg[Iceberg S3]
+    end
+    
+    subgraph query [Query Path - Real-Time]
+        Query[SQL Query] --> UnionView[Union View]
+        UnionView --> BufferView[Buffer View]
+        UnionView --> StagedView[Staged View]
+        UnionView --> IcebergView[Iceberg View]
+        BufferView -->|Arrow RecordBatch| Buffer
+        StagedView -->|read_parquet| Staged
+        IcebergView -->|iceberg_scan| Iceberg
+    end
+    
+    subgraph recovery [Recovery Path - Startup Only]
+        Startup[Startup] -->|read WAL files| WALRecovery[WAL Replay]
+        WAL -->|restore data| WALRecovery
+        WALRecovery -->|write to| StagedRecovery[Staged Cache]
+    end
+```
+
+**Key Separation**:
+- **Write Path**: Buffer → Staged + WAL (dual-write on flush)
+- **Query Path**: Buffer ∪ Staged ∪ Iceberg (no WAL)
+- **Recovery Path**: WAL → Staged (startup only)
+
+#### Design Decisions
+
+1. **Buffer + WAL Ingest Engine**: Replaces direct Iceberg commits to decouple freshness from metadata commits and reduce write amplification.
+
+2. **Arrow/Parquet Schema Reuse**: Uses Arrow in-memory buffers and Parquet/Arrow WAL segments that reuse the same schema as Iceberg tables, removing JSON schema duplication and enabling union-read with DuckDB.
+
+3. **Local-Only WAL**: WAL is local-only as the ingestion source of truth until commit, with object-store uploads only during Iceberg commits. Keeps the hot path fast for small row groups.
+
+4. **DuckDB Query Engine**: Uses DuckDB as the query engine with Iceberg catalog compatibility, enabling SQL queries without bespoke APIs.
+
+5. **Session-Based Row Grouping**: Preserves session-based row-grouping when flushing Parquet for traces/logs to maintain query performance.
+
+6. **Stable DuckDB Views**: Uses stable DuckDB views for union-read that combine in-memory buffer snapshots, staged parquet files, and committed Iceberg data. Views refresh only on schema change or staged file updates.
+
+7. **WAL for Recovery Only**: WAL is written during buffer flush alongside staged files but is NOT part of the query path. Separates durability (WAL) from visibility (buffer/staged).
+
+8. **Buffer Snapshots as Arrow**: Buffer snapshots are exposed as Arrow RecordBatches and registered with DuckDB as temp tables, enabling querying in-memory data without disk I/O.
+
+#### Lessons Learned
+
+**Mistake: WAL in Query Path (2026-01-25)**
+
+Initial implementation incorrectly included WAL files in the DuckDB union view query path. This was wrong because:
+1. WAL is for crash recovery, not queries - mixing concerns
+2. Creates double-reads: data appears in both WAL and staged after flush
+3. Breaks the buffer → staged → committed pipeline semantics
+4. Tests expect immediate buffer visibility, not WAL-delayed visibility
+
+**Correct architecture**:
+- Write Path: API → Buffer (in-memory) → [flush] → Staged (parquet) + WAL (recovery)
+- Query Path: Buffer (in-memory) ∪ Staged (parquet) ∪ Committed (Iceberg)
+- Recovery Path: Startup → Read WAL → Restore to Staged
+
+**Why buffer must be queryable**:
+- Sub-second freshness requirement: queries must see buffered data immediately
+- Single-writer single-reader: no concurrency issues with buffer snapshots
+- Avoids write amplification: don't write to disk just to make data queryable
+
+#### Trade-offs
+
+- **Increased Complexity**: More moving parts (buffer, WAL, staged, committed)
+- **Operational Requirements**: New requirements for local disk/NVMe sizing and health
+- **Durability**: Uncommitted data is not durable across node loss until commit completes
+- **Recovery Semantics**: Requires careful recovery to reconcile WAL + buffer + Iceberg snapshots
+
 ---
 
 ## 3. Buffering Strategy
@@ -294,6 +377,12 @@ SORT BY (session_id, trace_id, timestamp)
 4. **Future Migration Path**: If columnar separation proves insufficient
    - Phase 2: Move bodies to separate `http_payloads` table
    - But start simple and validate performance first
+
+5. **Schema Promotion**: User-defined attribute promotion to top-level columns
+   - Configure specific attributes to be promoted from `attributes` or `resource_attributes` MAP to top-level columns
+   - Enables direct SQL queries: `WHERE user_id = '123'` instead of `WHERE attributes['user.id'] = '123'`
+   - Supports auto-type detection (STRING, INT, DOUBLE, BOOLEAN) or explicit type specification
+   - See [Schema Promotion Configuration](#schema-promotion) section below
 
 ### 5.2 Table: logs
 

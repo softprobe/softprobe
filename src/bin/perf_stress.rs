@@ -662,6 +662,7 @@ async fn run_query_worker_http(
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
                     stats.record(label, elapsed).await;
+                    eprintln!("ERROR: query worker {worker_id} {label} HTTP error {}: {}", status, error_text);
                     tracing::warn!("query worker {worker_id} {label} HTTP error {}: {}", status, error_text);
                     stats.record_error(label).await;
                 }
@@ -670,6 +671,7 @@ async fn run_query_worker_http(
                 let elapsed = start.elapsed();
                 // Record latency even for failures: alerts still pay the cost, and we want to see it.
                 stats.record(label, elapsed).await;
+                eprintln!("ERROR: query worker {worker_id} {label} HTTP request error: {}", err);
                 tracing::warn!("query worker {worker_id} {label} HTTP request error: {}", err);
                 stats.record_error(label).await;
             }

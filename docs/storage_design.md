@@ -159,7 +159,7 @@ span.set_attribute("sp.email", "user@example.com");
 
 // Still capture full body in events
 span.add_event("http.request.body", json!({
-    "userId": "user-123",
+    "user.id": "user-123",
     "orderId": "ORD-456",
     "items": [...]
 }));
@@ -219,7 +219,7 @@ processors:
     rules:
       - name: "user_id"
         source: "event.attributes[sp.http.request.body]"
-        json_path: "$.userId"
+        json_path: "$.user.id"
         target: "sp.user.id"
 
       - name: "order_id"
@@ -278,7 +278,7 @@ SpanData {
     events: [
         Event {
             name: "http.request.body",
-            attributes: { "sp.http.request.body": "{\"userId\":\"user-123\",...}" }
+            attributes: { "sp.http.request.body": "{\"user.id\":\"user-123\",...}" }
         }
     ]
 }
@@ -291,7 +291,7 @@ app_id: "checkout-service"
 
 extraction_rules:
   - attribute_key: "user_id"
-    json_path: "$.userId"
+    json_path: "$.user.id"
     source_event: "http.request.body"
 
   - attribute_key: "order_id"
@@ -314,7 +314,7 @@ SELECT
     timestamp,
     json_extract_string(
         list_extract(events, 1).attributes['sp.http.request.body'],
-        '$.userId'
+        '$.user.id'
     ) AS user_id,
     json_extract_string(
         list_extract(events, 1).attributes['sp.http.request.body'],
@@ -371,7 +371,7 @@ CREATE TABLE orders_wide AS
 SELECT
     session_id,
     json_extract_string(request_body, '$.orderId') AS order_id,
-    json_extract_string(request_body, '$.userId') AS user_id,
+    json_extract_string(request_body, '$.user.id') AS user_id,
     json_extract_string(request_body, '$.items') AS items,
     json_extract_string(request_body, '$.total') AS total,
     timestamp
@@ -427,7 +427,7 @@ For users who prefer post-ingestion extraction:
 templates:
   - name: "e-commerce"
     rules:
-      - extract: "user_id" from "$.userId"
+      - extract: "user_id" from "$.user.id"
       - extract: "order_id" from "$.orderId"
       - extract: "cart_total" from "$.cart.total"
 
@@ -597,7 +597,7 @@ WHERE attribute_key = 'user_id'
                  ▼
 ┌─────────────────────────────────────────────┐
 │ DuckDB/Spark: Parse bodies, extract attrs  │
-│ - json_extract(body, '$.userId')           │
+│ - json_extract(body, '$.user.id')           │
 └────────────────┬────────────────────────────┘
                  │
                  ▼

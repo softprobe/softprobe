@@ -43,3 +43,26 @@ pub fn ensure_wal_bucket(config: &mut Config) {
     );
     config.ingest_engine.wal_bucket = candidate;
 }
+
+/// Check if minio hostname resolves (needed for local testing when REST catalog returns minio:9000 URLs)
+/// 
+/// This is informational only - if minio doesn't resolve and tests fail with connection errors,
+/// users should:
+/// - Add `127.0.0.1 minio` to `/etc/hosts` (requires sudo), OR
+/// - Run tests in Docker where `minio` hostname resolves, OR
+/// - Manually drop and recreate tables if they have stale metadata with wrong endpoints
+fn check_minio_hostname() -> bool {
+    use std::net::ToSocketAddrs;
+    "minio:9000".to_socket_addrs().is_ok()
+}
+
+/// Warn if minio hostname doesn't resolve (informational only, no automatic actions)
+pub fn warn_if_minio_unresolvable() {
+    if !check_minio_hostname() {
+        eprintln!("⚠️  INFO: 'minio' hostname does not resolve.");
+        eprintln!("   If tests fail with 'minio:9000' connection errors, you can:");
+        eprintln!("   1. Add '127.0.0.1 minio' to /etc/hosts (requires sudo)");
+        eprintln!("   2. Run tests in Docker where 'minio' hostname resolves");
+        eprintln!("   3. Manually drop and recreate tables if they have stale metadata with wrong endpoints");
+    }
+}

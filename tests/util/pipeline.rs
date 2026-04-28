@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 pub struct TestPipeline {
-    #[allow(dead_code)]
     pub config: Config,
     pub cache_dir: TempDir,
     pub pipeline: IngestPipeline,

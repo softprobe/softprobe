@@ -12,12 +12,12 @@ pub async fn start_test_server() -> (String, TempDir) {
     config.iceberg.warehouse = "default".to_string();
     config.iceberg.force_close_after_append = true;
     config.ingest_engine.optimizer_interval_seconds = 1;
-    config.s3.endpoint = Some("http://localhost:9002".to_string());
+    config.s3.endpoint = Some("http://localhost:9000".to_string());
     config.s3.access_key_id = Some("minioadmin".to_string());
     config.s3.secret_access_key = Some("minioadmin".to_string());
     config.storage.s3_region = "us-east-1".to_string();
 
-    std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
+    std::env::set_var("S3_ENDPOINT", "http://localhost:9000");
     std::env::set_var("S3_ACCESS_KEY", "minioadmin");
     std::env::set_var("S3_SECRET_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");

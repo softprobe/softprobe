@@ -39,7 +39,7 @@ jobs:
       minio:
         image: minio/minio:latest
         ports:
-          - 9002:9000  # Map to 9002 to match test.yaml
+          - 9000:9000  # Map to 9000 to match test.yaml
           - 9001:9001  # Console
         env:
           MINIO_ROOT_USER: minioadmin
@@ -118,7 +118,7 @@ jobs:
           # Wait for MinIO
           echo "Waiting for MinIO..."
           for i in {1..30}; do
-            if curl -sf http://localhost:9002/minio/health/live > /dev/null 2>&1; then
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
               echo "✅ MinIO is ready"
               break
             fi
@@ -177,7 +177,7 @@ jobs:
                 "type": "s3",
                 "bucket": "warehouse",
                 "key-prefix": "iceberg",
-                "endpoint": "http://localhost:9002",
+                "endpoint": "http://localhost:9000",
                 "region": "us-east-1",
                 "path-style-access": true,
                 "flavor": "minio",

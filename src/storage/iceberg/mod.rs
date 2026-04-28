@@ -63,9 +63,9 @@ impl IcebergWriter {
             TableIdent::from_strs(&[namespace_name, OtlpMetricsTable::table_name()])?;
 
         // Ensure tables exist
-        ensure_table_exists(catalog.catalog(), &spans_table_ident, TableType::Spans).await?;
-        ensure_table_exists(catalog.catalog(), &logs_table_ident, TableType::Logs).await?;
-        ensure_table_exists(catalog.catalog(), &metrics_table_ident, TableType::Metrics).await?;
+        ensure_table_exists(catalog.catalog(), &spans_table_ident, TableType::Spans, config).await?;
+        ensure_table_exists(catalog.catalog(), &logs_table_ident, TableType::Logs, config).await?;
+        ensure_table_exists(catalog.catalog(), &metrics_table_ident, TableType::Metrics, config).await?;
 
         // Create writers
         let spans_writer = TableWriter::new(catalog.catalog().clone(), spans_table_ident.clone());
@@ -897,6 +897,7 @@ async fn ensure_table_exists(
     catalog: &Arc<iceberg_catalog_rest::RestCatalog>,
     table_ident: &TableIdent,
     table_type: TableType,
+    config: &Config,
 ) -> Result<()> {
     // Check if table already exists
     match catalog.table_exists(table_ident).await {
@@ -915,24 +916,31 @@ async fn ensure_table_exists(
         }
     }
 
+    // Get promotion config for this table type
+    let promotion_config = match table_type {
+        TableType::Spans => config.schema_promotion.as_ref().and_then(|sp| sp.traces.as_ref()),
+        TableType::Logs => config.schema_promotion.as_ref().and_then(|sp| sp.logs.as_ref()),
+        TableType::Metrics => config.schema_promotion.as_ref().and_then(|sp| sp.metrics.as_ref()),
+    };
+
     // Create table based on type
     let (schema, partition_spec, sort_order, properties) = match table_type {
         TableType::Spans => {
-            let schema = TraceTable::schema();
+            let schema = TraceTable::schema(promotion_config);
             let partition_spec = TraceTable::partition_spec(&schema)?;
             let sort_order = TraceTable::sort_order(&schema)?;
             let properties = TraceTable::table_properties();
             (schema, partition_spec, sort_order, properties)
         }
         TableType::Logs => {
-            let schema = OtlpLogsTable::schema();
+            let schema = OtlpLogsTable::schema(promotion_config);
             let partition_spec = OtlpLogsTable::partition_spec(&schema)?;
             let sort_order = OtlpLogsTable::sort_order(&schema)?;
             let properties = OtlpLogsTable::table_properties();
             (schema, partition_spec, sort_order, properties)
         }
         TableType::Metrics => {
-            let schema = OtlpMetricsTable::schema();
+            let schema = OtlpMetricsTable::schema(promotion_config);
             let partition_spec = OtlpMetricsTable::partition_spec(&schema)?;
             let sort_order = OtlpMetricsTable::sort_order(&schema)?;
             let properties = OtlpMetricsTable::table_properties();

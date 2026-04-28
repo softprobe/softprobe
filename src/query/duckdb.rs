@@ -360,6 +360,7 @@ impl DuckDBCore {
             } else if endpoint.starts_with("https://") {
                 conn.execute("SET s3_use_ssl = true;", [])?;
             }
+            
         }
         // Fetch credentials from config or instance metadata
         let (access_key, secret_key, session_token) = if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
@@ -956,8 +957,35 @@ impl DuckDBCore {
                     ns = self.config.iceberg.namespace.as_str(),
                     table = table_name,
                 );
-                conn.execute_batch(&iceberg_view)?;
-                Ok(source.clone())
+                match conn.execute_batch(&iceberg_view) {
+                    Ok(()) => Ok(source.clone()),
+                    Err(err) => {
+                        let error_msg = err.to_string();
+                        // Provide helpful error message if table doesn't exist
+                        if error_msg.contains("does not exist") || 
+                           error_msg.contains("Catalog") ||
+                           (error_msg.contains("Table") && error_msg.contains("not found")) {
+                            Err(anyhow!(
+                                "Iceberg table '{}.{}.{}' does not exist in catalog. \
+                                 This usually means:\n\
+                                 1. No data has been ingested and flushed to Iceberg yet, or\n\
+                                 2. The table name/namespace is incorrect, or\n\
+                                 3. The catalog connection failed\n\
+                                 \n\
+                                 To fix: Ensure data has been ingested and flushed to Iceberg tables. \
+                                 Check that the ingest pipeline is running and data is being written.\n\
+                                 \n\
+                                 Original error: {}",
+                                CATALOG_ALIAS,
+                                self.config.iceberg.namespace.as_str(),
+                                table_name,
+                                error_msg
+                            ))
+                        } else {
+                            Err(anyhow!("Failed to create iceberg view for {}: {}", table_name, err))
+                        }
+                    }
+                }
             }
             IcebergSource::ScanUri(uri) => {
                 let iceberg_view = format!(

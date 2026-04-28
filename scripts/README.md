@@ -5,6 +5,18 @@ Most workflows are exposed via Makefile targets; scripts are thin helpers.
 ## Quick Start
 
 ```bash
+# EC2: sync repo, build `splake` + `perf_stress`, copy client to catalog instance
+bash scripts/ec2_sync_build.sh
+
+# EC2 (app instance): start the API server
+bash scripts/ec2_start_splake.sh start
+
+# EC2 (catalog instance): run perf client (foreground)
+bash scripts/ec2_run_perf_stress.sh --duration 120 --warmup-secs 10 --span-qps 100 --log-qps 100 --metric-qps 100 --query-concurrency 10 --query-interval-ms 500
+
+# EC2 (catalog instance): run perf client (background)
+bash scripts/ec2_run_perf_stress.sh --background --duration 86400 --warmup-secs 60 --span-qps 100 --log-qps 100 --metric-qps 100 --query-concurrency 10 --query-interval-ms 500
+
 # Automated verification (recommended)
 make verify-e2e
 
@@ -24,7 +36,7 @@ INSTALL iceberg;
 LOAD iceberg;
 
 -- S3 configuration for MinIO
-SET s3_endpoint='localhost:9002';
+SET s3_endpoint='localhost:9000';
 SET s3_access_key_id='minioadmin';
 SET s3_secret_access_key='minioadmin';
 SET s3_use_ssl=false;
@@ -60,6 +72,9 @@ SELECT COUNT(*) FROM logs;
 - **demo_session_queries.sh** - Sample session queries (used by `make demo-session`)
 - **verify_e2e.sh** - End-to-end verification (used by `make verify-e2e`)
 - **drop_all_tables.sh** - Reset Iceberg tables (used by `make drop-tables`)
+- **ec2_sync_build.sh** - Sync+build on app EC2 and copy `perf_stress` to catalog EC2
+- **ec2_start_splake.sh** - Start/stop `splake` on the app EC2 instance
+- **ec2_run_perf_stress.sh** - Run `perf_stress` on the catalog EC2 instance
 - **README.md** - This file
 
 ## Example Queries
@@ -125,7 +140,7 @@ SET unsafe_enable_version_guessing=true;
 **Fix**: Check services are running:
 ```bash
 # MinIO
-curl http://localhost:9002/minio/health/live
+curl http://localhost:9000/minio/health/live
 
 # Lakekeeper REST catalog
 curl "http://localhost:8181/catalog/v1/config?warehouse=default"

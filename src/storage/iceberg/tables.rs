@@ -1,8 +1,54 @@
+use crate::config::{PromotedDataType, TablePromotionConfig};
 use iceberg::spec::{
     ListType, MapType, NestedField, PartitionSpec, PrimitiveType, Schema as IcebergSchema,
     SortOrder, StructType, Type, UnboundPartitionField,
 };
 use std::collections::HashMap;
+
+/// Helper function to generate promoted columns from config
+fn generate_promoted_columns(
+    promotion_config: Option<&TablePromotionConfig>,
+    start_field_id: i32,
+) -> Vec<std::sync::Arc<NestedField>> {
+    let mut fields = Vec::new();
+    let mut current_field_id = start_field_id;
+
+    if let Some(config) = promotion_config {
+        // Add columns from attributes
+        for col in &config.attributes {
+            let column_name = col.column_name.as_deref().unwrap_or(&col.attribute_key);
+            let field_type = match col.data_type {
+                Some(PromotedDataType::String) => Type::Primitive(PrimitiveType::String),
+                Some(PromotedDataType::Int) => Type::Primitive(PrimitiveType::Int),
+                Some(PromotedDataType::Double) => Type::Primitive(PrimitiveType::Double),
+                Some(PromotedDataType::Boolean) => Type::Primitive(PrimitiveType::Boolean),
+                None => Type::Primitive(PrimitiveType::String), // Default to String if not specified
+            };
+            fields.push(
+                NestedField::optional(current_field_id, column_name, field_type).into(),
+            );
+            current_field_id += 1;
+        }
+
+        // Add columns from resource_attributes
+        for col in &config.resource_attributes {
+            let column_name = col.column_name.as_deref().unwrap_or(&col.attribute_key);
+            let field_type = match col.data_type {
+                Some(PromotedDataType::String) => Type::Primitive(PrimitiveType::String),
+                Some(PromotedDataType::Int) => Type::Primitive(PrimitiveType::Int),
+                Some(PromotedDataType::Double) => Type::Primitive(PrimitiveType::Double),
+                Some(PromotedDataType::Boolean) => Type::Primitive(PrimitiveType::Boolean),
+                None => Type::Primitive(PrimitiveType::String), // Default to String if not specified
+            };
+            fields.push(
+                NestedField::optional(current_field_id, column_name, field_type).into(),
+            );
+            current_field_id += 1;
+        }
+    }
+
+    fields
+}
 
 /// Raw sessions table - stores OTLP spans
 pub struct TraceTable;
@@ -12,10 +58,8 @@ impl TraceTable {
         "traces"
     }
 
-    pub fn schema() -> IcebergSchema {
-        IcebergSchema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
+    pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
+        let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
                 // Primary Identifiers
                 NestedField::required(1, "session_id", Type::Primitive(PrimitiveType::String))
                     .into(),
@@ -153,7 +197,14 @@ impl TraceTable {
                 // Partition Key (comes last in declaration order to match Arrow schema)
                 NestedField::required(32, "record_date", Type::Primitive(PrimitiveType::Date))
                     .into(),
-            ])
+            ];
+        
+        // Add promoted columns (starting at field ID 33, after record_date which is 32)
+        base_fields.extend(generate_promoted_columns(promotion_config, 33));
+        
+        IcebergSchema::builder()
+            .with_schema_id(0)
+            .with_fields(base_fields)
             .build()
             .unwrap()
     }
@@ -240,10 +291,8 @@ impl OtlpLogsTable {
         "logs"
     }
 
-    pub fn schema() -> IcebergSchema {
-        IcebergSchema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
+    pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
+        let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
                 // Session context
                 NestedField::optional(1, "session_id", Type::Primitive(PrimitiveType::String))
                     .into(),
@@ -293,7 +342,14 @@ impl OtlpLogsTable {
                 // Partition Key
                 NestedField::required(15, "record_date", Type::Primitive(PrimitiveType::Date))
                     .into(),
-            ])
+            ];
+        
+        // Add promoted columns (starting at field ID 16, after record_date which is 15)
+        base_fields.extend(generate_promoted_columns(promotion_config, 16));
+        
+        IcebergSchema::builder()
+            .with_schema_id(0)
+            .with_fields(base_fields)
             .build()
             .unwrap()
     }
@@ -374,10 +430,8 @@ impl OtlpMetricsTable {
         "metrics"
     }
 
-    pub fn schema() -> IcebergSchema {
-        IcebergSchema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
+    pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
+        let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
                 // Metric identity
                 NestedField::required(1, "metric_name", Type::Primitive(PrimitiveType::String))
                     .into(),
@@ -417,7 +471,14 @@ impl OtlpMetricsTable {
                 // Partition Key
                 NestedField::required(13, "record_date", Type::Primitive(PrimitiveType::Date))
                     .into(),
-            ])
+            ];
+        
+        // Add promoted columns (starting at field ID 14, after record_date which is 13)
+        base_fields.extend(generate_promoted_columns(promotion_config, 14));
+        
+        IcebergSchema::builder()
+            .with_schema_id(0)
+            .with_fields(base_fields)
             .build()
             .unwrap()
     }

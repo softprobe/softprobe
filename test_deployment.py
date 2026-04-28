@@ -178,7 +178,7 @@ class OTLPDeploymentTester:
                 "message": f"Processing step {i} completed with status {rng.choice(['success', 'pending', 'retry'])}",
                 "timestamp": (datetime.now(timezone.utc).timestamp() + i * 0.1),
                 "context": {
-                    "userId": f"user-{rng.randint(1000, 9999)}",
+                    "user.id": f"user-{rng.randint(1000, 9999)}",
                     "sessionId": f"sess-{make_id('sess', i)}",
                     "ipAddress": f"{rng.randint(1, 255)}.{rng.randint(1, 255)}.{rng.randint(1, 255)}.{rng.randint(1, 255)}",
                     "userAgent": rng.choice([
@@ -271,7 +271,7 @@ class OTLPDeploymentTester:
 
         # Generate ~100KB request body with realistic, dynamic padding
         request_base_data = {
-            "userId": f"user_{span_index}",
+            "user.id": f"user_{span_index}",
             "action": "test_action",
             "index": span_index,
             "timestamp": datetime.now(timezone.utc).isoformat()

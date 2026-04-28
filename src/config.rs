@@ -11,6 +11,8 @@ pub struct Config {
     pub duckdb: DuckDBConfig,
     pub s3: S3Config,
     pub iceberg: IcebergConfig,
+    #[serde(default)]
+    pub schema_promotion: Option<SchemaPromotionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +107,46 @@ pub struct IcebergConfig {
     pub write_row_group_size_bytes: usize,   // 128MB
     pub write_page_size_bytes: usize,        // 1MB
     pub force_close_after_append: bool,      // testing: close file after each append
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaPromotionConfig {
+    #[serde(default)]
+    pub traces: Option<TablePromotionConfig>,
+    #[serde(default)]
+    pub logs: Option<TablePromotionConfig>,
+    #[serde(default)]
+    pub metrics: Option<TablePromotionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TablePromotionConfig {
+    /// Attributes to promote from the main attributes MAP
+    #[serde(default)]
+    pub attributes: Vec<PromotedColumn>,
+    /// Attributes to promote from resource_attributes MAP
+    #[serde(default)]
+    pub resource_attributes: Vec<PromotedColumn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotedColumn {
+    /// OTel attribute key (e.g., "user.id", "sp.user.id", "department")
+    pub attribute_key: String,
+    /// Column name in Iceberg table (defaults to attribute_key if not specified)
+    #[serde(default)]
+    pub column_name: Option<String>,
+    /// Data type (auto-detected from first value if not specified)
+    #[serde(default)]
+    pub data_type: Option<PromotedDataType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PromotedDataType {
+    String,
+    Int,
+    Double,
+    Boolean,
 }
 
 fn default_warehouse() -> String {
@@ -235,6 +277,7 @@ impl Default for Config {
                 write_page_size_bytes: 1024 * 1024,             // 1MB
                 force_close_after_append: false,
             },
+            schema_promotion: None,
         }
     }
 }

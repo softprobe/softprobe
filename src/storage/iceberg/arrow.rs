@@ -1,8 +1,9 @@
+use crate::config::TablePromotionConfig;
 use crate::models::{Log, Metric, Span};
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, Date32Array, Int32Array, ListArray, MapArray, StringArray, StructArray,
-    TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, ListArray, MapArray, StringArray,
+    StructArray, TimestampMicrosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -12,10 +13,126 @@ use iceberg::spec::Schema as IcebergSchema;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
+/// Base field names for traces table (used to identify promoted columns)
+const TRACES_BASE_FIELDS: &[&str] = &[
+    "session_id", "trace_id", "span_id", "parent_span_id", "app_id", "organization_id", "tenant_id",
+    "message_type", "span_kind", "timestamp", "end_timestamp", "attributes", "events",
+    "status_code", "status_message", "http_request_method", "http_request_path",
+    "http_request_headers", "http_request_body", "http_response_status_code",
+    "http_response_headers", "http_response_body", "record_date",
+];
+
+/// Extract promoted column values from attributes/resource_attributes
+fn extract_promoted_values(
+    column_name: &str,
+    attribute_key: &str,
+    spans: &[Span],
+    promotion_config: Option<&TablePromotionConfig>,
+) -> Vec<Option<String>> {
+    // Try to find the attribute key in the promotion config
+    let attr_key = if let Some(config) = promotion_config {
+        // Check if this column is in the promotion config
+        if let Some(col) = config
+            .attributes
+            .iter()
+            .find(|c| c.column_name.as_deref().unwrap_or(&c.attribute_key) == column_name)
+        {
+            &col.attribute_key
+        } else if let Some(_col) = config
+            .resource_attributes
+            .iter()
+            .find(|c| c.column_name.as_deref().unwrap_or(&c.attribute_key) == column_name)
+        {
+            // This is from resource_attributes - but spans don't have resource_attributes directly
+            // TODO: Support resource_attributes promotion for spans
+            return vec![None; spans.len()];
+        } else {
+            // Not in config, use column_name as attribute_key
+            attribute_key
+        }
+    } else {
+        // No config, assume column_name == attribute_key
+        attribute_key
+    };
+
+    spans
+        .iter()
+        .map(|span| span.attributes.get(attr_key).cloned())
+        .collect()
+}
+
+/// Build arrays for promoted columns in schema order
+fn build_promoted_columns_for_spans(
+    spans: &[Span],
+    arrow_schema: &Schema,
+    promotion_config: Option<&TablePromotionConfig>,
+) -> Result<Vec<ArrayRef>> {
+    let mut promoted_arrays = Vec::new();
+
+    for field in arrow_schema.fields() {
+        let field_name = field.name();
+        // Skip base fields
+        if TRACES_BASE_FIELDS.contains(&field_name.as_str()) {
+            continue;
+        }
+
+        // This is a promoted column - extract values
+        let values = extract_promoted_values(field_name, field_name, spans, promotion_config);
+
+        // Build array based on field type
+        let array: ArrayRef = match field.data_type() {
+            arrow::datatypes::DataType::Utf8 => {
+                Arc::new(StringArray::from(values))
+            }
+            arrow::datatypes::DataType::Int32 => {
+                Arc::new(Int32Array::from(
+                    values
+                        .iter()
+                        .map(|v| v.as_ref().and_then(|s| s.parse::<i32>().ok()))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            arrow::datatypes::DataType::Float64 => {
+                Arc::new(Float64Array::from(
+                    values
+                        .iter()
+                        .map(|v| v.as_ref().and_then(|s| s.parse::<f64>().ok()))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            arrow::datatypes::DataType::Boolean => {
+                Arc::new(BooleanArray::from(
+                    values
+                        .iter()
+                        .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            _ => {
+                // Default to String for unknown types
+                Arc::new(StringArray::from(values))
+            }
+        };
+
+        promoted_arrays.push(array);
+    }
+
+    Ok(promoted_arrays)
+}
+
 /// Convert Span batch to Arrow RecordBatch using Iceberg table schema
 pub fn spans_to_record_batch(
     spans: &[Span],
     iceberg_schema: &IcebergSchema,
+) -> Result<RecordBatch> {
+    spans_to_record_batch_with_promotion(spans, iceberg_schema, None)
+}
+
+/// Convert Span batch to Arrow RecordBatch with promotion config
+pub fn spans_to_record_batch_with_promotion(
+    spans: &[Span],
+    iceberg_schema: &IcebergSchema,
+    promotion_config: Option<&TablePromotionConfig>,
 ) -> Result<RecordBatch> {
     // Convert Iceberg schema to Arrow schema
     let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
@@ -217,34 +334,38 @@ pub fn spans_to_record_batch(
 
     let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
 
-    let record_batch = RecordBatch::try_new(
-        arrow_schema,
-        vec![
-            session_ids,
-            trace_ids,
-            span_ids,
-            parent_span_ids,
-            app_ids,
-            organization_ids,
-            tenant_ids,
-            message_types,
-            span_kinds,
-            timestamps,
-            end_timestamps,
-            attributes_array,
-            events_array,
-            status_codes,
-            status_messages,
-            http_request_methods,
-            http_request_paths,
-            http_request_headers,
-            http_request_bodies,
-            http_response_status_codes,
-            http_response_headers,
-            http_response_bodies,
-            record_dates,
-        ],
-    )?;
+    // Build promoted columns (in schema order, after base fields)
+    let promoted_arrays = build_promoted_columns_for_spans(spans, &arrow_schema, promotion_config)?;
+
+    // Assemble all arrays in schema order
+    let mut all_arrays: Vec<ArrayRef> = vec![
+        session_ids,
+        trace_ids,
+        span_ids,
+        parent_span_ids,
+        app_ids,
+        organization_ids,
+        tenant_ids,
+        message_types,
+        span_kinds,
+        timestamps,
+        end_timestamps,
+        attributes_array,
+        events_array,
+        status_codes,
+        status_messages,
+        http_request_methods,
+        http_request_paths,
+        http_request_headers,
+        http_request_bodies,
+        http_response_status_codes,
+        http_response_headers,
+        http_response_bodies,
+        record_dates,
+    ];
+    all_arrays.extend(promoted_arrays);
+
+    let record_batch = RecordBatch::try_new(arrow_schema, all_arrays)?;
 
     debug!(
         "Created Arrow RecordBatch with {} rows for spans",

@@ -132,13 +132,13 @@ LIMIT 3;
 
 ### S3/MinIO Connection
 ```sql
-SET s3_endpoint='localhost:9002';
+SET s3_endpoint='localhost:9000';
 SET s3_access_key_id='minioadmin';
 SET s3_secret_access_key='minioadmin';
 SET s3_use_ssl=false;
 SET s3_url_style='path';
 ```
-✅ Successfully connects to MinIO on port 9002
+✅ Successfully connects to MinIO on port 9000
 
 ### Iceberg Extension
 ```sql

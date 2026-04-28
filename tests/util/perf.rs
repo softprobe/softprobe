@@ -113,12 +113,8 @@ impl Timer {
         }
     }
 
-    pub fn elapsed(&self) -> std::time::Duration {
-        self.start.elapsed()
-    }
-
     pub fn stop(&self) -> std::time::Duration {
-        let duration = self.elapsed();
+        let duration = self.start.elapsed();
         println!("⏹️  Completed: {} in {:?}", self.operation, duration);
         duration
     }

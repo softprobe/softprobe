@@ -7,66 +7,9 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message;
 use reqwest::Client;
 use reqwest::StatusCode;
-use splake::api;
-use splake::config::Config;
-use splake::query;
-use splake::ingest_engine::IngestPipeline;
 use std::time::Duration;
-use tokio::net::TcpListener;
 
-async fn start_test_server() -> String {
-    let mut config = Config::default();
-    // Use REST catalog for integration tests
-    config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
-    config.iceberg.warehouse = "default".to_string();
-    config.iceberg.force_close_after_append = true; // Force immediate commits for tests
-    config.ingest_engine.optimizer_interval_seconds = 1;
-    config.s3.endpoint = Some("http://localhost:9002".to_string());
-    config.s3.access_key_id = Some("minioadmin".to_string());
-    config.s3.secret_access_key = Some("minioadmin".to_string());
-    config.storage.s3_region = "us-east-1".to_string();
-
-    // Ensure MinIO/S3 env for REST catalog (dev-compose defaults)
-    std::env::set_var("S3_ENDPOINT", "http://localhost:9002");
-    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
-    std::env::set_var("S3_SECRET_KEY", "minioadmin");
-    std::env::set_var("AWS_REGION", "us-east-1");
-
-    let pipeline = IngestPipeline::new(&config).await.unwrap();
-    let pipeline = std::sync::Arc::new(pipeline);
-    let query_engine = query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
-        .await
-        .unwrap();
-
-    // Create router
-    let app = api::create_router(
-        pipeline.storage.clone(),
-        query_engine,
-        Some(pipeline.storage.span_buffer.clone()),
-        Some(pipeline.storage.log_buffer.clone()),
-        Some(pipeline.storage.metric_buffer.clone()),
-    )
-    .await
-    .unwrap();
-
-    // Bind to a random available port
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{}", addr);
-
-    // Start the server in a background task
-    tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .await
-            .unwrap();
-    });
-
-    // Give the server a moment to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    base_url
-}
+use crate::util::http::start_test_server;
 
 fn create_test_metrics_request() -> ExportMetricsServiceRequest {
     use opentelemetry_proto::tonic::metrics::v1::number_data_point;
@@ -168,7 +111,7 @@ fn create_test_metrics_request() -> ExportMetricsServiceRequest {
 
 #[tokio::test]
 async fn test_metrics_ingestion_protobuf() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let request = create_test_metrics_request();
@@ -192,7 +135,7 @@ async fn test_metrics_ingestion_protobuf() {
 
 #[tokio::test]
 async fn test_metrics_ingestion_json() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     let request = create_test_metrics_request();
@@ -216,7 +159,7 @@ async fn test_metrics_ingestion_json() {
 
 #[tokio::test]
 async fn test_metrics_buffer_flush() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     // Send multiple metric requests
@@ -244,7 +187,7 @@ async fn test_metrics_buffer_flush() {
 
 #[tokio::test]
 async fn test_metrics_with_different_names() {
-    let base_url = start_test_server().await;
+    let (base_url, _cache_dir) = start_test_server().await;
     let client = Client::new();
 
     // Create metrics with different metric names to test grouping

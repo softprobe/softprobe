@@ -39,6 +39,7 @@ pub struct IngestEngine {
 pub struct IngestPipeline {
     pub storage: Storage,
     ingest_engine: Arc<IngestEngine>,
+    cache_dir: Option<PathBuf>,
 }
 
 impl IngestEngine {
@@ -306,6 +307,7 @@ impl IngestPipeline {
         let ingest_engine = Arc::new(IngestEngine::new(config).await?);
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
         let replay_cache_dir = cache_dir.clone();
+        let optimizer_cache_dir = cache_dir.clone();
 
         let span_buffer = create_span_buffer(
             config,
@@ -331,7 +333,7 @@ impl IngestPipeline {
             span_buffer,
             log_buffer,
             metric_buffer,
-            cache_dir,
+            cache_dir.clone(),
         );
 
         if config.ingest_engine.replay_wal_on_startup {
@@ -346,11 +348,13 @@ impl IngestPipeline {
             ingest_engine.log_queue(),
             ingest_engine.metric_queue(),
             config.ingest_engine.optimizer_interval_seconds,
+            optimizer_cache_dir,
         );
 
         Ok(Self {
             storage,
             ingest_engine,
+            cache_dir,
         })
     }
 
@@ -447,6 +451,7 @@ impl IngestPipeline {
             self.ingest_engine.span_queue(),
             self.ingest_engine.log_queue(),
             self.ingest_engine.metric_queue(),
+            self.cache_dir.as_deref(),
         )
         .await
     }
@@ -466,6 +471,7 @@ fn start_optimizer_task(
     log_queue: Arc<FlushQueue>,
     metric_queue: Arc<FlushQueue>,
     interval_seconds: u64,
+    cache_dir: Option<PathBuf>,
 ) {
     tokio::spawn(async move {
         let mut ticker =
@@ -477,6 +483,7 @@ fn start_optimizer_task(
                 span_queue.clone(),
                 log_queue.clone(),
                 metric_queue.clone(),
+                cache_dir.as_deref(),
             )
             .await
             {
@@ -491,16 +498,18 @@ async fn optimize_once(
     span_queue: Arc<FlushQueue>,
     log_queue: Arc<FlushQueue>,
     metric_queue: Arc<FlushQueue>,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
-    optimize_spans(iceberg_writer.clone(), span_queue).await?;
-    optimize_logs(iceberg_writer.clone(), log_queue).await?;
-    optimize_metrics(iceberg_writer, metric_queue).await?;
+    optimize_spans(iceberg_writer.clone(), span_queue, cache_dir).await?;
+    optimize_logs(iceberg_writer.clone(), log_queue, cache_dir).await?;
+    optimize_metrics(iceberg_writer, metric_queue, cache_dir).await?;
     Ok(())
 }
 
 async fn optimize_spans(
     iceberg_writer: Arc<IcebergWriter>,
     queue: Arc<FlushQueue>,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
     let staged = queue.drain().await;
     if staged.is_empty() {
@@ -526,7 +535,7 @@ async fn optimize_spans(
             return Err(err);
         }
 
-        cleanup_cache(items).await;
+        cleanup_cache("spans", cache_dir, items).await;
     }
     Ok(())
 }
@@ -534,6 +543,7 @@ async fn optimize_spans(
 async fn optimize_logs(
     iceberg_writer: Arc<IcebergWriter>,
     queue: Arc<FlushQueue>,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
     let staged = queue.drain().await;
     if staged.is_empty() {
@@ -559,7 +569,7 @@ async fn optimize_logs(
             return Err(err);
         }
 
-        cleanup_cache(items).await;
+        cleanup_cache("logs", cache_dir, items).await;
     }
     Ok(())
 }
@@ -567,6 +577,7 @@ async fn optimize_logs(
 async fn optimize_metrics(
     iceberg_writer: Arc<IcebergWriter>,
     queue: Arc<FlushQueue>,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
     let staged = queue.drain().await;
     if staged.is_empty() {
@@ -592,7 +603,7 @@ async fn optimize_metrics(
             return Err(err);
         }
 
-        cleanup_cache(items).await;
+        cleanup_cache("metrics", cache_dir, items).await;
     }
     Ok(())
 }
@@ -761,7 +772,14 @@ fn record_batch_partition_date(batch: &RecordBatch) -> Result<NaiveDate> {
     if num_columns == 0 {
         return Err(anyhow::anyhow!("record batch has no columns"));
     }
-    let record_date_col = batch.column(num_columns - 1);
+    // Find record_date column by name (not by position, since promoted columns may come after it)
+    let record_date_idx = batch
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name() == "record_date")
+        .ok_or_else(|| anyhow::anyhow!("record_date column not found in schema"))?;
+    let record_date_col = batch.column(record_date_idx);
     let date_array = record_date_col.as_primitive::<Date32Type>();
     if date_array.is_empty() {
         return Err(anyhow::anyhow!("record batch has no rows"));
@@ -782,11 +800,23 @@ fn group_by_date(
     grouped
 }
 
-async fn cleanup_cache(items: Vec<StagedBatch>) {
+async fn cleanup_cache(kind: &str, cache_dir: Option<&Path>, items: Vec<StagedBatch>) {
     for item in items {
         if let Some(path) = item.cache_path {
             if let Err(err) = tokio::fs::remove_file(&path).await {
                 warn!("Failed to remove staged cache file {:?}: {}", path, err);
+            }
+        }
+    }
+    
+    // Update watermark so query engine refreshes the staged view
+    if let Some(cache_dir) = cache_dir {
+        let marker_dir = cache_dir.join("staged_watermarks");
+        let marker_path = marker_dir.join(format!("{kind}.txt"));
+        let marker_tmp = marker_dir.join(format!("{kind}.txt.tmp"));
+        if std::fs::create_dir_all(&marker_dir).is_ok() {
+            if std::fs::write(&marker_tmp, chrono::Utc::now().to_rfc3339()).is_ok() {
+                let _ = std::fs::rename(&marker_tmp, &marker_path);
             }
         }
     }

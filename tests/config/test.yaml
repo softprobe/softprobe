@@ -33,7 +33,7 @@ duckdb:
   spill_directory: /tmp/duckdb_spill
 
 s3:
-  endpoint: http://localhost:9002
+  endpoint: http://localhost:9000
   access_key_id: minioadmin
   secret_access_key: minioadmin
 

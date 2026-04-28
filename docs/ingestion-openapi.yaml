@@ -1,0 +1,179 @@
+openapi: 3.1.0
+info:
+  title: Datalake Ingestion API
+  version: 0.1.0
+  description: |
+    OTLP-compatible ingestion API exposed by the Datalake service.
+
+    This API accepts telemetry payloads on standard OTLP HTTP paths:
+    - `POST /v1/traces`
+    - `POST /v1/logs`
+    - `POST /v1/metrics`
+
+    For JSON payloads, requests are expected to follow the OpenTelemetry collector export
+    request shapes (`ExportTraceServiceRequest`, `ExportLogsServiceRequest`, and
+    `ExportMetricsServiceRequest`).
+
+    For protobuf payloads, send binary OTLP with `Content-Type: application/x-protobuf`.
+
+    Content type behavior mirrors implementation:
+    - Any `Content-Type` containing `protobuf` is treated as protobuf.
+    - All other content types (including missing header) are treated as JSON.
+servers:
+  - url: http://localhost:8090
+    description: Local endpoint from default `config.yaml`
+tags:
+  - name: ingestion
+    description: OTLP ingestion endpoints
+paths:
+  /v1/traces:
+    post:
+      tags:
+        - ingestion
+      summary: Ingest OTLP traces
+      operationId: ingestTraces
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportTraceServiceRequest"
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+              description: Protobuf-encoded `ExportTraceServiceRequest`
+      responses:
+        "200":
+          description: Request accepted and processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid JSON/protobuf payload
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+              examples:
+                invalidJson:
+                  value: Invalid JSON
+                invalidProtobuf:
+                  value: Protobuf decode failed
+  /v1/logs:
+    post:
+      tags:
+        - ingestion
+      summary: Ingest OTLP logs
+      operationId: ingestLogs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportLogsServiceRequest"
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+              description: Protobuf-encoded `ExportLogsServiceRequest`
+      responses:
+        "200":
+          description: Request accepted and processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid JSON/protobuf payload
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+              examples:
+                invalidJson:
+                  value: "Invalid JSON: expected value at line 1 column 1"
+                invalidProtobuf:
+                  value: Protobuf decode failed
+  /v1/metrics:
+    post:
+      tags:
+        - ingestion
+      summary: Ingest OTLP metrics
+      operationId: ingestMetrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportMetricsServiceRequest"
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+              description: Protobuf-encoded `ExportMetricsServiceRequest`
+      responses:
+        "200":
+          description: Request accepted and processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid JSON/protobuf payload
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+              examples:
+                invalidJson:
+                  value: Invalid JSON
+                invalidProtobuf:
+                  value: Invalid protobuf
+components:
+  schemas:
+    IngestResponse:
+      type: object
+      required:
+        - success
+        - ingested_count
+        - message
+      properties:
+        success:
+          type: boolean
+          description: True when ingestion processing succeeded.
+        ingested_count:
+          type: integer
+          minimum: 0
+          description: Number of telemetry records successfully ingested.
+        message:
+          type: string
+          description: Human-readable result details.
+      examples:
+        traces:
+          value:
+            success: true
+            ingested_count: 128
+            message: Successfully ingested 128 spans
+    ErrorMessage:
+      type: string
+      description: Plain-text error body returned for malformed requests.
+    ExportTraceServiceRequest:
+      type: object
+      description: |
+        OTLP trace export request (JSON mapping).
+        See OpenTelemetry protocol spec for the canonical schema.
+      additionalProperties: true
+    ExportLogsServiceRequest:
+      type: object
+      description: |
+        OTLP logs export request (JSON mapping).
+        See OpenTelemetry protocol spec for the canonical schema.
+      additionalProperties: true
+    ExportMetricsServiceRequest:
+      type: object
+      description: |
+        OTLP metrics export request (JSON mapping).
+        See OpenTelemetry protocol spec for the canonical schema.
+      additionalProperties: true

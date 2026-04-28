@@ -39,7 +39,7 @@ async function handleRequest(req, res) {
       span.setAttribute('http.request.path', '/api/orders');
 
       // Business attributes for search (sp.* convention)
-      span.setAttribute('sp.user.id', req.body.userId);
+      span.setAttribute('sp.user.id', req.body.user.id);
       span.setAttribute('sp.order.id', orderResult.orderId);
       span.setAttribute('sp.tenant.id', req.headers['x-tenant-id']);
 
@@ -89,7 +89,7 @@ def handle_request(request):
         span.set_attribute("http.request.path", "/api/orders")
 
         # Business attributes for search (sp.* convention)
-        span.set_attribute("sp.user.id", request.json["userId"])
+        span.set_attribute("sp.user.id", request.json["user.id"])
         span.set_attribute("sp.tenant.id", request.headers.get("X-Tenant-Id"))
 
         try:
@@ -142,7 +142,7 @@ public class OrderController {
             span.setAttribute("http.request.path", "/api/orders");
 
             // Business attributes for search (sp.* convention)
-            span.setAttribute("sp.user.id", request.getUserId());
+            span.setAttribute("sp.user.id", request.getuser.id());
             span.setAttribute("sp.tenant.id", headers.getFirst("X-Tenant-Id"));
 
             // Process request
@@ -240,7 +240,7 @@ Your instrumentation data is stored in the `traces` Iceberg table with this stru
 | Column | Source | Example |
 |--------|--------|---------|
 | `http_request_headers` | `http.request` event attribute `http.request.headers` | `{"Content-Type":"application/json"}` |
-| `http_request_body` | `http.request` event attribute `http.request.body` | `{"userId":"user-123","items":[...]}` |
+| `http_request_body` | `http.request` event attribute `http.request.body` | `{"user.id":"user-123","items":[...]}` |
 | `http_response_headers` | `http.response` event attribute `http.response.headers` | `{"Content-Type":"application/json"}` |
 | `http_response_body` | `http.response` event attribute `http.response.body` | `{"orderId":"ORD-456","status":"created"}` |
 
@@ -253,14 +253,50 @@ Your instrumentation data is stored in the `traces` Iceberg table with this stru
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
 | `attributes` | All span attributes (MAP) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
+## Schema Promotion (Optional)
+
+To enable direct SQL queries without MAP lookups, you can promote frequently-used attributes to top-level columns. Configure this in your `config.yaml`:
+
+```yaml
+schema_promotion:
+  traces:
+    attributes:
+      - attribute_key: "sp.user.id"
+        column_name: "user_id"  # Optional: customize column name
+        data_type: String       # Optional: auto-detect if not specified
+      - attribute_key: "sp.order.id"
+        column_name: "order_id"
+```
+
+After configuring promotion and recreating tables, you can query directly:
+
+```sql
+-- Using promoted column (simpler, potentially faster)
+SELECT session_id, trace_id
+FROM traces
+WHERE user_id = 'user-123'
+ORDER BY timestamp DESC;
+```
+
+See [Schema Promotion Configuration](../docs/design.md#53-schema-promotion) in the design documentation for full details.
+
 ## Querying Your Data
 
 ### Find Sessions by User ID
 
+**Using MAP lookup** (works with or without promotion):
 ```sql
 SELECT session_id, trace_id, span_id, timestamp, http_request_path
 FROM traces
 WHERE attributes['sp.user.id'] = 'user-123'
+ORDER BY timestamp DESC;
+```
+
+**Using promoted column** (if configured):
+```sql
+SELECT session_id, trace_id, span_id, timestamp, http_request_path
+FROM traces
+WHERE user_id = 'user-123'
 ORDER BY timestamp DESC;
 ```
 
@@ -329,7 +365,7 @@ HTTP bodies are stored as STRING columns compressed with ZSTD level 3, providing
 span.addEvent('http.request', {
   'http.request.body': JSON.stringify(body)
 });
-span.setAttribute('sp.user.id', body.userId);
+span.setAttribute('sp.user.id', body.user.id);
 
 // ❌ BAD: Bodies in attributes (hits 128 attribute limit)
 span.setAttribute('http.request.body', JSON.stringify(body));
@@ -339,12 +375,12 @@ span.setAttribute('http.request.body', JSON.stringify(body));
 
 ```javascript
 // ✅ GOOD: Consistent naming across services
-span.setAttribute('sp.user.id', userId);
+span.setAttribute('sp.user.id', user.id);
 span.setAttribute('sp.order.id', orderId);
 
 // ❌ BAD: Inconsistent naming
-span.setAttribute('sp.userId', userId); // different service
-span.setAttribute('sp.user_id', userId); // another service
+span.setAttribute('sp.user.id', user.id); // different service
+span.setAttribute('sp.user_id', user.id); // another service
 ```
 
 ### 3. Avoid Storing Secrets

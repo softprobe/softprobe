@@ -319,14 +319,19 @@ impl TableWriter {
 }
 
 /// Extract partition value from RecordBatch
-/// Assumes record_date is the last column (as per our table schemas)
+/// Finds record_date column by name (not by position, since promoted columns may come after it)
 fn extract_partition_value(batch: &RecordBatch) -> Result<Struct> {
     use arrow::array::AsArray;
     use arrow::datatypes::Date32Type;
 
-    // Get the record_date column (last column in schema)
-    let num_columns = batch.num_columns();
-    let record_date_col = batch.column(num_columns - 1);
+    // Find record_date column by name (not by position, since promoted columns may come after it)
+    let record_date_idx = batch
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name() == "record_date")
+        .ok_or_else(|| anyhow::anyhow!("record_date column not found in schema"))?;
+    let record_date_col = batch.column(record_date_idx);
 
     // Extract first value from Date32Array
     let date_array = record_date_col.as_primitive::<Date32Type>();

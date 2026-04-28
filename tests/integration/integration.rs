@@ -7,9 +7,8 @@ use reqwest::Client;
 use reqwest::StatusCode;
 use serde_json;
 use uuid::Uuid;
-mod util;
-use util::http::start_test_server;
-use util::otlp::create_test_otlp_request;
+use crate::util::http::start_test_server;
+use crate::util::otlp::create_test_otlp_request;
 
 // Note: `create_test_otlp_request` and `start_test_server` live under `tests/util/`.
 
