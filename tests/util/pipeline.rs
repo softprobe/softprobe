@@ -3,6 +3,7 @@ use splake::query::{self, QueryEngine};
 use splake::ingest_engine::IngestPipeline;
 use std::sync::Arc;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 pub struct TestPipeline {
     pub config: Config,
@@ -17,6 +18,24 @@ impl TestPipeline {
         config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
         config.ingest_engine.wal_dir =
             Some(cache_dir.path().join("wal").to_string_lossy().to_string());
+        // Avoid background optimizer races in integration tests that assert staged-file state.
+        config.ingest_engine.optimizer_interval_seconds = 3600;
+        if config.ducklake.is_none() {
+            config.ducklake = Some(config.ducklake_or_default());
+        }
+        if let Some(ducklake) = config.ducklake.as_mut() {
+            let dl_dir = cache_dir.path().join("ducklake");
+            std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
+            ducklake.metadata_path = dl_dir
+                .join(format!("metadata-{}.ducklake", Uuid::new_v4()))
+                .to_string_lossy()
+                .to_string();
+            ducklake.data_path = dl_dir
+                .join("data")
+                .to_string_lossy()
+                .to_string();
+            std::fs::create_dir_all(&ducklake.data_path).expect("ducklake data dir");
+        }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
         
         // Pass tiered storage to query engine so it can access buffer snapshots

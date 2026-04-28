@@ -12,6 +12,8 @@ pub struct Config {
     pub s3: S3Config,
     pub iceberg: IcebergConfig,
     #[serde(default)]
+    pub ducklake: Option<DuckLakeConfig>,
+    #[serde(default)]
     pub schema_promotion: Option<SchemaPromotionConfig>,
 }
 
@@ -110,6 +112,22 @@ pub struct IcebergConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuckLakeConfig {
+    #[serde(default = "default_ducklake_catalog_type")]
+    pub catalog_type: String, // duckdb, postgres, sqlite
+    #[serde(default = "default_ducklake_metadata_path")]
+    pub metadata_path: String,
+    #[serde(default = "default_ducklake_data_path")]
+    pub data_path: String,
+    #[serde(default = "default_ducklake_catalog_alias")]
+    pub catalog_alias: String,
+    #[serde(default = "default_ducklake_metadata_schema")]
+    pub metadata_schema: String,
+    #[serde(default)]
+    pub data_inlining_row_limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaPromotionConfig {
     #[serde(default)]
     pub traces: Option<TablePromotionConfig>,
@@ -155,6 +173,26 @@ fn default_warehouse() -> String {
 
 fn default_iceberg_namespace() -> String {
     "default".to_string()
+}
+
+fn default_ducklake_catalog_type() -> String {
+    "duckdb".to_string()
+}
+
+fn default_ducklake_metadata_path() -> String {
+    "./warehouse/ducklake/metadata.ducklake".to_string()
+}
+
+fn default_ducklake_data_path() -> String {
+    "./warehouse/ducklake/data/".to_string()
+}
+
+fn default_ducklake_catalog_alias() -> String {
+    "softprobe".to_string()
+}
+
+fn default_ducklake_metadata_schema() -> String {
+    "main".to_string()
 }
 
 fn default_metadata_maintenance_enabled() -> bool {
@@ -277,12 +315,31 @@ impl Default for Config {
                 write_page_size_bytes: 1024 * 1024,             // 1MB
                 force_close_after_append: false,
             },
+            ducklake: Some(DuckLakeConfig {
+                catalog_type: default_ducklake_catalog_type(),
+                metadata_path: default_ducklake_metadata_path(),
+                data_path: default_ducklake_data_path(),
+                catalog_alias: default_ducklake_catalog_alias(),
+                metadata_schema: default_ducklake_metadata_schema(),
+                data_inlining_row_limit: Some(0),
+            }),
             schema_promotion: None,
         }
     }
 }
 
 impl Config {
+    pub fn ducklake_or_default(&self) -> DuckLakeConfig {
+        self.ducklake.clone().unwrap_or(DuckLakeConfig {
+            catalog_type: default_ducklake_catalog_type(),
+            metadata_path: default_ducklake_metadata_path(),
+            data_path: default_ducklake_data_path(),
+            catalog_alias: default_ducklake_catalog_alias(),
+            metadata_schema: default_ducklake_metadata_schema(),
+            data_inlining_row_limit: Some(0),
+        })
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         // Load from environment variables or config file
         // Priority: environment > config file > defaults

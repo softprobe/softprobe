@@ -209,7 +209,16 @@ impl DuckDBCore {
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch("INSTALL httpfs;")?;
+        // Keep iceberg installed for backward-compatible fallback paths.
         conn.execute_batch("INSTALL iceberg;")?;
+        // DuckLake is the primary committed storage path.
+        conn.execute_batch("INSTALL ducklake;")?;
+        if self.ducklake_config().catalog_type == "postgres" {
+            conn.execute_batch("INSTALL postgres;")?;
+        }
+        if self.ducklake_config().catalog_type == "sqlite" {
+            conn.execute_batch("INSTALL sqlite;")?;
+        }
         Ok(())
     }
 
@@ -584,7 +593,7 @@ impl DuckDBCore {
     }
 
     fn use_attached_catalog(&self) -> bool {
-        self.config.iceberg.catalog_type == "rest"
+        self.config.ducklake.is_some() || self.config.iceberg.catalog_type == "rest"
     }
 
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
@@ -596,35 +605,88 @@ impl DuckDBCore {
             return Ok(());
         }
 
-        let endpoint = escape_sql_literal(&self.config.iceberg.catalog_uri);
-        let warehouse = escape_sql_literal(&self.config.iceberg.warehouse);
-        let mut options = vec![
-            "TYPE ICEBERG".to_string(),
-            format!("ENDPOINT '{}'", endpoint),
-        ];
-        if let Some(token) = self.config.iceberg.catalog_token.as_ref() {
-            options.push(format!("TOKEN '{}'", escape_sql_literal(token)));
+        let sql = if self.config.ducklake.is_some() {
+            let ducklake = self.ducklake_config();
+            let attach_target = match ducklake.catalog_type.as_str() {
+                "postgres" => {
+                    if ducklake.metadata_path.starts_with("postgres:") {
+                        ducklake.metadata_path.clone()
+                    } else {
+                        format!("postgres:{}", ducklake.metadata_path)
+                    }
+                }
+                "sqlite" => {
+                    if ducklake.metadata_path.starts_with("sqlite:") {
+                        ducklake.metadata_path.clone()
+                    } else {
+                        format!("sqlite:{}", ducklake.metadata_path)
+                    }
+                }
+                _ => ducklake.metadata_path.clone(),
+            };
+            self.prepare_local_ducklake_paths(&ducklake, &attach_target)?;
+            let mut options = vec![format!("DATA_PATH '{}'", escape_sql_literal(&ducklake.data_path))];
+            if let Some(limit) = ducklake.data_inlining_row_limit {
+                options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
+            }
+            format!(
+                "ATTACH 'ducklake:{}' AS {} ({});",
+                escape_sql_literal(&attach_target),
+                ducklake.catalog_alias,
+                options.join(", ")
+            )
         } else {
-            options.push("AUTHORIZATION_TYPE 'none'".to_string());
-        }
-
-        let sql = format!(
-            "ATTACH '{}' AS {} ({});",
-            warehouse,
-            CATALOG_ALIAS,
-            options.join(", ")
-        );
+            let endpoint = escape_sql_literal(&self.config.iceberg.catalog_uri);
+            let warehouse = escape_sql_literal(&self.config.iceberg.warehouse);
+            let mut options = vec![
+                "TYPE ICEBERG".to_string(),
+                format!("ENDPOINT '{}'", endpoint),
+            ];
+            if let Some(token) = self.config.iceberg.catalog_token.as_ref() {
+                options.push(format!("TOKEN '{}'", escape_sql_literal(token)));
+            } else {
+                options.push("AUTHORIZATION_TYPE 'none'".to_string());
+            }
+            format!(
+                "ATTACH '{}' AS {} ({});",
+                warehouse,
+                CATALOG_ALIAS,
+                options.join(", ")
+            )
+        };
         match conn.execute_batch(&sql) {
             Ok(()) => Ok(()),
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("already exists") {
+                if message.contains("already exists") || message.contains("already attached") {
                     Ok(())
                 } else {
                     Err(anyhow!("DuckDB ATTACH failed: {}", err))
                 }
             }
         }
+    }
+
+    fn prepare_local_ducklake_paths(
+        &self,
+        ducklake: &crate::config::DuckLakeConfig,
+        attach_target: &str,
+    ) -> Result<()> {
+        if ducklake.catalog_type == "duckdb" || ducklake.catalog_type == "sqlite" {
+            let raw = attach_target
+                .strip_prefix("sqlite:")
+                .unwrap_or(attach_target)
+                .strip_prefix("duckdb:")
+                .unwrap_or(attach_target);
+            let metadata_path = std::path::PathBuf::from(raw);
+            if let Some(parent) = metadata_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !ducklake.data_path.contains("://") {
+                std::fs::create_dir_all(&ducklake.data_path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Resolve the iceberg source for a given kind and table name.
@@ -636,6 +698,10 @@ impl DuckDBCore {
     ) -> Result<(IcebergSource, String)> {
         // Check if we've already resolved this source for this kind.
         if let Some(source) = state.iceberg_sources.get(kind_key) {
+            if matches!(source, IcebergSource::Stub(_)) {
+                // Re-resolve stub sources so we can switch to committed catalog tables
+                // after the first optimizer commit.
+            } else {
             if let IcebergSource::Pinned { .. } = source {
                 if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
                     // If we have pinned metadata, use it.
@@ -654,6 +720,7 @@ impl DuckDBCore {
             // Otherwise, use the signature of the source.
             let signature = self.iceberg_source_signature(source, table_name)?;
             return Ok((source.clone(), signature));
+            }
         }
 
         if let Ok(stub_path) = std::env::var("DUCKDB_TEST_ICEBERG_FALLBACK_PATH") {
@@ -690,7 +757,7 @@ impl DuckDBCore {
         if self.use_attached_catalog() {
             let signature = format!(
                 "catalog:{}:{}",
-                self.config.iceberg.namespace.as_str(),
+                self.catalog_schema().as_str(),
                 table_name
             );
             return Ok((IcebergSource::Catalog, signature));
@@ -712,7 +779,7 @@ impl DuckDBCore {
             }
             IcebergSource::Catalog => Ok(format!(
                 "catalog:{}:{}",
-                self.config.iceberg.namespace.as_str(),
+                self.catalog_schema().as_str(),
                 table_name
             )),
             IcebergSource::ScanUri(uri) => Ok(format!("scan_uri:{}", uri)),
@@ -950,21 +1017,45 @@ impl DuckDBCore {
             },
             IcebergSource::Catalog => {
                 self.attach_catalog_if_needed(conn)?;
+                let alias = self.catalog_alias();
+                let schema = self.catalog_schema();
                 let iceberg_view = format!(
                     "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM {alias}.{ns}.{table};",
                     kind = kind,
-                    alias = CATALOG_ALIAS,
-                    ns = self.config.iceberg.namespace.as_str(),
+                    alias = alias,
+                    ns = schema,
                     table = table_name,
                 );
                 match conn.execute_batch(&iceberg_view) {
                     Ok(()) => Ok(source.clone()),
                     Err(err) => {
                         let error_msg = err.to_string();
+                        let alt_view = format!(
+                            "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM {alias}.{table};",
+                            kind = kind,
+                            alias = alias,
+                            table = table_name,
+                        );
+                        if conn.execute_batch(&alt_view).is_ok() {
+                            return Ok(source.clone());
+                        }
                         // Provide helpful error message if table doesn't exist
                         if error_msg.contains("does not exist") || 
                            error_msg.contains("Catalog") ||
                            (error_msg.contains("Table") && error_msg.contains("not found")) {
+                            // Before the first optimizer commit, DuckLake tables might not exist yet.
+                            // Build an empty committed view with the staged schema to keep union-read working.
+                            let staged_files = self.staged_files(kind);
+                            if let Some(first_file) = staged_files.first() {
+                                let empty_view = format!(
+                                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
+                                     SELECT * FROM read_parquet('{path}') WHERE 1=0;",
+                                    kind = kind,
+                                    path = escape_sql_literal(first_file),
+                                );
+                                conn.execute_batch(&empty_view)?;
+                                return Ok(IcebergSource::Stub(first_file.clone()));
+                            }
                             Err(anyhow!(
                                 "Iceberg table '{}.{}.{}' does not exist in catalog. \
                                  This usually means:\n\
@@ -977,7 +1068,7 @@ impl DuckDBCore {
                                  \n\
                                  Original error: {}",
                                 CATALOG_ALIAS,
-                                self.config.iceberg.namespace.as_str(),
+                                self.catalog_schema().as_str(),
                                 table_name,
                                 error_msg
                             ))
@@ -1110,6 +1201,26 @@ impl DuckDBCore {
         } else {
             let bucket = self.config.ingest_engine.wal_bucket.trim_end_matches('/');
             format!("s3://{}/{}/{}", bucket, warehouse, table)
+        }
+    }
+
+    fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
+        self.config.ducklake_or_default()
+    }
+
+    fn catalog_alias(&self) -> String {
+        if self.config.ducklake.is_some() {
+            self.ducklake_config().catalog_alias
+        } else {
+            CATALOG_ALIAS.to_string()
+        }
+    }
+
+    fn catalog_schema(&self) -> String {
+        if self.config.ducklake.is_some() {
+            self.ducklake_config().metadata_schema
+        } else {
+            self.config.iceberg.namespace.clone()
         }
     }
 }

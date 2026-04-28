@@ -47,3 +47,11 @@ iceberg:
   write_row_group_size_bytes: 134217728  # 128MB
   write_page_size_bytes: 1048576  # 1MB
   force_close_after_append: false
+
+ducklake:
+  catalog_type: "duckdb"
+  metadata_path: "./warehouse/ducklake/metadata.ducklake"
+  data_path: "./warehouse/ducklake/data/"
+  catalog_alias: "softprobe"
+  metadata_schema: "main"
+  data_inlining_row_limit: 0

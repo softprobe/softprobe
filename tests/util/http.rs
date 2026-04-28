@@ -4,6 +4,7 @@ use splake::ingest_engine::IngestPipeline;
 use splake::query;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use uuid::Uuid;
 
 pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
@@ -26,6 +27,19 @@ pub async fn start_test_server() -> (String, TempDir) {
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     config.ingest_engine.wal_dir =
         Some(cache_dir.path().join("wal").to_string_lossy().to_string());
+    if config.ducklake.is_none() {
+        config.ducklake = Some(config.ducklake_or_default());
+    }
+    if let Some(ducklake) = config.ducklake.as_mut() {
+        let dl_dir = cache_dir.path().join("ducklake");
+        std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
+        ducklake.metadata_path = dl_dir
+            .join(format!("metadata-{}.ducklake", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        ducklake.data_path = dl_dir.join("data").to_string_lossy().to_string();
+        std::fs::create_dir_all(&ducklake.data_path).expect("ducklake data dir");
+    }
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
     let query_engine =

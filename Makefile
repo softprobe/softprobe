@@ -14,7 +14,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local setup-minio teardown-minio check-minio clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
 # Default target
 help:
@@ -157,10 +157,33 @@ teardown-local:
 	@docker-compose down
 	@echo "✅ Local infrastructure stopped"
 
+setup-minio:
+	@echo "🚀 Starting MinIO for DuckLake stress testing..."
+	@docker-compose up -d minio
+	@echo "⏳ Waiting for MinIO health..."
+	@sleep 3
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
+	@echo "🪣 Creating MinIO bucket 'warehouse'..."
+	@docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin > /dev/null 2>&1 || true
+	@docker exec minio mc mb local/warehouse > /dev/null 2>&1 || \
+		(docker exec minio mc ls local/warehouse > /dev/null 2>&1 && echo "✅ Bucket 'warehouse' already exists") || \
+		(echo "❌ Failed to create or verify bucket 'warehouse'" && exit 1)
+	@echo "✅ MinIO is ready for stress testing"
+
+teardown-minio:
+	@echo "🛑 Stopping MinIO stress-test infrastructure..."
+	@docker-compose stop minio > /dev/null 2>&1 || true
+	@docker-compose rm -f minio > /dev/null 2>&1 || true
+	@echo "✅ MinIO infrastructure stopped"
+
+check-minio:
+	@echo "🔍 Checking MinIO..."
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-minio')" && exit 1)
+
 check-local:
 	@echo "🔍 Checking local infrastructure..."
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || echo "❌ MinIO is not running (run 'make setup-local')"
-	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 && echo "✅ Lakekeeper REST is running" || echo "❌ Lakekeeper REST is not running (run 'make setup-local')"
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-local')" && exit 1)
+	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 && echo "✅ Lakekeeper REST is running" || (echo "❌ Lakekeeper REST is not running (run 'make setup-local')" && exit 1)
 
 # Test targets
 test-quick:
@@ -303,9 +326,26 @@ test-deployment-stress: check-local
 	fi
 	@python3 test_deployment.py --env local --span-count 20000
 
-stress-test: setup-local
-	@echo "🧪 Stress testing local deployment via `perf_stress`..."
-	@CONFIG_FILE=config.yaml \
-		cargo run --bin perf_stress -- \
-		--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500
-	@$(MAKE) teardown-local
+stress-test: setup-minio
+	@echo "🧪 Stress testing local deployment via perf_stress..."
+	@set -e; \
+		PORT=38090; \
+		TMP_CONFIG=/tmp/splake-stress.yaml; \
+		sed "s/port: 8090/port: $$PORT/" config.yaml > $$TMP_CONFIG; \
+		echo "🚀 Starting splake on port $$PORT..."; \
+		CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-stress.log 2>&1 & \
+		SPLAKE_PID=$$!; \
+		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; $(MAKE) teardown-minio >/dev/null 2>&1 || true' EXIT; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-stress.log; exit 1); \
+		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
+		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
+		trap - EXIT
+	@$(MAKE) teardown-minio

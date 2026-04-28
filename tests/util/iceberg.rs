@@ -4,7 +4,9 @@ pub fn load_test_config() -> Config {
     if let Ok(config_file) = std::env::var("CONFIG_FILE") {
         if std::path::Path::new(&config_file).exists() {
             println!("Loading test config from CONFIG_FILE: {}", config_file);
-            return Config::load().expect("Failed to load config");
+            let mut config = Config::load().expect("Failed to load config");
+            assign_unique_ducklake_paths(&mut config);
+            return config;
         }
     }
     let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
@@ -16,7 +18,25 @@ pub fn load_test_config() -> Config {
 
     println!("Loading test config from: {}", config_file);
     std::env::set_var("CONFIG_FILE", config_file);
-    Config::load().expect("Failed to load test config")
+    let mut config = Config::load().expect("Failed to load test config");
+    assign_unique_ducklake_paths(&mut config);
+    config
+}
+
+fn assign_unique_ducklake_paths(config: &mut Config) {
+    if config.ducklake.is_none() {
+        config.ducklake = Some(config.ducklake_or_default());
+    }
+    if let Some(ducklake) = config.ducklake.as_mut() {
+        let base = std::env::temp_dir().join(format!("splake-tests-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&base);
+        ducklake.metadata_path = base
+            .join("metadata.ducklake")
+            .to_string_lossy()
+            .to_string();
+        ducklake.data_path = base.join("data").to_string_lossy().to_string();
+        let _ = std::fs::create_dir_all(&ducklake.data_path);
+    }
 }
 
 pub fn ensure_wal_bucket(config: &mut Config) {

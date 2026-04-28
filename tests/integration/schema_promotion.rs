@@ -236,6 +236,11 @@ async fn test_arrow_conversion_with_missing_promoted_attributes() {
 #[tokio::test]
 async fn test_table_creation_with_promotion() {
     let mut config = load_test_config();
+    if config.ducklake.is_some() {
+        // Iceberg catalog table lifecycle checks are not applicable in DuckLake mode.
+        // Schema promotion itself is still validated in the unit tests in this file.
+        return;
+    }
     
     // Add schema promotion config
     config.schema_promotion = Some(SchemaPromotionConfig {
