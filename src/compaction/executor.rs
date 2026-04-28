@@ -461,7 +461,7 @@ impl MaintenanceExecutor {
         table: &str,
     ) -> Result<CompactionStatus> {
         // DuckLake expects size literals with units for this option.
-        let target_file_size = format!("{}B", self.config.compaction.target_file_size_bytes);
+        let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
             ducklake.catalog_alias,
@@ -885,4 +885,19 @@ fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {
         count += 1;
     }
     Ok(count)
+}
+
+fn size_literal(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+    if bytes >= GB && bytes.is_multiple_of(GB) {
+        format!("{}GB", bytes / GB)
+    } else if bytes >= MB && bytes.is_multiple_of(MB) {
+        format!("{}MB", bytes / MB)
+    } else if bytes >= KB && bytes.is_multiple_of(KB) {
+        format!("{}KB", bytes / KB)
+    } else {
+        format!("{}B", bytes)
+    }
 }

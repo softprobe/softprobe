@@ -10,7 +10,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct DuckLakeWriter {
     config: Config,
@@ -35,6 +35,13 @@ impl DuckLakeWriter {
         let conn = self.open_connection()?;
         self.attach_ducklake(&conn)?;
         self.ensure_schema(&conn)?;
+        if std::env::var("SPLAKE_RESET_DUCKLAKE")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            self.reset_tables_for_dev(&conn)?;
+        }
         Ok(())
     }
 
@@ -147,14 +154,16 @@ impl DuckLakeWriter {
                 path = escaped_path
             );
             let insert = format!(
-                "INSERT INTO {table} SELECT * FROM read_parquet('{path}');",
+                "INSERT INTO {table} SELECT * FROM read_parquet('{path}') {order_clause};",
                 table = qualified_table,
-                path = escaped_path
+                path = escaped_path,
+                order_clause = self.insert_order_clause(table_name),
             );
             conn.execute_batch("BEGIN TRANSACTION;")?;
             match conn.execute_batch(&ddl).and_then(|_| conn.execute_batch(&insert)) {
                 Ok(_) => {
                     conn.execute_batch("COMMIT;")?;
+                    self.apply_table_options(&conn, table_name);
                     wrote = true;
                     break;
                 }
@@ -344,8 +353,69 @@ impl DuckLakeWriter {
         std::fs::write(pointer_path, payload.to_string())?;
         Ok(())
     }
+
+    fn apply_table_options(&self, conn: &Connection, table_name: &str) {
+        let stmts = [
+            format!(
+                "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
+                self.ducklake.catalog_alias,
+                size_literal(self.config.compaction.target_file_size_bytes),
+                table_name
+            ),
+            format!(
+                "CALL {}.set_option('hive_file_pattern', 'true', table_name => '{}');",
+                self.ducklake.catalog_alias, table_name
+            ),
+        ];
+        for stmt in stmts {
+            if let Err(err) = conn.execute_batch(&stmt) {
+                warn!("DuckLake table option optimization skipped: {}", err);
+            }
+        }
+    }
+
+    fn insert_order_clause(&self, table_name: &str) -> &'static str {
+        match table_name {
+            "traces" => "ORDER BY record_date, app_id, session_id, timestamp",
+            "logs" => "ORDER BY record_date, session_id, timestamp",
+            "metrics" => "ORDER BY record_date, metric_name, timestamp",
+            _ => "",
+        }
+    }
+
+    fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {
+        for table in ["traces", "logs", "metrics"] {
+            let qualified = self.qualified_table_name(table);
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
+            conn.execute_batch(&format!(
+                "DROP TABLE IF EXISTS {}.{};",
+                self.ducklake.catalog_alias, table
+            ))?;
+        }
+        info!("DuckLake tables reset because SPLAKE_RESET_DUCKLAKE=1");
+        Ok(())
+    }
 }
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+fn size_literal(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+    if bytes >= GB && bytes.is_multiple_of(GB) {
+        format!("{}GB", bytes / GB)
+    } else if bytes >= MB && bytes.is_multiple_of(MB) {
+        format!("{}MB", bytes / MB)
+    } else if bytes >= KB && bytes.is_multiple_of(KB) {
+        format!("{}KB", bytes / KB)
+    } else {
+        warn!(
+            "target_file_size_bytes={} is not power-of-1024 aligned; using byte literal",
+            bytes
+        );
+        format!("{}B", bytes)
+    }
 }

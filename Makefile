@@ -14,7 +14,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local setup-minio teardown-minio check-minio clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
 # Default target
 help:
@@ -30,6 +30,8 @@ help:
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
 	@echo "  make test-gcp-stress       - Stress test GCP with 10K+ spans"
+	@echo "  make stress-test-gcs-ducklake - Local DuckLake stress against GCS bucket"
+	@echo "  make stress-test-r2-ducklake - Stress test DuckLake on Cloudflare R2"
 	@echo "  make test-deployment-local - Test local deployment via Python script"
 	@echo "  make test-deployment-stress - Stress test local with large dataset"
 	@echo ""
@@ -195,7 +197,7 @@ test-local: check-local
 	@echo "📝 Configuration: tests/config/test.yaml"
 	@echo "🗄️  Backend: MinIO (localhost:9000) + Lakekeeper REST (localhost:8181)"
 	@echo ""
-	ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1 --nocapture
+	SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1 --nocapture
 
 test-r2:
 	@echo "🧪 Running integration tests with Cloudflare R2..."
@@ -300,7 +302,7 @@ test-gcp-stress:
 		echo "📦 Installing requests library..."; \
 		pip3 install --user requests || pip3 install requests; \
 	fi
-	@python test_deployment.py --env gcp --span-count 10000 --session-count 100
+	@python3 test_deployment.py --env gcp --span-count 10000 --session-count 100
 
 test-deployment-local: check-local
 	@echo "🧪 Testing local deployment via Python script..."
@@ -333,7 +335,7 @@ stress-test: setup-minio
 		TMP_CONFIG=/tmp/splake-stress.yaml; \
 		sed "s/port: 8090/port: $$PORT/" config.yaml > $$TMP_CONFIG; \
 		echo "🚀 Starting splake on port $$PORT..."; \
-		CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-stress.log 2>&1 & \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \
 		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; $(MAKE) teardown-minio >/dev/null 2>&1 || true' EXIT; \
 		for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -349,3 +351,152 @@ stress-test: setup-minio
 		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
 		trap - EXIT
 	@$(MAKE) teardown-minio
+
+stress-test-r2-ducklake:
+	@echo "☁️  Stress testing DuckLake with Cloudflare R2 object storage..."
+	@set -e; \
+		R2_CONFIG=$${R2_CONFIG:-tests/config/test-r2.yaml}; \
+		PORT=$${PORT:-38091}; \
+		if [ ! -f "$$R2_CONFIG" ]; then \
+			echo "❌ R2 config file not found: $$R2_CONFIG"; \
+			exit 1; \
+		fi; \
+		R2_BUCKET=$${R2_BUCKET:-$$(rg "^\\s*wal_bucket:\\s*" "$$R2_CONFIG" -m 1 | sed -E 's/^[^:]*:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)}; \
+		if [ "$$R2_BUCKET" = "your-bucket-name" ]; then \
+			echo "❌ R2 bucket in $$R2_CONFIG is still placeholder: ingest_engine.wal_bucket=your-bucket-name"; \
+			echo "   Update $$R2_CONFIG with your real Iceberg R2 settings OR pass R2_BUCKET=<real-bucket>."; \
+			exit 1; \
+		fi; \
+		if [ -z "$$R2_BUCKET" ]; then \
+			echo "❌ Could not resolve R2 bucket from $$R2_CONFIG."; \
+			echo "   Set ingest_engine.wal_bucket or pass R2_BUCKET=<real-bucket>."; \
+			exit 1; \
+		fi; \
+		if rg -n "your-bucket-name" "$$R2_CONFIG" >/dev/null; then \
+			echo "❌ $$R2_CONFIG still appears to contain placeholder/sample R2 values."; \
+			echo "   Set real R2 credentials/bucket first, then rerun."; \
+			exit 1; \
+		fi; \
+		TMP_CONFIG=/tmp/splake-r2-ducklake-stress.yaml; \
+		cp $$R2_CONFIG $$TMP_CONFIG; \
+		sed -i.bak "s/port: 8090/port: $$PORT/" $$TMP_CONFIG && rm -f $$TMP_CONFIG.bak; \
+		printf "\nducklake:\n" >> $$TMP_CONFIG; \
+		printf "  catalog_type: \"duckdb\"\n" >> $$TMP_CONFIG; \
+		printf "  metadata_path: \"/tmp/splake-r2-ducklake/metadata.ducklake\"\n" >> $$TMP_CONFIG; \
+		printf "  data_path: \"s3://%s/ducklake/\"\n" "$$R2_BUCKET" >> $$TMP_CONFIG; \
+		printf "  catalog_alias: \"softprobe\"\n" >> $$TMP_CONFIG; \
+		printf "  metadata_schema: \"main\"\n" >> $$TMP_CONFIG; \
+		printf "  data_inlining_row_limit: 0\n" >> $$TMP_CONFIG; \
+		echo "🚀 Starting splake with $$R2_CONFIG on port $$PORT..."; \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-r2-ducklake-stress.log 2>&1 & \
+		SPLAKE_PID=$$!; \
+		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f $$TMP_CONFIG' EXIT; \
+		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-r2-ducklake-stress.log; exit 1); \
+		echo "🧪 Running 10s smoke check before full stress..."; \
+		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
+			> /tmp/perf-r2-ducklake-smoke.log 2>&1; \
+		if rg -n "errors:\\s*[1-9]|Total query errors:\\s*[1-9]|Steady-state query errors:\\s*[1-9]" /tmp/perf-r2-ducklake-smoke.log >/dev/null; then \
+			echo "❌ R2 smoke check failed (non-zero errors)."; \
+			echo "---- perf smoke output ----"; \
+			cat /tmp/perf-r2-ducklake-smoke.log; \
+			echo "---- splake error lines ----"; \
+			rg -n "ERROR|Error|failed|Failed" /tmp/splake-r2-ducklake-stress.log || true; \
+			exit 1; \
+		fi; \
+		echo "✅ Smoke check passed; starting full stress run..."; \
+		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
+		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
+		trap - EXIT; \
+		rm -f $$TMP_CONFIG
+
+stress-test-gcs-ducklake:
+	@echo "☁️  Stress testing local DuckLake against GCS bucket..."
+	@set -e; \
+		GCP_CONFIG=$${GCP_CONFIG:-tests/config/test-gcp.yaml}; \
+		PORT=$${PORT:-38092}; \
+		CACHE_ROOT=$${CACHE_ROOT:-/tmp/splake-gcs-ducklake}; \
+		if [ ! -f "$$GCP_CONFIG" ]; then \
+			echo "❌ GCP config file not found: $$GCP_CONFIG"; \
+			exit 1; \
+		fi; \
+		GCS_BUCKET=$${GCS_BUCKET:-$$(rg "^\\s*wal_bucket:\\s*" "$$GCP_CONFIG" -m 1 | sed -E 's/^[^:]*:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)}; \
+		if [ -z "$$GCS_BUCKET" ]; then \
+			echo "❌ Could not resolve wal_bucket from $$GCP_CONFIG."; \
+			echo "   Set ingest_engine.wal_bucket or pass GCS_BUCKET=<real-bucket>."; \
+			exit 1; \
+		fi; \
+		if [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET-NAME" ] || [ "$$GCS_BUCKET" = "your-bucket-name" ]; then \
+			echo "❌ GCS bucket appears to be placeholder in $$GCP_CONFIG."; \
+			exit 1; \
+		fi; \
+		if [ -z "$$GOOGLE_APPLICATION_CREDENTIALS" ]; then \
+			echo "❌ GOOGLE_APPLICATION_CREDENTIALS is not set for GCS auth."; \
+			exit 1; \
+		fi; \
+		TMP_CONFIG=/tmp/splake-gcs-ducklake-stress.yaml; \
+		cp "$$GCP_CONFIG" "$$TMP_CONFIG"; \
+		sed -i.bak "s/port: 8090/port: $$PORT/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		sed -i.bak "s/max_buffer_spans: 10000/max_buffer_spans: 1/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		sed -i.bak "s/flush_interval_seconds: 60/flush_interval_seconds: 1/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		sed -i.bak "s/optimizer_interval_seconds: 300/optimizer_interval_seconds: 2/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		rm -rf "$$CACHE_ROOT"; \
+		mkdir -p "$$CACHE_ROOT/cache" "$$CACHE_ROOT/wal"; \
+		sed -i.bak "s|cache_dir: .*|cache_dir: \"$$CACHE_ROOT/cache\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		if rg -n "^\\s*wal_dir:\\s*" "$$TMP_CONFIG" >/dev/null; then \
+			sed -i.bak "s|wal_dir: .*|wal_dir: \"$$CACHE_ROOT/wal\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
+		else \
+			awk -v wal="  wal_dir: \"$$CACHE_ROOT/wal\"" '1; /cache_dir:/ {print wal}' "$$TMP_CONFIG" > "$$TMP_CONFIG.inject" && mv "$$TMP_CONFIG.inject" "$$TMP_CONFIG"; \
+		fi; \
+		printf "\nducklake:\n" >> "$$TMP_CONFIG"; \
+		printf "  catalog_type: \"duckdb\"\n" >> "$$TMP_CONFIG"; \
+		printf "  metadata_path: \"/tmp/splake-gcs-ducklake/metadata.ducklake\"\n" >> "$$TMP_CONFIG"; \
+		printf "  data_path: \"s3://%s/ducklake/\"\n" "$$GCS_BUCKET" >> "$$TMP_CONFIG"; \
+		printf "  catalog_alias: \"softprobe\"\n" >> "$$TMP_CONFIG"; \
+		printf "  metadata_schema: \"main\"\n" >> "$$TMP_CONFIG"; \
+		printf "  data_inlining_row_limit: 0\n" >> "$$TMP_CONFIG"; \
+		echo "🚀 Starting local splake on port $$PORT using GCS bucket $$GCS_BUCKET..."; \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="$$TMP_CONFIG" cargo run --bin splake > /tmp/splake-gcs-ducklake-stress.log 2>&1 & \
+		SPLAKE_PID=$$!; \
+		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f "$$TMP_CONFIG"' EXIT; \
+		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-gcs-ducklake-stress.log; exit 1); \
+		echo "♨️  Warmup: ingest-only pass to create committed DuckLake tables..."; \
+		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 12 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 0 --query-interval-ms 1000 \
+			> /tmp/perf-gcs-ducklake-warmup.log 2>&1; \
+		echo "🧪 Running 10s smoke check before full stress..."; \
+		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
+			> /tmp/perf-gcs-ducklake-smoke.log 2>&1; \
+		if rg -n "errors:\\s*[1-9]|Total query errors:\\s*[1-9]|Steady-state query errors:\\s*[1-9]" /tmp/perf-gcs-ducklake-smoke.log >/dev/null; then \
+			echo "❌ GCS smoke check failed (non-zero errors)."; \
+			echo "---- perf smoke output ----"; \
+			cat /tmp/perf-gcs-ducklake-smoke.log; \
+			echo "---- splake error lines ----"; \
+			rg -n "ERROR|Error|failed|Failed" /tmp/splake-gcs-ducklake-stress.log || true; \
+			exit 1; \
+		fi; \
+		echo "✅ Smoke check passed; starting full stress run..."; \
+		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
+			--service-url "http://127.0.0.1:$$PORT" \
+			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
+		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
+		trap - EXIT; \
+		rm -f "$$TMP_CONFIG"
