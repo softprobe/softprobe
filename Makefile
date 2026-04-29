@@ -66,9 +66,10 @@ build-release:
 	@echo "🔨 Building release..."
 	cargo build --release
 
+# Artifact Registry only — do not revert to gcr.io (see .github/workflows/softprobe-publish.yml).
 publish-docker:
 	@echo "🔨 Publishing Docker image..."
-	docker buildx build --platform linux/amd64 --push -t gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/splake:latest .
+	docker buildx build --platform linux/amd64 --push -t us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:latest .
 
 # Code quality targets
 lint:
