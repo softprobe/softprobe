@@ -80,7 +80,6 @@ build-docker:
 		echo "WARNING: linux/arm64 cross build on macOS is currently unreliable with bundled duckdb C++ toolchain."; \
 		echo "Use default linux/amd64 for faster, stable local builds."; \
 	fi
-	@$(MAKE) runtime-binary TARGET=$(DOCKER_TARGET) OUT_ARCH=$(DOCKER_OUT_ARCH)
 	@TAG_ARGS=""; \
 	for tag in $(DOCKER_TAGS); do \
 		TAG_ARGS="$$TAG_ARGS -t $$tag"; \
@@ -153,11 +152,6 @@ runtime-binary:
 
 # e2e convenience.
 e2e-up:
-	@if [ "$(SKIP_RUNTIME_BUILD)" != "1" ]; then \
-		$(MAKE) runtime-binary; \
-	else \
-		echo "Skipping runtime-binary build (SKIP_RUNTIME_BUILD=1)"; \
-	fi
 	@docker compose -f ../e2e/docker-compose.yaml up --build --wait
 
 e2e-down:

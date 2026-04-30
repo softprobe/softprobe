@@ -1,18 +1,24 @@
-# Runtime-only image: build binary natively, then copy it in.
-FROM debian:bookworm-slim AS runtime
+FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+WORKDIR /app
 
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin softprobe-runtime
+
+FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Buildx sets TARGETARCH per platform (amd64/arm64).
-# Override BINARY_PATH for custom builds when needed.
-ARG TARGETARCH
-ARG BINARY_PATH=target/linux-${TARGETARCH}/softprobe-runtime
-COPY ${BINARY_PATH} /app/softprobe-runtime
+COPY --from=builder /app/target/release/softprobe-runtime /app/softprobe-runtime
 COPY config.yaml /app/config.yaml
 
 RUN useradd -m -u 1000 softprobe && \
