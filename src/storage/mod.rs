@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod ducklake;
 pub mod iceberg;
 pub mod schema;
 pub mod transaction;
@@ -10,7 +11,7 @@ use buffer::SimpleBuffer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use iceberg::IcebergWriter;
+pub use ducklake::DuckLakeWriter as IcebergWriter;
 use buffer::{FlushCallback, PreAddCallback};
 
 // Type aliases for buffers using unified domain models

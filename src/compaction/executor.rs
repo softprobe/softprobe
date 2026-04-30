@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::storage::iceberg::IcebergCatalog;
 use anyhow::{anyhow, Result};
+use duckdb::{Connection, ToSql};
 use iceberg::table::Table;
 use iceberg::{Catalog, TableIdent, TableRequirement, TableUpdate};
 use serde::{Deserialize, Serialize};
@@ -12,10 +13,11 @@ use tracing::{info, warn};
 #[derive(Debug, Clone)]
 pub struct MaintenanceExecutor {
     config: Config,
-    catalog: Arc<iceberg_catalog_rest::RestCatalog>,
+    catalog: Option<Arc<iceberg_catalog_rest::RestCatalog>>,
     http_client: reqwest::Client,
-    catalog_api_base_url: String,
+    catalog_api_base_url: Option<String>,
     catalog_token: Option<String>,
+    ducklake: Option<crate::config::DuckLakeConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,8 +191,6 @@ async fn resolve_catalog_api_base_url(
 
 impl MaintenanceExecutor {
     pub async fn new(config: &Config) -> Result<Self> {
-        let catalog = IcebergCatalog::new(config).await?;
-
         let http_client = if std::env::var("ICEBERG_DISABLE_TLS_VALIDATION").is_ok() {
             reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
@@ -199,6 +199,18 @@ impl MaintenanceExecutor {
             reqwest::Client::builder().build()?
         };
 
+        if config.ducklake.is_some() {
+            return Ok(Self {
+                config: config.clone(),
+                catalog: None,
+                http_client,
+                catalog_api_base_url: None,
+                catalog_token: None,
+                ducklake: Some(config.ducklake_or_default()),
+            });
+        }
+
+        let catalog = IcebergCatalog::new(config).await?;
         let catalog_token = config.iceberg.catalog_token.clone();
         let warehouse =
             std::env::var("ICEBERG_WAREHOUSE").unwrap_or_else(|_| config.iceberg.warehouse.clone());
@@ -220,16 +232,23 @@ impl MaintenanceExecutor {
 
         Ok(Self {
             config: config.clone(),
-            catalog: catalog.catalog().clone(),
+            catalog: Some(catalog.catalog().clone()),
             http_client,
-            catalog_api_base_url,
+            catalog_api_base_url: Some(catalog_api_base_url),
             catalog_token,
+            ducklake: None,
         })
     }
 
     pub async fn run_once(&self) -> Result<MaintenanceSummary> {
+        if self.ducklake.is_some() {
+            return self.run_once_ducklake().await;
+        }
+        let Some(catalog) = self.catalog.as_ref() else {
+            return Err(anyhow!("Iceberg catalog is not initialized"));
+        };
         let namespace = iceberg::NamespaceIdent::from_strs(["default"])?;
-        let tables = self.catalog.list_tables(&namespace).await?;
+        let tables = catalog.list_tables(&namespace).await?;
         self.run_once_for_tables(&tables).await
     }
 
@@ -243,7 +262,10 @@ impl MaintenanceExecutor {
     }
 
     async fn maintain_table(&self, table_ident: &TableIdent) -> Result<TableMaintenanceResult> {
-        let table = self.catalog.load_table(table_ident).await?;
+        let Some(catalog) = self.catalog.as_ref() else {
+            return Err(anyhow!("Iceberg catalog is not initialized"));
+        };
+        let table = catalog.load_table(table_ident).await?;
 
         let metadata = if self.config.compaction.metadata_maintenance_enabled {
             self.expire_snapshots(table_ident, &table).await?
@@ -289,6 +311,225 @@ impl MaintenanceExecutor {
             rewrite_manifests,
             remove_orphan_files,
         })
+    }
+
+    async fn run_once_ducklake(&self) -> Result<MaintenanceSummary> {
+        let ducklake = self
+            .ducklake
+            .as_ref()
+            .ok_or_else(|| anyhow!("DuckLake config not initialized"))?;
+        let conn = self.open_ducklake_connection(ducklake)?;
+        self.attach_ducklake(&conn, ducklake)?;
+
+        let tables = vec!["traces", "logs", "metrics"];
+        let mut results = Vec::new();
+        for table in tables {
+            let table_ident = TableIdent::from_strs([ducklake.metadata_schema.as_str(), table])?;
+            let compaction = if self.config.compaction.enabled {
+                CompactionResult {
+                    status: self.ducklake_compact_table(&conn, ducklake, table)?,
+                }
+            } else {
+                CompactionResult {
+                    status: CompactionStatus::Skipped,
+                }
+            };
+
+            let metadata = if self.config.compaction.metadata_maintenance_enabled {
+                let expired = self.ducklake_expire_snapshots(&conn, ducklake)?;
+                self.ducklake_cleanup_files(&conn, ducklake)?;
+                MetadataMaintenanceResult {
+                    expired_snapshots: expired,
+                    skipped: false,
+                }
+            } else {
+                MetadataMaintenanceResult {
+                    expired_snapshots: 0,
+                    skipped: true,
+                }
+            };
+
+            results.push(TableMaintenanceResult {
+                table: table_ident,
+                metadata,
+                compaction,
+                rewrite_manifests: ActionResult {
+                    status: ActionStatus::Unsupported,
+                },
+                remove_orphan_files: ActionResult {
+                    status: ActionStatus::Unsupported,
+                },
+            });
+        }
+        Ok(MaintenanceSummary { tables: results })
+    }
+
+    fn open_ducklake_connection(&self, ducklake: &crate::config::DuckLakeConfig) -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
+        conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
+        if ducklake.catalog_type == "postgres" {
+            conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
+        }
+        if ducklake.catalog_type == "sqlite" {
+            conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
+        }
+        if let Some(endpoint) = self.config.s3.endpoint.as_ref() {
+            let trimmed = endpoint
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            conn.execute("SET s3_endpoint = ?;", [&trimmed as &dyn ToSql])?;
+            conn.execute("SET s3_url_style = 'path';", [])?;
+            if endpoint.starts_with("http://") {
+                conn.execute("SET s3_use_ssl = false;", [])?;
+            } else if endpoint.starts_with("https://") {
+                conn.execute("SET s3_use_ssl = true;", [])?;
+            }
+        }
+        if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
+            conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
+        }
+        if let Some(secret_key) = self.config.s3.secret_access_key.as_ref() {
+            conn.execute("SET s3_secret_access_key = ?;", [secret_key as &dyn ToSql])?;
+        }
+        conn.execute(
+            "SET s3_region = ?;",
+            [&self.config.storage.s3_region as &dyn ToSql],
+        )?;
+        Ok(conn)
+    }
+
+    fn attach_ducklake(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<()> {
+        let attach_target = match ducklake.catalog_type.as_str() {
+            "postgres" => {
+                if ducklake.metadata_path.starts_with("postgres:") {
+                    ducklake.metadata_path.clone()
+                } else {
+                    format!("postgres:{}", ducklake.metadata_path)
+                }
+            }
+            "sqlite" => {
+                if ducklake.metadata_path.starts_with("sqlite:") {
+                    ducklake.metadata_path.clone()
+                } else {
+                    format!("sqlite:{}", ducklake.metadata_path)
+                }
+            }
+            _ => ducklake.metadata_path.clone(),
+        };
+        self.prepare_local_ducklake_paths(ducklake, &attach_target)?;
+        let attach_sql = format!(
+            "ATTACH 'ducklake:{}' AS {} (DATA_PATH '{}');",
+            attach_target.replace('\'', "''"),
+            ducklake.catalog_alias,
+            ducklake.data_path.replace('\'', "''")
+        );
+        conn.execute_batch(&attach_sql)?;
+        Ok(())
+    }
+
+    fn prepare_local_ducklake_paths(
+        &self,
+        ducklake: &crate::config::DuckLakeConfig,
+        attach_target: &str,
+    ) -> Result<()> {
+        if ducklake.catalog_type == "duckdb" || ducklake.catalog_type == "sqlite" {
+            let raw = attach_target
+                .strip_prefix("sqlite:")
+                .unwrap_or(attach_target)
+                .strip_prefix("duckdb:")
+                .unwrap_or(attach_target);
+            let metadata_path = std::path::PathBuf::from(raw);
+            if let Some(parent) = metadata_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !ducklake.data_path.contains("://") {
+                std::fs::create_dir_all(&ducklake.data_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ducklake_compact_table(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+        table: &str,
+    ) -> Result<CompactionStatus> {
+        // DuckLake expects size literals with units for this option.
+        let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
+        let set_target = format!(
+            "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
+            ducklake.catalog_alias,
+            target_file_size,
+            table
+        );
+        conn.execute_batch(&set_target)?;
+        let sql = format!(
+            "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}');",
+            ducklake.catalog_alias, table, ducklake.metadata_schema
+        );
+        match conn.execute_batch(&sql) {
+            Ok(_) => Ok(CompactionStatus::Completed),
+            Err(err) if is_ducklake_unsupported(&err) => Ok(CompactionStatus::Unsupported),
+            Err(err) => Err(anyhow!(
+                "DuckLake compaction failed for {}.{}: {}",
+                ducklake.metadata_schema,
+                table,
+                err
+            )),
+        }
+    }
+
+    fn ducklake_expire_snapshots(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<usize> {
+        let days = std::cmp::max(
+            1,
+            self.config.compaction.metadata_max_snapshot_age_seconds / (24 * 3600),
+        );
+        let dry_run_sql = format!(
+            "CALL ducklake_expire_snapshots('{}', dry_run => true, older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
+            ducklake.catalog_alias, days
+        );
+        let planned = count_returned_rows(conn, &dry_run_sql)?;
+        let sql = format!(
+            "CALL ducklake_expire_snapshots('{}', older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
+            ducklake.catalog_alias, days
+        );
+        conn.execute_batch(&sql)?;
+        Ok(planned)
+    }
+
+    fn ducklake_cleanup_files(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<()> {
+        let older_than_seconds = self
+            .config
+            .compaction
+            .metadata_remove_orphan_older_than_seconds;
+        let sql = if older_than_seconds == 0 {
+            format!(
+                "CALL ducklake_cleanup_old_files('{}', cleanup_all => true);",
+                ducklake.catalog_alias
+            )
+        } else {
+            let days = std::cmp::max(1, older_than_seconds / (24 * 3600));
+            format!(
+                "CALL ducklake_cleanup_old_files('{}', older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
+                ducklake.catalog_alias, days
+            )
+        };
+        conn.execute_batch(&sql)?;
+        Ok(())
     }
 
     async fn expire_snapshots(
@@ -408,7 +649,12 @@ impl MaintenanceExecutor {
 
         self.post_table_commit(table_ident, &request).await?;
 
-        let table_after = self.catalog.load_table(table_ident).await?;
+        let table_after = self
+            .catalog
+            .as_ref()
+            .ok_or_else(|| anyhow!("Iceberg catalog is not initialized"))?
+            .load_table(table_ident)
+            .await?;
         let metadata_log_after: HashSet<String> = table_after
             .metadata()
             .metadata_log()
@@ -444,9 +690,13 @@ impl MaintenanceExecutor {
         );
 
         let request = RewriteDataFilesRequest { options };
+        let api_base = self
+            .catalog_api_base_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("Iceberg API base URL is not initialized"))?;
         let url = format!(
             "{}/namespaces/{}/tables/{}/actions/rewrite-data-files",
-            self.catalog_api_base_url,
+            api_base,
             table_ident.namespace().to_url_string(),
             table_ident.name(),
         );
@@ -492,9 +742,13 @@ impl MaintenanceExecutor {
         table_ident: &TableIdent,
         request: &CommitTableRequest,
     ) -> Result<()> {
+        let api_base = self
+            .catalog_api_base_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("Iceberg API base URL is not initialized"))?;
         let url = format!(
             "{}/namespaces/{}/tables/{}",
-            self.catalog_api_base_url,
+            api_base,
             table_ident.namespace().to_url_string(),
             table_ident.name()
         );
@@ -565,9 +819,13 @@ impl MaintenanceExecutor {
         action: &str,
         payload: &serde_json::Value,
     ) -> Result<ActionResult> {
+        let api_base = self
+            .catalog_api_base_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("Iceberg API base URL is not initialized"))?;
         let url = format!(
             "{}/namespaces/{}/tables/{}/actions/{}",
-            self.catalog_api_base_url,
+            api_base,
             table_ident.namespace().to_url_string(),
             table_ident.name(),
             action
@@ -607,5 +865,39 @@ impl MaintenanceExecutor {
             status,
             body
         ))
+    }
+}
+
+fn is_ducklake_unsupported(err: &duckdb::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("catalog error")
+        || msg.contains("function")
+            && (msg.contains("does not exist") || msg.contains("not found"))
+        || msg.contains("no function matches")
+        || msg.contains("not implemented")
+}
+
+fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([])?;
+    let mut count = 0usize;
+    while let Some(_row) = rows.next()? {
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn size_literal(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+    if bytes >= GB && bytes.is_multiple_of(GB) {
+        format!("{}GB", bytes / GB)
+    } else if bytes >= MB && bytes.is_multiple_of(MB) {
+        format!("{}MB", bytes / MB)
+    } else if bytes >= KB && bytes.is_multiple_of(KB) {
+        format!("{}KB", bytes / KB)
+    } else {
+        format!("{}B", bytes)
     }
 }
