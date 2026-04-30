@@ -1,6 +1,16 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /app
 
+# Native deps required by transitive crates during cargo-chef cook/build.
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    clang \
+    cmake \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
