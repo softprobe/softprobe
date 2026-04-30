@@ -3,6 +3,10 @@
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
 # For macOS: use the default linker unless zld is installed at the path below.
 # [target.aarch64-apple-darwin]
 # rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/bin/zld"]
