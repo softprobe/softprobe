@@ -1,0 +1,56 @@
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600
+  worker_threads: null
+
+storage:
+  s3_region: "us-east-1"
+
+span_buffering:
+  max_buffer_bytes: 134217728
+  max_buffer_spans: 1
+  flush_interval_seconds: 1
+
+ingest_engine:
+  wal_bucket: "warehouse"
+  wal_prefix: "wal"
+  cache_dir: "/tmp/ingest-cache"
+  wal_dir: "/tmp/ingest-wal"
+  optimizer_interval_seconds: 10
+  replay_wal_on_startup: false
+
+compaction:
+  enabled: false
+  min_files_to_compact: 5
+  target_file_size_bytes: 67108864
+  compaction_interval_seconds: 3600
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: "1GB"
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: "/tmp/duckdb_spill"
+
+s3:
+  endpoint: "http://host.docker.internal:9000"
+  access_key_id: "minioadmin"
+  secret_access_key: "minioadmin"
+
+iceberg:
+  catalog_type: "rest"
+  catalog_uri: "http://host.docker.internal:8181/catalog"
+  warehouse: "default"
+  write_target_file_size_bytes: 67108864
+  write_row_group_size_bytes: 134217728
+  write_page_size_bytes: 1048576
+  force_close_after_append: false
+
+ducklake:
+  catalog_type: "duckdb"
+  metadata_path: "/tmp/ducklake/metadata.ducklake"
+  data_path: "s3://warehouse/ducklake/data/"
+  catalog_alias: "softprobe"
+  metadata_schema: "main"
+  data_inlining_row_limit: 0

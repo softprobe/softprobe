@@ -1,20 +1,7 @@
 name: Performance Tests
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  # Manual trigger only (not run on every push/pull_request)
   workflow_dispatch:
     inputs:
       test_type:

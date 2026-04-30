@@ -30,11 +30,16 @@ impl TestPipeline {
                 .join(format!("metadata-{}.ducklake", Uuid::new_v4()))
                 .to_string_lossy()
                 .to_string();
-            ducklake.data_path = dl_dir
-                .join("data")
-                .to_string_lossy()
-                .to_string();
-            std::fs::create_dir_all(&ducklake.data_path).expect("ducklake data dir");
+            let run_id = Uuid::new_v4();
+            if ducklake.data_path.contains("://") {
+                // Keep object-storage-backed paths for integration validation, but isolate each run.
+                let base = ducklake.data_path.trim_end_matches('/');
+                ducklake.data_path = format!("{}/tests/{}/", base, run_id);
+            } else {
+                // Default to object storage for integration tests to validate committed data persistence.
+                let bucket = config.ingest_engine.wal_bucket.trim();
+                ducklake.data_path = format!("s3://{}/ducklake/tests/{}/", bucket, run_id);
+            }
         }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
         

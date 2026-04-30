@@ -33,8 +33,8 @@ iceberg = { version = "0.9", optional = true }
 iceberg-catalog-rest = { version = "0.9", optional = true }
 object_store = { version = "0.10", optional = true, features = ["aws"] }
 
-# DuckDB (bundled libduckdb; Arrow version follows duckdb-rs)
-duckdb = { version = "1.10502.0", features = ["bundled"] }
+# DuckDB (dynamically linked; shared library provided in Docker build)
+duckdb = { version = "1.10502.0" }
 
 # Configuration YAML
 serde_yaml = "0.9"
