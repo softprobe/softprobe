@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     protobuf-compiler \
     clang \
+    mold \
     cmake \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
