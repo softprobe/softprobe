@@ -33,7 +33,10 @@ iceberg = { version = "0.9", optional = true }
 iceberg-catalog-rest = { version = "0.9", optional = true }
 object_store = { version = "0.10", optional = true, features = ["aws"] }
 
-# DuckDB (dynamically linked; shared library provided in Docker build)
+# Static linking to duckdb is tooooo slow!
+# DuckDB: keep dynamic linking.
+# Do NOT enable `bundled`/static linking here; this repo expects libduckdb artifacts
+# (e.g. Dockerfile copies `libduckdb.so`) and local builds use DUCKDB_DOWNLOAD_LIB=1.
 duckdb = { version = "1.10502.0" }
 
 # Configuration YAML

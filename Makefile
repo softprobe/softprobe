@@ -16,6 +16,10 @@
 
 .PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
+# Ensure libduckdb is fetched when not present on host.
+# Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
+export DUCKDB_DOWNLOAD_LIB ?= 1
+
 # Default target
 help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"

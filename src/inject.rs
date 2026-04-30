@@ -45,7 +45,9 @@ pub struct InjectRuleMatch {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InjectRule {
-    pub id: String,
+    /// Optional human-readable label (logs, suite mocks); omit when unused.
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub priority: i64,
     pub when: InjectRuleWhen,
@@ -99,7 +101,8 @@ struct CaseFileEnvelope {
     rules: Vec<InjectRule>,
 }
 
-pub const STRICT_POLICY_RULE_ID: &str = "policy-strict-miss";
+/// Synthetic strict-policy fallback rule (`select_inject_rule`); not matched by name.
+pub const STRICT_POLICY_RULE_NAME: &str = "policy-strict-miss";
 const STRICT_POLICY_ERROR: &str = "strict policy requires a mock rule match";
 
 pub fn normalize_otlp_body(body: &[u8]) -> Result<ExportTraceServiceRequest> {
@@ -251,7 +254,7 @@ pub fn select_inject_rule(
 ) -> Option<InjectRuleMatch> {
     let policy_rules: Vec<InjectRule> = if policy_strict {
         vec![InjectRule {
-            id: STRICT_POLICY_RULE_ID.to_string(),
+            name: STRICT_POLICY_RULE_NAME.to_string(),
             priority: 0,
             when: InjectRuleWhen::default(),
             then: InjectRuleThen {

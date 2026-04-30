@@ -7,7 +7,7 @@ use crate::capture_export::{build_capture_json, capture_query_sql};
 use crate::inject::{
     build_error_response, build_mock_response, case_embedded_rules, encode_inject_response_proto,
     is_strict_external_http_policy, normalize_otlp_body, parse_inject_lookup,
-    parse_inject_rules_document, select_inject_rule, STRICT_POLICY_RULE_ID,
+    parse_inject_rules_document, select_inject_rule,
 };
 use axum::{
     body::Bytes,
@@ -197,6 +197,17 @@ async fn v1_apply_rules(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "invalid control payload"})),
+        ));
+    }
+    if let Err(e) = parse_inject_rules_document(&body) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_rules",
+                    "message": format!("rules document must be valid JSON and match the runtime inject rule shape: {e}")
+                }
+            })),
         ));
     }
     let hosted = state
@@ -466,7 +477,14 @@ async fn v1_inject(
     let Some(sess) = store.get(&lookup.session_id).await else {
         return Err((StatusCode::NOT_FOUND, "unknown session".into()));
     };
-    let session_rules = parse_inject_rules_document(&sess.rules).unwrap_or_default();
+    // Rules are validated on `POST …/rules`. If this fails, the stored blob was
+    // not written through that path, data was corrupted, or binary versions skewed.
+    let session_rules = parse_inject_rules_document(&sess.rules).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stored session rules failed to parse: {e}"),
+        )
+    })?;
     let case_rules = case_embedded_rules(&sess.loaded_case);
     let strict = is_strict_external_http_policy(&sess.policy);
     let m = select_inject_rule(&lookup, strict, &case_rules, &session_rules);
@@ -497,7 +515,7 @@ async fn v1_inject(
         }
         "error" => {
             let (st, msg) = build_error_response(&m.rule);
-            if m.rule.id == STRICT_POLICY_RULE_ID && m.source == "policy" {
+            if m.source == "policy" {
                 let _ = store
                     .record_strict_miss(&lookup.session_id, 1)
                     .await;
