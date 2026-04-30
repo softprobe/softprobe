@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::models::{Log, Metric, Span};
 use ::arrow::record_batch::RecordBatch;
 use anyhow::Result;
-use iceberg::io::FileIOBuilder;
+use iceberg::io::FileIO;
 use iceberg::spec::{
     DataContentType, FormatVersion, ManifestContentType, ManifestList, ManifestListWriter,
 };
@@ -750,56 +750,56 @@ impl IcebergWriter {
                         rewritten_entries.push(entry);
                     }
                     if let Some(snapshot) = table.metadata().current_snapshot() {
-                        let file_io = FileIOBuilder::new_fs_io().build();
-                        match file_io {
-                            Ok(file_io) => {
-                                let output_path =
-                                    local_manifest_list_path.to_string_lossy().to_string();
-                                match file_io.new_output(&output_path) {
-                                    Ok(output) => {
-                                        let parent_snapshot_id: Option<i64> = snapshot.parent_snapshot_id();
-                                        let mut writer = match format_version {
-                                            FormatVersion::V1 => ManifestListWriter::v1(
-                                                output,
-                                                snapshot.snapshot_id(),
-                                                parent_snapshot_id,
-                                            ),
-                                            FormatVersion::V2 => ManifestListWriter::v2(
-                                                output,
-                                                snapshot.snapshot_id(),
-                                                parent_snapshot_id,
-                                                snapshot.sequence_number(),
-                                            ),
-                                        };
-                                        if let Err(err) =
-                                            writer.add_manifests(rewritten_entries.into_iter())
-                                        {
-                                            warn!(
-                                                "Failed to rewrite manifest list entries for {}: {}",
-                                                table_name, err
-                                            );
-                                        } else if let Err(err) = writer.close().await {
-                                            warn!(
-                                                "Failed to write manifest list for {}: {}",
-                                                table_name, err
-                                            );
-                                        } else if debug_pin {
-                                            eprintln!(
-                                                "[pin] rewrote manifest list with local manifest paths {:?}",
-                                                local_manifest_list_path
-                                            );
-                                        }
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            "Failed to open manifest list output {:?}: {}",
-                                            local_manifest_list_path, err
-                                        );
-                                    }
+                        let file_io = FileIO::new_with_fs();
+                        let output_path =
+                            local_manifest_list_path.to_string_lossy().to_string();
+                        match file_io.new_output(&output_path) {
+                            Ok(output) => {
+                                let parent_snapshot_id: Option<i64> = snapshot.parent_snapshot_id();
+                                let mut writer = match format_version {
+                                    FormatVersion::V1 => ManifestListWriter::v1(
+                                        output,
+                                        snapshot.snapshot_id(),
+                                        parent_snapshot_id,
+                                    ),
+                                    FormatVersion::V2 => ManifestListWriter::v2(
+                                        output,
+                                        snapshot.snapshot_id(),
+                                        parent_snapshot_id,
+                                        snapshot.sequence_number(),
+                                    ),
+                                    FormatVersion::V3 => ManifestListWriter::v3(
+                                        output,
+                                        snapshot.snapshot_id(),
+                                        parent_snapshot_id,
+                                        snapshot.sequence_number(),
+                                        None,
+                                    ),
+                                };
+                                if let Err(err) =
+                                    writer.add_manifests(rewritten_entries.into_iter())
+                                {
+                                    warn!(
+                                        "Failed to rewrite manifest list entries for {}: {}",
+                                        table_name, err
+                                    );
+                                } else if let Err(err) = writer.close().await {
+                                    warn!(
+                                        "Failed to write manifest list for {}: {}",
+                                        table_name, err
+                                    );
+                                } else if debug_pin {
+                                    eprintln!(
+                                        "[pin] rewrote manifest list with local manifest paths {:?}",
+                                        local_manifest_list_path
+                                    );
                                 }
                             }
                             Err(err) => {
-                                warn!("Failed to build local FileIO for manifest list: {}", err);
+                                warn!(
+                                    "Failed to open manifest list output {:?}: {}",
+                                    local_manifest_list_path, err
+                                );
                             }
                         }
                     }

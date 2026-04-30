@@ -4,8 +4,8 @@ use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 use prost::Message;
-use splake::compaction::executor::MaintenanceExecutor;
-use splake::config::Config;
+use softprobe_runtime::compaction::executor::MaintenanceExecutor;
+use softprobe_runtime::config::Config;
 
 #[tokio::main]
 async fn main() {

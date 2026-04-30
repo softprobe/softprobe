@@ -1,5 +1,5 @@
-use splake::config::{PromotedDataType, SchemaPromotionConfig, TablePromotionConfig};
-use splake::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
+use softprobe_runtime::config::{PromotedDataType, SchemaPromotionConfig, TablePromotionConfig};
+use softprobe_runtime::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
 use arrow::datatypes::Schema as ArrowSchema;
 
 #[test]
@@ -9,24 +9,24 @@ fn test_schema_promotion_config_loading() {
     let promotion_config = SchemaPromotionConfig {
         traces: Some(TablePromotionConfig {
             attributes: vec![
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "user.id".to_string(),
                     column_name: Some("user_id".to_string()),
                     data_type: Some(PromotedDataType::String),
                 },
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "department".to_string(),
                     column_name: None,
                     data_type: None,
                 },
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "sp.order.id".to_string(),
                     column_name: Some("order_id".to_string()),
                     data_type: None,
                 },
             ],
             resource_attributes: vec![
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "service.name".to_string(),
                     column_name: Some("service_name".to_string()),
                     data_type: None,
@@ -35,7 +35,7 @@ fn test_schema_promotion_config_loading() {
         }),
         logs: Some(TablePromotionConfig {
             attributes: vec![
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "user.id".to_string(),
                     column_name: None,
                     data_type: None,
@@ -45,7 +45,7 @@ fn test_schema_promotion_config_loading() {
         }),
         metrics: Some(TablePromotionConfig {
             attributes: vec![
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "environment".to_string(),
                     column_name: None,
                     data_type: None,
@@ -82,19 +82,19 @@ fn test_schema_generation_with_promotion() {
     // Test that promoted columns are added to schema
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "user.id".to_string(),
                 column_name: Some("user_id".to_string()),
                 data_type: Some(PromotedDataType::String),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "department".to_string(),
                 column_name: None,
                 data_type: None,
             },
         ],
         resource_attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "service.name".to_string(),
                 column_name: Some("service_name".to_string()),
                 data_type: Some(PromotedDataType::String),
@@ -153,17 +153,17 @@ fn test_schema_promotion_data_types() {
     // Test that different data types are handled correctly
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "count".to_string(),
                 column_name: Some("count".to_string()),
                 data_type: Some(PromotedDataType::Int),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "price".to_string(),
                 column_name: Some("price".to_string()),
                 data_type: Some(PromotedDataType::Double),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "is_active".to_string(),
                 column_name: Some("is_active".to_string()),
                 data_type: Some(PromotedDataType::Boolean),
@@ -201,7 +201,7 @@ fn test_schema_promotion_data_types() {
 fn test_logs_schema_promotion() {
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "user.id".to_string(),
                 column_name: None,
                 data_type: None,
@@ -226,7 +226,7 @@ fn test_logs_schema_promotion() {
 fn test_metrics_schema_promotion() {
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "environment".to_string(),
                 column_name: None,
                 data_type: None,

@@ -1,13 +1,13 @@
 use chrono::Utc;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use splake::config::Config;
-use splake::models::Log as LogData;
-use splake::query;
-use splake::query::duckdb::{reset_view_counters, view_counters_snapshot};
-use splake::ingest_engine::IngestPipeline;
-use splake::storage;
-use splake::storage::iceberg::arrow::logs_to_record_batch;
+use softprobe_runtime::config::Config;
+use softprobe_runtime::models::Log as LogData;
+use softprobe_runtime::query;
+use softprobe_runtime::query::duckdb::{reset_view_counters, view_counters_snapshot};
+use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::storage;
+use softprobe_runtime::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -90,7 +90,7 @@ fn profile_enabled() -> bool {
     std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1")
 }
 
-fn format_result(result: &splake::query::duckdb::QueryResult) -> String {
+fn format_result(result: &softprobe_runtime::query::duckdb::QueryResult) -> String {
     let mut output = String::new();
     output.push_str(&format!("columns: {:?}\n", result.columns));
     for row in &result.rows {
@@ -99,7 +99,7 @@ fn format_result(result: &splake::query::duckdb::QueryResult) -> String {
     output
 }
 
-async fn maybe_log_cache_profile(engine: &splake::query::QueryEngine, label: &str) {
+async fn maybe_log_cache_profile(engine: &softprobe_runtime::query::QueryEngine, label: &str) {
     if !profile_enabled() {
         return;
     }
@@ -139,7 +139,7 @@ async fn maybe_log_cache_profile(engine: &splake::query::QueryEngine, label: &st
 }
 
 async fn explain_analyze(
-    engine: &splake::query::QueryEngine,
+    engine: &softprobe_runtime::query::QueryEngine,
     label: &str,
     sql: &str,
 ) {
@@ -156,7 +156,7 @@ async fn explain_analyze(
 }
 
 async fn run_diagnostics(
-    engine: &splake::query::QueryEngine,
+    engine: &softprobe_runtime::query::QueryEngine,
     label: &str,
     sql: &str,
 ) {
@@ -180,11 +180,11 @@ async fn run_diagnostics(
 /// Retry a query with exponential backoff to handle R2 eventual consistency
 /// Returns the query result once it succeeds, or the last error after max retries
 async fn retry_query_until_count(
-    engine: &splake::query::QueryEngine,
+    engine: &softprobe_runtime::query::QueryEngine,
     sql: &str,
     expected_count: i64,
     max_retries: u32,
-) -> Result<splake::query::duckdb::QueryResult, anyhow::Error> {
+) -> Result<softprobe_runtime::query::duckdb::QueryResult, anyhow::Error> {
     let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
     let max_retries = if is_r2 { max_retries.max(10) } else { max_retries };
     

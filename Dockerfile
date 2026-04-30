@@ -1,30 +1,6 @@
-# Multi-stage build for Rust OTLP Backend
-# Stage 1: Build
-# Use nightly for edition2024 support required by apache-avro
-FROM rust:latest AS builder
+# Runtime-only image: build binary natively, then copy it in.
+FROM debian:bookworm-slim AS runtime
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy manifests
-COPY Cargo.toml Cargo.lock ./
-
-# Copy source code
-COPY src ./src
-
-# Build for release
-RUN cargo build --release --features iceberg_catalog
-
-# Stage 2: Runtime
-FROM debian:bookworm-slim
-
-# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
@@ -32,22 +8,23 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the binary from builder
-COPY --from=builder /app/target/release/splake /app/splake
+# Buildx sets TARGETARCH per platform (amd64/arm64).
+# Override BINARY_PATH for custom builds when needed.
+ARG TARGETARCH
+ARG BINARY_PATH=target/linux-${TARGETARCH}/softprobe-runtime
+COPY ${BINARY_PATH} /app/softprobe-runtime
+COPY config.yaml /app/config.yaml
 
-# Create a non-root user
 RUN useradd -m -u 1000 softprobe && \
     chown -R softprobe:softprobe /app
 
 USER softprobe
 
-# Expose the service port
+EXPOSE 8080
 EXPOSE 4317
+EXPOSE 4318
 
-# Set default environment variables
 ENV RUST_LOG=info
-# ENV SERVER__PORT=8080
-# ENV SERVER__HOST=0.0.0.0
+ENV CONFIG_FILE=/app/config.yaml
 
-# Run the binary
-CMD ["/app/splake", "--config", "/app/config.yaml"]
+CMD ["/app/softprobe-runtime"]

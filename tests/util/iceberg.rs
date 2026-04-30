@@ -1,4 +1,4 @@
-use splake::config::Config;
+use softprobe_runtime::config::Config;
 
 pub fn load_test_config() -> Config {
     if let Ok(config_file) = std::env::var("CONFIG_FILE") {

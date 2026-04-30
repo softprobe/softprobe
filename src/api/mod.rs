@@ -2,15 +2,24 @@ pub mod health;
 pub mod ingestion;
 pub mod query;
 
+use crate::authn;
 use crate::config::Config;
 use crate::query::{self as query_engine, QueryEngine};
 use crate::ingest_engine::IngestPipeline;
+use crate::session_redis::RedisStore;
 use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
 use axum::{
-    routing::{get, post},
+    routing::{get, post, MethodRouter},
     Router,
 };
 use std::sync::Arc;
+
+/// Hosted control-plane dependencies (sessions, inject). Present when `SOFTPROBE_AUTH_URL` + Redis are configured.
+#[derive(Clone)]
+pub struct HostedRuntime {
+    pub resolver: authn::Resolver,
+    pub session_store: Arc<tokio::sync::Mutex<RedisStore>>,
+}
 
 // Unified application state for Axum router
 #[derive(Clone)]
@@ -20,6 +29,8 @@ pub struct AppState {
     pub span_buffer: Option<Arc<SpanBuffer>>,
     pub log_buffer: Option<Arc<LogBuffer>>,
     pub metric_buffer: Option<Arc<MetricBuffer>>,
+    /// When set, `/v1/sessions`, `/v1/inject`, and hosted trace ingest are enabled.
+    pub hosted: Option<HostedRuntime>,
 }
 
 pub struct AppPipeline {
@@ -46,14 +57,17 @@ impl AppPipeline {
     }
 
     pub async fn into_router(self) -> anyhow::Result<Router> {
-        create_router(
+        let (r, _) = create_router(
             self.storage,
             self.query_engine,
             Some(self.span_buffer),
             Some(self.log_buffer),
             Some(self.metric_buffer),
+            post(ingestion::traces::ingest_traces),
+            None,
         )
-        .await
+        .await?;
+        Ok(r)
     }
 }
 
@@ -63,24 +77,27 @@ pub async fn create_router(
     span_buffer: Option<SpanBuffer>,
     log_buffer: Option<LogBuffer>,
     metric_buffer: Option<MetricBuffer>,
-) -> anyhow::Result<Router> {
+    traces: MethodRouter<AppState>,
+    hosted: Option<HostedRuntime>,
+) -> anyhow::Result<(Router, AppState)> {
     let state = AppState {
         storage: Arc::new(storage),
         query_engine: Arc::new(query_engine),
         span_buffer: span_buffer.map(Arc::new),
         log_buffer: log_buffer.map(Arc::new),
         metric_buffer: metric_buffer.map(Arc::new),
+        hosted,
     };
 
-    // OTLP standard endpoints
-    let router: Router = Router::new()
+    // OTLP standard endpoints (`with_state` closes the state type → `Router` is ready for `axum::serve`)
+    let router = Router::new()
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
-        .route("/v1/traces", post(ingestion::traces::ingest_traces))
+        .route("/v1/traces", traces)
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/v1/query/sql", post(query::execute_sql))
-        .with_state(state);
+        .with_state(state.clone());
 
-    Ok(router)
+    Ok((router, state))
 }

@@ -1,8 +1,8 @@
 use chrono::Utc;
-use splake::config::{PromotedDataType, SchemaPromotionConfig, TablePromotionConfig};
-use splake::models::Span as SpanData;
-use splake::storage::iceberg::arrow::spans_to_record_batch_with_promotion;
-use splake::storage::iceberg::tables::TraceTable;
+use softprobe_runtime::config::{PromotedDataType, SchemaPromotionConfig, TablePromotionConfig};
+use softprobe_runtime::models::Span as SpanData;
+use softprobe_runtime::storage::iceberg::arrow::spans_to_record_batch_with_promotion;
+use softprobe_runtime::storage::iceberg::tables::TraceTable;
 use std::collections::HashMap;
 use iceberg::Catalog;
 
@@ -13,22 +13,22 @@ async fn test_arrow_conversion_with_promoted_columns() {
     // Create promotion config
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "user.id".to_string(),
                 column_name: Some("user_id".to_string()),
                 data_type: Some(PromotedDataType::String),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "count".to_string(),
                 column_name: Some("count".to_string()),
                 data_type: Some(PromotedDataType::Int),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "price".to_string(),
                 column_name: Some("price".to_string()),
                 data_type: Some(PromotedDataType::Double),
             },
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "is_active".to_string(),
                 column_name: Some("is_active".to_string()),
                 data_type: Some(PromotedDataType::Boolean),
@@ -161,7 +161,7 @@ async fn test_arrow_conversion_with_missing_promoted_attributes() {
     // Test that missing attributes result in NULL values
     let promotion_config = TablePromotionConfig {
         attributes: vec![
-            splake::config::PromotedColumn {
+            softprobe_runtime::config::PromotedColumn {
                 attribute_key: "user.id".to_string(),
                 column_name: Some("user_id".to_string()),
                 data_type: Some(PromotedDataType::String),
@@ -241,7 +241,7 @@ async fn test_table_creation_with_promotion() {
     config.schema_promotion = Some(SchemaPromotionConfig {
         traces: Some(TablePromotionConfig {
             attributes: vec![
-                splake::config::PromotedColumn {
+                softprobe_runtime::config::PromotedColumn {
                     attribute_key: "user.id".to_string(),
                     column_name: Some("user_id".to_string()),
                     data_type: Some(PromotedDataType::String),
@@ -254,11 +254,11 @@ async fn test_table_creation_with_promotion() {
     });
 
     // Drop the table first if it exists (to test schema creation with promotion)
-    let catalog = splake::storage::iceberg::IcebergCatalog::new(&config)
+    let catalog = softprobe_runtime::storage::iceberg::IcebergCatalog::new(&config)
         .await
         .expect("should create catalog");
     let namespace_name = config.iceberg.namespace.as_str();
-    let table_name = splake::storage::iceberg::tables::TraceTable::table_name();
+    let table_name = softprobe_runtime::storage::iceberg::tables::TraceTable::table_name();
     let table_ident = iceberg::TableIdent::from_strs([namespace_name, table_name])
         .expect("table ident");
     
@@ -266,7 +266,7 @@ async fn test_table_creation_with_promotion() {
     let _ = catalog.catalog().drop_table(&table_ident).await;
 
     // Create Iceberg writer (this will create tables with promoted columns)
-    let writer = splake::storage::iceberg::IcebergWriter::new(&config)
+    let writer = softprobe_runtime::storage::iceberg::IcebergWriter::new(&config)
         .await
         .expect("should create writer");
 

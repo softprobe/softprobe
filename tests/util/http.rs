@@ -1,7 +1,9 @@
-use splake::api;
-use splake::config::Config;
-use splake::ingest_engine::IngestPipeline;
-use splake::query;
+use axum::routing::post;
+use softprobe_runtime::api;
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::config::Config;
+use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::query;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
@@ -33,12 +35,14 @@ pub async fn start_test_server() -> (String, TempDir) {
             .await
             .expect("query engine");
 
-    let app = api::create_router(
+    let (app, _) = api::create_router(
         pipeline.storage.clone(),
         query_engine,
         Some(pipeline.storage.span_buffer.clone()),
         Some(pipeline.storage.log_buffer.clone()),
         Some(pipeline.storage.metric_buffer.clone()),
+        post(ingest_traces),
+        None,
     )
     .await
     .expect("router");
@@ -48,9 +52,7 @@ pub async fn start_test_server() -> (String, TempDir) {
     let base_url = format!("http://{}", addr);
 
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .await
-            .expect("serve");
+        axum::serve(listener, app).await.expect("serve");
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

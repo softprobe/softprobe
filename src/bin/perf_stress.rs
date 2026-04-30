@@ -18,7 +18,7 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::metrics::v1::{Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics};
 
-use splake::models::{Log, Metric, Span};
+use softprobe_runtime::models::{Log, Metric, Span};
 use tracing_subscriber;
 
 #[derive(Parser)]

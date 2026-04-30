@@ -14,7 +14,19 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test setup-local teardown-local clean build build-mac build-linux build-docker lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables runtime-binary e2e-up e2e-down
+
+# Host/platform parameters (override on command line if needed, e.g. `make e2e-up TARGET=...`).
+HOST_OS ?= $(shell uname -s)
+HOST_ARCH ?= $(shell uname -m)
+TARGET ?= $(if $(filter $(HOST_ARCH),arm64 aarch64),aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu)
+OUT_ARCH ?= $(if $(filter $(HOST_ARCH),arm64 aarch64),arm64,amd64)
+DOCKER_PLATFORM ?= $(if $(filter $(HOST_OS),Darwin),linux/amd64,$(if $(filter $(HOST_ARCH),arm64 aarch64),linux/arm64,linux/amd64))
+DOCKER_TARGET ?= $(if $(filter $(DOCKER_PLATFORM),linux/arm64),aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu)
+DOCKER_OUT_ARCH ?= $(if $(filter $(DOCKER_PLATFORM),linux/arm64),arm64,amd64)
+DOCKER_TAGS ?= softprobe-runtime:dev
+BUILD_DOCKER_PUSH ?= 0
+FORCE_RUNTIME_BUILD ?= 0
 
 # Default target
 help:
@@ -59,17 +71,97 @@ help:
 
 # Build targets
 build:
-	@echo "🔨 Building project..."
+	@echo "🔨 Building project natively for host..."
 	cargo build
+
+build-docker:
+	@echo "🐳 Building Docker image for $(DOCKER_PLATFORM)..."
+	@if [ "$(HOST_OS)" = "Darwin" ] && [ "$(DOCKER_PLATFORM)" = "linux/arm64" ]; then \
+		echo "WARNING: linux/arm64 cross build on macOS is currently unreliable with bundled duckdb C++ toolchain."; \
+		echo "Use default linux/amd64 for faster, stable local builds."; \
+	fi
+	@$(MAKE) runtime-binary TARGET=$(DOCKER_TARGET) OUT_ARCH=$(DOCKER_OUT_ARCH)
+	@TAG_ARGS=""; \
+	for tag in $(DOCKER_TAGS); do \
+		TAG_ARGS="$$TAG_ARGS -t $$tag"; \
+	done; \
+	if [ "$(BUILD_DOCKER_PUSH)" = "1" ]; then \
+		docker buildx build --platform "$(DOCKER_PLATFORM)" --push $$TAG_ARGS .; \
+	else \
+		docker buildx build --platform "$(DOCKER_PLATFORM)" --load $$TAG_ARGS .; \
+	fi
 
 build-release:
 	@echo "🔨 Building release..."
 	cargo build --release
 
-# Artifact Registry only — do not revert to gcr.io (see .github/workflows/softprobe-publish.yml).
+# Aliases for explicit Linux artifact staging.
+build-mac:
+	@$(MAKE) runtime-binary TARGET=aarch64-unknown-linux-gnu OUT_ARCH=arm64
+
+build-linux:
+	@$(MAKE) runtime-binary TARGET=x86_64-unknown-linux-gnu OUT_ARCH=amd64
+
+# CI/publish convenience target (linux/amd64 push).
 publish-docker:
-	@echo "🔨 Publishing Docker image..."
-	docker buildx build --platform linux/amd64 --push -t us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:latest .
+	@echo "🚀 Publishing Docker image..."
+	@$(MAKE) build-docker \
+		DOCKER_PLATFORM=linux/amd64 \
+		DOCKER_TARGET=x86_64-unknown-linux-gnu \
+		DOCKER_OUT_ARCH=amd64 \
+		DOCKER_TAGS=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:latest \
+		BUILD_DOCKER_PUSH=1
+
+# Build Linux runtime binary and stage for Dockerfile COPY.
+# Reuses staged artifact unless FORCE_RUNTIME_BUILD=1.
+runtime-binary:
+	@if pgrep -f "cross \\+stable build --release --features iceberg_catalog --bin softprobe-runtime --target $(TARGET)" >/dev/null 2>&1; then \
+		echo "Another cross build for $(TARGET) is already running. Stop it first to avoid cargo lock contention."; \
+		exit 2; \
+	fi
+	@if [ -f "target/linux-$(OUT_ARCH)/softprobe-runtime" ] && [ "$(FORCE_RUNTIME_BUILD)" != "1" ]; then \
+		echo "Using cached staged binary target/linux-$(OUT_ARCH)/softprobe-runtime (FORCE_RUNTIME_BUILD=1 to rebuild)"; \
+		exit 0; \
+	fi
+	@echo "Building softprobe-runtime for $(TARGET) (host: $(HOST_OS)/$(HOST_ARCH))..."
+	@if [ "$(HOST_OS)" = "Darwin" ]; then \
+		if ! command -v cross >/dev/null 2>&1; then \
+			echo "ERROR: cross is required on macOS for Linux-target builds."; \
+			echo "Install with: cargo install cross --git https://github.com/cross-rs/cross"; \
+			exit 1; \
+		fi; \
+		if [ "$(TARGET)" = "x86_64-unknown-linux-gnu" ]; then \
+			CROSS_CONTAINER_OPTS="--platform=linux/amd64" \
+			CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+			CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
+			cross +stable build --release --features iceberg_catalog --bin softprobe-runtime --target "$(TARGET)"; \
+		else \
+			CROSS_CONTAINER_OPTS="--platform=linux/amd64" \
+			CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+			CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
+			CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+			CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
+			cross +stable build --release --features iceberg_catalog --bin softprobe-runtime --target "$(TARGET)"; \
+		fi; \
+	else \
+		rustup target add "$(TARGET)" >/dev/null 2>&1 || true; \
+		cargo build --release --features iceberg_catalog --bin softprobe-runtime --target "$(TARGET)"; \
+	fi
+	@mkdir -p "target/linux-$(OUT_ARCH)"
+	@cp "target/$(TARGET)/release/softprobe-runtime" "target/linux-$(OUT_ARCH)/softprobe-runtime"
+	@echo "Staged target/linux-$(OUT_ARCH)/softprobe-runtime"
+
+# e2e convenience.
+e2e-up:
+	@if [ "$(SKIP_RUNTIME_BUILD)" != "1" ]; then \
+		$(MAKE) runtime-binary; \
+	else \
+		echo "Skipping runtime-binary build (SKIP_RUNTIME_BUILD=1)"; \
+	fi
+	@docker compose -f ../e2e/docker-compose.yaml up --build --wait
+
+e2e-down:
+	@docker compose -f ../e2e/docker-compose.yaml down
 
 # Code quality targets
 lint:

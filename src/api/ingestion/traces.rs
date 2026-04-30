@@ -137,8 +137,8 @@ pub async fn ingest_traces(
     }
 }
 
-/// Core OTLP processing logic
-async fn process_traces(
+/// Core OTLP processing logic (shared by HTTP and gRPC ingest).
+pub async fn process_traces(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,

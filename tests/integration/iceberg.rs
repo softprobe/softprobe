@@ -1,6 +1,6 @@
 use chrono::Utc;
-use splake::config::Config;
-use splake::models::{Log as LogData, Span as SpanData, SpanEvent};
+use softprobe_runtime::config::Config;
+use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -26,7 +26,7 @@ async fn test_iceberg_writer_initialization() {
     let timer = Timer::start("Iceberg Writer Initialization");
 
     // Test that the Iceberg writer can be initialized with real REST catalog
-    let result = splake::storage::iceberg::IcebergWriter::new(&config).await;
+    let result = softprobe_runtime::storage::iceberg::IcebergWriter::new(&config).await;
 
     let init_duration = timer.stop();
 
@@ -886,7 +886,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_metric_roundtrip() {
-    use splake::models::Metric;
+    use softprobe_runtime::models::Metric;
 
     let mut config = load_test_config();
     warn_if_minio_unresolvable();
@@ -1117,7 +1117,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 #[tokio::test]
 async fn test_http_fields_in_span_model() {
     use chrono::Utc;
-    use splake::models::Span as SpanData;
+    use softprobe_runtime::models::Span as SpanData;
     use std::collections::HashMap;
 
     println!("🧪 Testing HTTP fields in Span model...");
@@ -1454,7 +1454,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 
 #[tokio::test]
 async fn test_wal_replay_recovers_spans() {
-    use splake::query;
+    use softprobe_runtime::query;
     use tempfile::tempdir;
 
     let mut config = load_test_config();
@@ -1495,7 +1495,7 @@ async fn test_wal_replay_recovers_spans() {
         status_message: None,
     };
 
-    let pipeline = splake::ingest_engine::IngestPipeline::new(&config)
+    let pipeline = softprobe_runtime::ingest_engine::IngestPipeline::new(&config)
         .await
         .expect("pipeline");
     pipeline
@@ -1505,7 +1505,7 @@ async fn test_wal_replay_recovers_spans() {
     drop(pipeline);
 
     config.ingest_engine.replay_wal_on_startup = true;
-    let pipeline = splake::ingest_engine::IngestPipeline::new(&config)
+    let pipeline = softprobe_runtime::ingest_engine::IngestPipeline::new(&config)
         .await
         .expect("pipeline");
     let wal_count = pipeline
@@ -1549,10 +1549,10 @@ async fn test_wal_replay_recovers_spans() {
 async fn test_metadata_maintenance_job_expires_snapshots() {
     use chrono::{Duration as ChronoDuration, Utc};
     use iceberg::{Catalog, TableCreation, TableIdent};
-    use splake::compaction::executor::{
+    use softprobe_runtime::compaction::executor::{
         ActionStatus, CompactionStatus, MaintenanceExecutor,
     };
-    use splake::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
+    use softprobe_runtime::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
     use std::collections::HashMap;
 
     let mut config = load_test_config();

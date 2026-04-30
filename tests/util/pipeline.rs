@@ -1,6 +1,6 @@
-use splake::config::Config;
-use splake::query::{self, QueryEngine};
-use splake::ingest_engine::IngestPipeline;
+use softprobe_runtime::config::Config;
+use softprobe_runtime::query::{self, QueryEngine};
+use softprobe_runtime::ingest_engine::IngestPipeline;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -35,7 +35,7 @@ impl TestPipeline {
     pub async fn execute_query(
         &self,
         sql: &str,
-    ) -> anyhow::Result<splake::query::duckdb::QueryResult> {
+    ) -> anyhow::Result<softprobe_runtime::query::duckdb::QueryResult> {
         self.query_engine.execute_query(sql).await
     }
 

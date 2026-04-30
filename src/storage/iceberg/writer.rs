@@ -2,15 +2,18 @@ use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use iceberg::{
+    spec::PartitionKey,
     spec::DataFileFormat,
     spec::{Literal, Schema as IcebergSchema, Struct},
     transaction::{ApplyTransactionAction, Transaction},
     writer::base_writer::data_file_writer::DataFileWriterBuilder,
     writer::file_writer::{
         location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
+        rolling_writer::RollingFileWriterBuilder,
         ParquetWriterBuilder,
     },
-    writer::{IcebergWriter, IcebergWriterBuilder},
+    writer::partitioning::clustered_writer::ClusteredWriter,
+    writer::partitioning::PartitioningWriter,
     Catalog, TableIdent,
 };
 use iceberg_catalog_rest::RestCatalog;
@@ -201,52 +204,38 @@ impl TableWriter {
             .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
             .build();
 
-        // Create a parquet file writer builder
         let parquet_writer_builder = ParquetWriterBuilder::new(
             writer_props,
             table.metadata().current_schema().clone(),
-            None,
+        );
+
+        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
+            parquet_writer_builder,
             table.file_io().clone(),
             location_generator,
             file_name_generator,
         );
 
-        // Create a data file writer using parquet file writer builder
-        let partition_spec_id = table.metadata().default_partition_spec_id();
+        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let mut clustered_writer = ClusteredWriter::new(data_file_writer_builder);
 
-        // Compute partition value from first record's timestamp
-        // Convert first record to RecordBatch to extract record_date
-        let first_batch = batches
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No batches to write"))?;
+        let partition_spec = table.metadata().default_partition_spec().as_ref().clone();
+        let schema = table.metadata().current_schema().clone();
 
-        // Convert to RecordBatch to extract partition value
-        let first_record_batch = to_record_batch(first_batch, table.metadata().current_schema())?;
-        let partition_value = extract_partition_value(&first_record_batch)?;
-
-        let data_file_writer_builder = DataFileWriterBuilder::new(
-            parquet_writer_builder,
-            Some(partition_value.clone()),
-            partition_spec_id,
-        );
-
-        // Build the data file writer
-        let mut data_file_writer = data_file_writer_builder.build().await?;
-
-        // Write each batch as a separate row group
         for (batch_idx, batch_records) in batches.iter().enumerate() {
             let record_batch = to_record_batch(batch_records, table.metadata().current_schema())?;
+            let partition_value = extract_partition_value(&record_batch)?;
+            let pk = PartitionKey::new(partition_spec.clone(), schema.clone(), partition_value);
             debug!(
                 "Writing row group {}/{} with {} records",
                 batch_idx + 1,
                 batches.len(),
                 batch_records.len()
             );
-            data_file_writer.write(record_batch).await?;
+            clustered_writer.write(pk, record_batch).await?;
         }
 
-        // Close the writer and get the data files (single file with multiple row groups)
-        let data_files = data_file_writer.close().await?;
+        let data_files = clustered_writer.close().await?;
         info!("Closed writer, created {} data file(s)", data_files.len());
 
         // Add the data files to the table through a transaction
@@ -277,36 +266,34 @@ impl TableWriter {
         let parquet_writer_builder = ParquetWriterBuilder::new(
             writer_props,
             table.metadata().current_schema().clone(),
-            None,
+        );
+
+        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
+            parquet_writer_builder,
             table.file_io().clone(),
             location_generator,
             file_name_generator,
         );
 
-        let partition_spec_id = table.metadata().default_partition_spec_id();
-        let first_record_batch = record_batches
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No record batches to write"))?;
-        let partition_value = extract_partition_value(first_record_batch)?;
+        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let mut clustered_writer = ClusteredWriter::new(data_file_writer_builder);
 
-        let data_file_writer_builder = DataFileWriterBuilder::new(
-            parquet_writer_builder,
-            Some(partition_value.clone()),
-            partition_spec_id,
-        );
-        let mut data_file_writer = data_file_writer_builder.build().await?;
+        let partition_spec = table.metadata().default_partition_spec().as_ref().clone();
+        let schema = table.metadata().current_schema().clone();
 
         for (batch_idx, record_batch) in record_batches.iter().enumerate() {
+            let partition_value = extract_partition_value(record_batch)?;
+            let pk = PartitionKey::new(partition_spec.clone(), schema.clone(), partition_value);
             debug!(
                 "Writing row group {}/{} with {} records",
                 batch_idx + 1,
                 record_batches.len(),
                 record_batch.num_rows()
             );
-            data_file_writer.write(record_batch.clone()).await?;
+            clustered_writer.write(pk, record_batch.clone()).await?;
         }
 
-        let data_files = data_file_writer.close().await?;
+        let data_files = clustered_writer.close().await?;
         info!("Closed writer, created {} data file(s)", data_files.len());
 
         let transaction = Transaction::new(&table);
