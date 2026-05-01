@@ -470,8 +470,9 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
         table: &str,
     ) -> Result<CompactionStatus> {
-        // DuckLake expects size literals; set_option uses bare table_name + optional schema.
-        let scope = crate::storage::ducklake::ducklake_set_option_scope(ducklake, table);
+        // Match qualified name used for tables (see ducklake_qualified_table_name).
+        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
+        let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
         let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', {});",
@@ -479,13 +480,43 @@ impl MaintenanceExecutor {
             target_file_size,
             scope
         );
-        conn.execute_batch(&set_target)?;
+        if let Err(err) = execute_batch_with_serialization_retry(
+            conn,
+            &set_target,
+            3,
+            &format!("ducklake set_option target_file_size {}", qualified),
+        ) {
+            if is_ducklake_serialization_conflict(&err) {
+                warn!(
+                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                    qualified, err
+                );
+                return Ok(CompactionStatus::Skipped);
+            }
+            return Err(anyhow!(
+                "DuckLake set_option failed for {}: {}",
+                qualified,
+                err
+            ));
+        }
         let sql = format!(
             "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}');",
             ducklake.catalog_alias, table, ducklake.metadata_schema
         );
-        match conn.execute_batch(&sql) {
+        match execute_batch_with_serialization_retry(
+            conn,
+            &sql,
+            3,
+            &format!("ducklake_merge_adjacent_files {}", qualified),
+        ) {
             Ok(_) => Ok(CompactionStatus::Completed),
+            Err(err) if is_ducklake_serialization_conflict(&err) => {
+                warn!(
+                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                    qualified, err
+                );
+                Ok(CompactionStatus::Skipped)
+            }
             Err(err) if is_ducklake_unsupported(&err) => Ok(CompactionStatus::Unsupported),
             Err(err) => Err(anyhow!(
                 "DuckLake compaction failed for {}.{}: {}",
@@ -886,6 +917,37 @@ fn is_ducklake_unsupported(err: &duckdb::Error) -> bool {
             && (msg.contains("does not exist") || msg.contains("not found"))
         || msg.contains("no function matches")
         || msg.contains("not implemented")
+}
+
+fn is_ducklake_serialization_conflict(err: &duckdb::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("could not serialize access due to concurrent update")
+        || msg.contains("serialization failure")
+}
+
+fn execute_batch_with_serialization_retry(
+    conn: &Connection,
+    sql: &str,
+    max_attempts: usize,
+    action: &str,
+) -> std::result::Result<(), duckdb::Error> {
+    let attempts = std::cmp::max(1, max_attempts);
+    let mut backoff_ms = 150u64;
+    for attempt in 1..=attempts {
+        match conn.execute_batch(sql) {
+            Ok(()) => return Ok(()),
+            Err(err) if is_ducklake_serialization_conflict(&err) && attempt < attempts => {
+                warn!(
+                    "Retrying {} after transient serialization conflict (attempt {}/{}): {}",
+                    action, attempt, attempts, err
+                );
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                backoff_ms = backoff_ms.saturating_mul(2);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {

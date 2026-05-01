@@ -12,8 +12,8 @@ SET cache_httpfs_type = 'on_disk';
 -- Reserve 10GB of disk space (value in bytes)
 SET cache_httpfs_min_disk_bytes_for_cache = 10737418240;
 
--- Use LRU eviction for better cache efficiency
-SET cache_httpfs_evict_policy = 'lru_single_proc';
+-- LRU-style eviction (valid values depend on cache_httpfs version; lru_sp replaces legacy lru_single_proc)
+SET cache_httpfs_evict_policy = 'lru_sp';
 
 -- Set the directory where the cache should live
 -- SET cache_httpfs_cache_directory = ?;

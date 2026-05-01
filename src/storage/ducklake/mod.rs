@@ -202,7 +202,7 @@ impl DuckLakeWriter {
             match conn.execute_batch(&ddl).and_then(|_| conn.execute_batch(&insert)) {
                 Ok(_) => {
                     conn.execute_batch("COMMIT;")?;
-                    self.apply_table_options(&conn, table_name);
+                    self.apply_table_options(&conn, &qualified_table);
                     wrote = true;
                     break;
                 }
@@ -360,13 +360,13 @@ impl DuckLakeWriter {
     }
 
     fn qualified_table_name(&self, table_name: &str) -> String {
-        format!(
-            "{}.{}.{}",
-            self.ducklake.catalog_alias, self.ducklake.metadata_schema, table_name
-        )
+        ducklake_qualified_table_name(&self.ducklake, table_name)
     }
 
     fn table_name_candidates(&self, table_name: &str) -> Vec<String> {
+        // Prefer catalog.schema.table when metadata lives in a non-main schema; fall back to
+        // catalog.table if the engine rejects the three-part name. set_option scope must match
+        // whichever form succeeds (see apply_table_options).
         vec![
             self.qualified_table_name(table_name),
             format!("{}.{}", self.ducklake.catalog_alias, table_name),
@@ -399,9 +399,12 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    fn apply_table_options(&self, conn: &Connection, table_name: &str) {
-        // DuckLake docs: `table_name` is the bare Iceberg table name; use `schema =>` when not `main`.
-        let scope = ducklake_set_option_scope(&self.ducklake, table_name);
+    fn apply_table_options(&self, conn: &Connection, qualified_table: &str) {
+        // Scope must match how the table was created (`catalog.table` vs `catalog.schema.table`).
+        // TODO(bill): Avoid calling set_option on every write/maintenance cycle. Persist and compare
+        // desired option values (e.g. in-memory cache or metadata bootstrap marker), then only update
+        // when changed to reduce DuckLake metadata contention on Postgres.
+        let scope = ducklake_set_option_scope_for_qualified(qualified_table);
         let stmts = [
             format!(
                 "CALL {}.set_option('target_file_size', '{}', {});",
@@ -448,15 +451,37 @@ fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
 }
 
-/// Scoping clause for `CALL <catalog>.set_option(...)`: bare `table_name`, optional `schema`.
-/// See DuckLake configuration docs (blobs.duckdb.org/docs/ducklake-docs.md).
-pub(crate) fn ducklake_set_option_scope(ducklake: &DuckLakeConfig, bare_table: &str) -> String {
-    let t = escape_sql_literal(bare_table);
-    if ducklake.metadata_schema == "main" {
-        format!("table_name => '{t}'")
+/// Fully qualified DuckLake table name used for CREATE / INSERT (`catalog.table` when
+/// `metadata_schema` is `main`, else `catalog.metadata_schema.table`).
+pub(crate) fn ducklake_qualified_table_name(cfg: &DuckLakeConfig, bare_table: &str) -> String {
+    if cfg.metadata_schema == "main" {
+        format!("{}.{}", cfg.catalog_alias, bare_table)
     } else {
-        let s = escape_sql_literal(&ducklake.metadata_schema);
-        format!("schema => '{s}', table_name => '{t}'")
+        format!(
+            "{}.{}.{}",
+            cfg.catalog_alias, cfg.metadata_schema, bare_table
+        )
+    }
+}
+
+/// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
+/// Two-part `catalog.table` → `table_name` only; three-part → `schema` + `table_name`.
+pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> String {
+    let parts: Vec<&str> = qualified_table.split('.').collect();
+    match parts.len() {
+        3 => {
+            let s = escape_sql_literal(parts[1]);
+            let t = escape_sql_literal(parts[2]);
+            format!("schema => '{s}', table_name => '{t}'")
+        }
+        2 => {
+            let t = escape_sql_literal(parts[1]);
+            format!("table_name => '{t}'")
+        }
+        _ => {
+            let t = escape_sql_literal(parts.last().copied().unwrap_or(""));
+            format!("table_name => '{t}'")
+        }
     }
 }
 

@@ -801,15 +801,7 @@ fn group_by_date(
 }
 
 async fn cleanup_cache(kind: &str, cache_dir: Option<&Path>, items: Vec<StagedBatch>) {
-    for item in items {
-        if let Some(path) = item.cache_path {
-            if let Err(err) = tokio::fs::remove_file(&path).await {
-                warn!("Failed to remove staged cache file {:?}: {}", path, err);
-            }
-        }
-    }
-    
-    // Update watermark so query engine refreshes the staged view
+    // Update watermark first so query workers refresh staged views before any file deletions.
     if let Some(cache_dir) = cache_dir {
         let marker_dir = cache_dir.join("staged_watermarks");
         let marker_path = marker_dir.join(format!("{kind}.txt"));
@@ -817,6 +809,14 @@ async fn cleanup_cache(kind: &str, cache_dir: Option<&Path>, items: Vec<StagedBa
         if std::fs::create_dir_all(&marker_dir).is_ok() {
             if std::fs::write(&marker_tmp, chrono::Utc::now().to_rfc3339()).is_ok() {
                 let _ = std::fs::rename(&marker_tmp, &marker_path);
+            }
+        }
+    }
+
+    for item in items {
+        if let Some(path) = item.cache_path {
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                warn!("Failed to remove staged cache file {:?}: {}", path, err);
             }
         }
     }
