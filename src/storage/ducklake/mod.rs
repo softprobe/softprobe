@@ -400,18 +400,18 @@ impl DuckLakeWriter {
     }
 
     fn apply_table_options(&self, conn: &Connection, table_name: &str) {
-        // DuckLake resolves tables as catalog.schema.name; bare names fail when metadata_schema != main.
-        let qtable = self.qualified_table_name(table_name);
+        // DuckLake docs: `table_name` is the bare Iceberg table name; use `schema =>` when not `main`.
+        let scope = ducklake_set_option_scope(&self.ducklake, table_name);
         let stmts = [
             format!(
-                "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
+                "CALL {}.set_option('target_file_size', '{}', {});",
                 self.ducklake.catalog_alias,
                 size_literal(self.config.compaction.target_file_size_bytes),
-                qtable
+                scope
             ),
             format!(
-                "CALL {}.set_option('hive_file_pattern', true, table_name => '{}');",
-                self.ducklake.catalog_alias, qtable
+                "CALL {}.set_option('hive_file_pattern', true, {});",
+                self.ducklake.catalog_alias, scope
             ),
         ];
         for stmt in stmts {
@@ -446,6 +446,18 @@ impl DuckLakeWriter {
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+/// Scoping clause for `CALL <catalog>.set_option(...)`: bare `table_name`, optional `schema`.
+/// See DuckLake configuration docs (blobs.duckdb.org/docs/ducklake-docs.md).
+pub(crate) fn ducklake_set_option_scope(ducklake: &DuckLakeConfig, bare_table: &str) -> String {
+    let t = escape_sql_literal(bare_table);
+    if ducklake.metadata_schema == "main" {
+        format!("table_name => '{t}'")
+    } else {
+        let s = escape_sql_literal(&ducklake.metadata_schema);
+        format!("schema => '{s}', table_name => '{t}'")
+    }
 }
 
 fn size_literal(bytes: usize) -> String {

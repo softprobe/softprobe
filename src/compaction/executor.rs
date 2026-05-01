@@ -470,14 +470,14 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
         table: &str,
     ) -> Result<CompactionStatus> {
-        // DuckLake expects size literals with units for this option.
-        let qtable = format!("{}.{}.{}", ducklake.catalog_alias, ducklake.metadata_schema, table);
+        // DuckLake expects size literals; set_option uses bare table_name + optional schema.
+        let scope = crate::storage::ducklake::ducklake_set_option_scope(ducklake, table);
         let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
         let set_target = format!(
-            "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
+            "CALL {}.set_option('target_file_size', '{}', {});",
             ducklake.catalog_alias,
             target_file_size,
-            qtable
+            scope
         );
         conn.execute_batch(&set_target)?;
         let sql = format!(
