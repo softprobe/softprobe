@@ -2,8 +2,8 @@ use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use iceberg::{
-    spec::PartitionKey,
     spec::DataFileFormat,
+    spec::PartitionKey,
     spec::{Literal, Schema as IcebergSchema, Struct},
     transaction::{ApplyTransactionAction, Transaction},
     writer::base_writer::data_file_writer::DataFileWriterBuilder,
@@ -204,10 +204,8 @@ impl TableWriter {
             .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
             .build();
 
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            writer_props,
-            table.metadata().current_schema().clone(),
-        );
+        let parquet_writer_builder =
+            ParquetWriterBuilder::new(writer_props, table.metadata().current_schema().clone());
 
         let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
             parquet_writer_builder,
@@ -263,10 +261,8 @@ impl TableWriter {
             .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
             .build();
 
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            writer_props,
-            table.metadata().current_schema().clone(),
-        );
+        let parquet_writer_builder =
+            ParquetWriterBuilder::new(writer_props, table.metadata().current_schema().clone());
 
         let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
             parquet_writer_builder,

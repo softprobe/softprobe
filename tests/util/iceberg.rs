@@ -30,10 +30,7 @@ fn assign_unique_ducklake_paths(config: &mut Config) {
     if let Some(ducklake) = config.ducklake.as_mut() {
         let base = std::env::temp_dir().join(format!("splake-tests-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&base);
-        ducklake.metadata_path = base
-            .join("metadata.ducklake")
-            .to_string_lossy()
-            .to_string();
+        ducklake.metadata_path = base.join("metadata.ducklake").to_string_lossy().to_string();
         ducklake.data_path = base.join("data").to_string_lossy().to_string();
         let _ = std::fs::create_dir_all(&ducklake.data_path);
     }
@@ -65,7 +62,7 @@ pub fn ensure_wal_bucket(config: &mut Config) {
 }
 
 /// Check if minio hostname resolves (needed for local testing when REST catalog returns minio:9000 URLs)
-/// 
+///
 /// This is informational only - if minio doesn't resolve and tests fail with connection errors,
 /// users should:
 /// - Add `127.0.0.1 minio` to `/etc/hosts` (requires sudo), OR

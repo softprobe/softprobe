@@ -27,8 +27,7 @@ pub async fn start_test_server() -> (String, TempDir) {
 
     let cache_dir = TempDir::new().expect("tempdir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir =
-        Some(cache_dir.path().join("wal").to_string_lossy().to_string());
+    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
     if config.ducklake.is_none() {
         config.ducklake = Some(config.ducklake_or_default());
     }

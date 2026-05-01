@@ -1,13 +1,13 @@
+use crate::util::iceberg::{ensure_wal_bucket, load_test_config, warn_if_minio_unresolvable};
+use crate::util::perf::{PerformanceMetrics, Timer};
+use crate::util::pipeline::TestPipeline;
+use crate::util::poll::wait_for;
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
-use crate::util::iceberg::{ensure_wal_bucket, load_test_config, warn_if_minio_unresolvable};
-use crate::util::perf::{PerformanceMetrics, Timer};
-use crate::util::pipeline::TestPipeline;
-use crate::util::poll::wait_for;
 
 // Note: perf + config helpers live under `tests/util/`.
 
@@ -253,10 +253,13 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
         )
         .await
         .expect("span add should succeed");
-    
+
     // Flush to staged cache (not WAL)
-    pipeline.force_flush_spans().await.expect("force flush spans");
-    
+    pipeline
+        .force_flush_spans()
+        .await
+        .expect("force flush spans");
+
     let write_duration = write_timer.stop();
 
     // Report write performance
@@ -271,13 +274,22 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     // After flush, we should have BOTH staged (for queries) and WAL (for recovery) files
     let staged_files = pipeline.list_staged_files("spans").expect("staged files");
-    assert!(!staged_files.is_empty(), "Expected staged cache files for spans");
-    
-    let wal_files = pipeline.list_wal_files("spans").expect("wal files");
-    assert!(!wal_files.is_empty(), "Expected WAL cache files for spans (for crash recovery)");
+    assert!(
+        !staged_files.is_empty(),
+        "Expected staged cache files for spans"
+    );
 
-    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
-             staged_files.len(), wal_files.len());
+    let wal_files = pipeline.list_wal_files("spans").expect("wal files");
+    assert!(
+        !wal_files.is_empty(),
+        "Expected WAL cache files for spans (for crash recovery)"
+    );
+
+    println!(
+        "✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)",
+        staged_files.len(),
+        wal_files.len()
+    );
     println!("✅ Querying back each session to verify row group isolation...");
 
     // Query each session individually to verify row group isolation
@@ -429,27 +441,27 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     // After optimizer commits, data is in Iceberg and should be immediately queryable via union view.
     // For DuckLake-backed tests we currently validate staged cleanup and pre-optimizer union-read.
     if test_pipeline.config.ducklake.is_none() {
-    for (session_idx, session_id) in session_ids.iter().enumerate() {
-        let escaped = session_id.replace('\'', "''");
-        // Query union_spans - should include all three tiers (buffer + staged + iceberg)
-        // After optimizer, staged is empty but union view should refresh and query Iceberg
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
-            escaped
-        );
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-        
-        assert_eq!(
-            found, spans_per_session,
-            "Expected union view to return {} spans for session {} after optimizer, found {}",
-            spans_per_session, session_id, found
-        );
+        for (session_idx, session_id) in session_ids.iter().enumerate() {
+            let escaped = session_id.replace('\'', "''");
+            // Query union_spans - should include all three tiers (buffer + staged + iceberg)
+            // After optimizer, staged is empty but union view should refresh and query Iceberg
+            let sql = format!(
+                "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+                escaped
+            );
+            let result = test_pipeline.execute_query(&sql).await.expect("query");
+            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
 
-        // Check if HTTP fields are present in union view
-        // Note: HTTP fields are only on the first span (i==0) of each session
-        let http_sql = format!(
-            "SELECT \
+            assert_eq!(
+                found, spans_per_session,
+                "Expected union view to return {} spans for session {} after optimizer, found {}",
+                spans_per_session, session_id, found
+            );
+
+            // Check if HTTP fields are present in union view
+            // Note: HTTP fields are only on the first span (i==0) of each session
+            let http_sql = format!(
+                "SELECT \
                 http_request_method, \
                 http_request_path, \
                 http_request_headers, \
@@ -460,64 +472,64 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
              FROM union_spans \
              WHERE session_id = '{}' AND http_request_method IS NOT NULL \
              LIMIT 1",
-            escaped
-        );
-        let http_result = test_pipeline
-            .execute_query(&http_sql)
-            .await
-            .expect("http query");
-        
-        assert_eq!(
+                escaped
+            );
+            let http_result = test_pipeline
+                .execute_query(&http_sql)
+                .await
+                .expect("http query");
+
+            assert_eq!(
             http_result.row_count, 1,
             "Expected HTTP fields row for session {} in union view. All {} spans were committed, so the first span with HTTP fields should be present.",
             session_id, spans_per_session
         );
-        let row = &http_result.rows[0];
-        let method = row[0].as_str().unwrap_or("");
-        let path = row[1].as_str().unwrap_or("");
-        let headers = row[2].as_str().unwrap_or("");
-        let body = row[3].as_str().unwrap_or("");
-        let status = row[4].as_i64().unwrap_or(0);
-        let resp_headers = row[5].as_str().unwrap_or("");
-        let resp_body = row[6].as_str().unwrap_or("");
+            let row = &http_result.rows[0];
+            let method = row[0].as_str().unwrap_or("");
+            let path = row[1].as_str().unwrap_or("");
+            let headers = row[2].as_str().unwrap_or("");
+            let body = row[3].as_str().unwrap_or("");
+            let status = row[4].as_i64().unwrap_or(0);
+            let resp_headers = row[5].as_str().unwrap_or("");
+            let resp_body = row[6].as_str().unwrap_or("");
 
-        assert_eq!(
-            method, "POST",
-            "HTTP method should be POST for session {}",
-            session_idx
-        );
-        assert_eq!(
-            path,
-            format!("/api/v1/session/{}", session_idx),
-            "HTTP path should match for session {}",
-            session_idx
-        );
-        assert!(
-            headers.contains("Authorization"),
-            "HTTP request headers should contain Authorization for session {}",
-            session_idx
-        );
-        assert!(
-            body.contains("session_id"),
-            "HTTP request body should contain session_id for session {}",
-            session_idx
-        );
-        assert_eq!(
-            status, 200,
-            "HTTP response status should be 200 for session {}",
-            session_idx
-        );
-        assert!(
-            resp_headers.contains("X-Request-Id"),
-            "HTTP response headers should contain X-Request-Id for session {}",
-            session_idx
-        );
-        assert!(
-            resp_body.contains("success"),
-            "HTTP response body should contain success for session {}",
-            session_idx
-        );
-    }
+            assert_eq!(
+                method, "POST",
+                "HTTP method should be POST for session {}",
+                session_idx
+            );
+            assert_eq!(
+                path,
+                format!("/api/v1/session/{}", session_idx),
+                "HTTP path should match for session {}",
+                session_idx
+            );
+            assert!(
+                headers.contains("Authorization"),
+                "HTTP request headers should contain Authorization for session {}",
+                session_idx
+            );
+            assert!(
+                body.contains("session_id"),
+                "HTTP request body should contain session_id for session {}",
+                session_idx
+            );
+            assert_eq!(
+                status, 200,
+                "HTTP response status should be 200 for session {}",
+                session_idx
+            );
+            assert!(
+                resp_headers.contains("X-Request-Id"),
+                "HTTP response headers should contain X-Request-Id for session {}",
+                session_idx
+            );
+            assert!(
+                resp_body.contains("success"),
+                "HTTP response body should contain success for session {}",
+                session_idx
+            );
+        }
     }
 
     println!("\n✅ WAL, local cache, and optimizer paths validated for spans");
@@ -575,10 +587,7 @@ async fn test_duckdb_union_read_realtime_performance() {
         .await
         .expect("base add");
     pipeline.force_flush_spans().await.expect("base flush");
-    pipeline
-        .run_optimizer_once()
-        .await
-        .expect("base optimize");
+    pipeline.run_optimizer_once().await.expect("base optimize");
 
     let mut staged_spans = Vec::new();
     for i in 0..100 {
@@ -788,12 +797,9 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         .add_logs(all_logs, total_logs * 256)
         .await
         .expect("add logs should succeed");
-    
-    pipeline
-        .force_flush_logs()
-        .await
-        .expect("force flush logs");
-    
+
+    pipeline.force_flush_logs().await.expect("force flush logs");
+
     let write_duration = write_timer.stop();
 
     // Report write performance
@@ -807,86 +813,95 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 
     // After flush, we should have BOTH staged (for queries) and WAL (for recovery) files
     let staged_files = pipeline.list_staged_files("logs").expect("staged files");
-    assert!(!staged_files.is_empty(), "Expected staged parquet cache files for logs");
-    
-    let wal_files = pipeline.list_wal_files("logs").expect("wal files");
-    assert!(!wal_files.is_empty(), "Expected WAL cache files for logs (for crash recovery)");
-
-    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
-             staged_files.len(), wal_files.len());
-    println!("✅ Querying back each session through DuckDB union view...");
-
-    if test_pipeline.config.ducklake.is_none() {
-    for session_id in &session_ids {
-        let escaped = session_id.replace('\'', "''");
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
-            escaped
-        );
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-        assert_eq!(
-            found, logs_per_session,
-            "Expected exactly {} logs for session {}, found {}",
-            logs_per_session, session_id, found
-        );
-    }
-
-    println!(
-        "✅ WAL-backed union-read validated for {} log sessions",
-        num_sessions
-    );
-
-    println!("🔄 Forcing flush to staged local cache...");
-    pipeline.force_flush_logs().await.expect("force flush");
-
-    let staged_files = pipeline.list_staged_files("logs").expect("staged files");
     assert!(
         !staged_files.is_empty(),
         "Expected staged parquet cache files for logs"
     );
 
-    for session_id in &session_ids {
-        let escaped = session_id.replace('\'', "''");
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
-            escaped
-        );
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-        assert_eq!(
-            found, logs_per_session,
-            "Expected staged union-read to return {} logs for session {}",
-            logs_per_session, session_id
-        );
-    }
-
-    println!("⚙️  Running optimizer to commit staged logs to Iceberg...");
-    pipeline.run_optimizer_once().await.expect("optimizer");
-
-    let staged_files_after = pipeline
-        .list_staged_files("logs")
-        .expect("staged files after");
+    let wal_files = pipeline.list_wal_files("logs").expect("wal files");
     assert!(
-        staged_files_after.is_empty(),
-        "Expected staged cache cleanup after optimizer, found {:?}",
-        staged_files_after
+        !wal_files.is_empty(),
+        "Expected WAL cache files for logs (for crash recovery)"
     );
 
-    for session_id in &session_ids {
-        let escaped = session_id.replace('\'', "''");
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
-            escaped
+    println!(
+        "✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)",
+        staged_files.len(),
+        wal_files.len()
+    );
+    println!("✅ Querying back each session through DuckDB union view...");
+
+    if test_pipeline.config.ducklake.is_none() {
+        for session_id in &session_ids {
+            let escaped = session_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                escaped
+            );
+            let result = test_pipeline.execute_query(&sql).await.expect("query");
+            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
+            assert_eq!(
+                found, logs_per_session,
+                "Expected exactly {} logs for session {}, found {}",
+                logs_per_session, session_id, found
+            );
+        }
+
+        println!(
+            "✅ WAL-backed union-read validated for {} log sessions",
+            num_sessions
         );
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-        assert_eq!(
-            found, logs_per_session,
-            "Expected union view to return {} logs for session {} after optimizer",
-            logs_per_session, session_id
+
+        println!("🔄 Forcing flush to staged local cache...");
+        pipeline.force_flush_logs().await.expect("force flush");
+
+        let staged_files = pipeline.list_staged_files("logs").expect("staged files");
+        assert!(
+            !staged_files.is_empty(),
+            "Expected staged parquet cache files for logs"
         );
-    }
+
+        for session_id in &session_ids {
+            let escaped = session_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                escaped
+            );
+            let result = test_pipeline.execute_query(&sql).await.expect("query");
+            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
+            assert_eq!(
+                found, logs_per_session,
+                "Expected staged union-read to return {} logs for session {}",
+                logs_per_session, session_id
+            );
+        }
+
+        println!("⚙️  Running optimizer to commit staged logs to Iceberg...");
+        pipeline.run_optimizer_once().await.expect("optimizer");
+
+        let staged_files_after = pipeline
+            .list_staged_files("logs")
+            .expect("staged files after");
+        assert!(
+            staged_files_after.is_empty(),
+            "Expected staged cache cleanup after optimizer, found {:?}",
+            staged_files_after
+        );
+
+        for session_id in &session_ids {
+            let escaped = session_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                escaped
+            );
+            let result = test_pipeline.execute_query(&sql).await.expect("query");
+            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
+            assert_eq!(
+                found, logs_per_session,
+                "Expected union view to return {} logs for session {} after optimizer",
+                logs_per_session, session_id
+            );
+        }
     }
 
     println!("✅ WAL, local cache, and optimizer paths validated for logs");
@@ -979,12 +994,12 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         )
         .await
         .expect("add metrics should succeed");
-    
+
     pipeline
         .force_flush_metrics()
         .await
         .expect("force flush metrics");
-    
+
     let write_duration = write_timer.stop();
 
     let write_metrics = PerformanceMetrics::new(&format!(
@@ -1002,12 +1017,18 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         !staged_files.is_empty(),
         "Expected staged parquet cache files for metrics"
     );
-    
-    let wal_files = pipeline.list_wal_files("metrics").expect("wal files");
-    assert!(!wal_files.is_empty(), "Expected WAL cache files for metrics (for crash recovery)");
 
-    println!("✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)", 
-             staged_files.len(), wal_files.len());
+    let wal_files = pipeline.list_wal_files("metrics").expect("wal files");
+    assert!(
+        !wal_files.is_empty(),
+        "Expected WAL cache files for metrics (for crash recovery)"
+    );
+
+    println!(
+        "✅ Flush completed: {} staged files (queryable), {} WAL files (recovery)",
+        staged_files.len(),
+        wal_files.len()
+    );
     println!("✅ Querying back each metric name via union_metrics...");
 
     // Query each metric name individually to verify row group isolation (WAL path)
@@ -1102,12 +1123,9 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
         let values_sum = result.rows[0][1].as_f64().unwrap_or(0.0);
 
         assert_eq!(
-            found,
-            data_points_per_metric,
+            found, data_points_per_metric,
             "Expected union view to return {} data points for metric {} after optimizer, found {}",
-            data_points_per_metric,
-            metric_name,
-            found
+            data_points_per_metric, metric_name, found
         );
 
         let expected_sum = expected_sums[metric_idx];
@@ -1324,7 +1342,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .add_logs(staged_logs, per_session * 256)
         .await
         .expect("stage add");
-    
+
     // Query BEFORE flush to verify buffer snapshot works
     let query_engine = test_pipeline.query_engine().clone();
     let buffer_sql = format!(
@@ -1336,8 +1354,11 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .await
         .expect("buffer query");
     let buffer_count = buffer_result.rows[0][0].as_i64().unwrap_or(0);
-    println!("🔍 Buffer query result (before flush): {} rows", buffer_count);
-    
+    println!(
+        "🔍 Buffer query result (before flush): {} rows",
+        buffer_count
+    );
+
     pipeline.force_flush_logs().await.expect("stage flush");
 
     // Wait for staged files to be available before querying
@@ -1359,8 +1380,15 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .await
         .expect("staged query");
     let staged_count = staged_result.rows[0][0].as_i64().unwrap_or(0);
-    println!("🔍 Staged query result (after flush): {} rows", staged_count);
-    assert_eq!(staged_count, per_session as i64, "Expected {} rows in staged", per_session);
+    println!(
+        "🔍 Staged query result (after flush): {} rows",
+        staged_count
+    );
+    assert_eq!(
+        staged_count, per_session as i64,
+        "Expected {} rows in staged",
+        per_session
+    );
 
     // Test concurrent queries on the same session
     let sessions = vec![staged_session.clone(); 6]; // All concurrent queries will use staged_session
@@ -1473,8 +1501,7 @@ async fn test_wal_replay_recovers_spans() {
 
     let cache_dir = tempdir().expect("tempdir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir =
-        Some(cache_dir.path().join("wal").to_string_lossy().to_string());
+    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
 
     let session_id = format!("replay-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
@@ -1528,12 +1555,10 @@ async fn test_wal_replay_recovers_spans() {
 
     pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let query_engine = query::create_query_engine(
-        &config,
-        std::sync::Arc::new(pipeline.storage.clone()),
-    )
-        .await
-        .expect("query");
+    let query_engine =
+        query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
+            .await
+            .expect("query");
     let escaped = session_id.replace('\'', "''");
     let sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
@@ -1744,13 +1769,22 @@ async fn test_wal_cleanup_after_flush() {
             status_message: Some("OK".to_string()),
         });
     }
-    
-    pipeline.add_spans(first_batch, 50 * 256).await.expect("first add");
+
+    pipeline
+        .add_spans(first_batch, 50 * 256)
+        .await
+        .expect("first add");
     pipeline.force_flush_spans().await.expect("first flush");
-    
+
     let first_wal_files = pipeline.list_wal_files("spans").expect("first wal files");
-    assert!(!first_wal_files.is_empty(), "Expected WAL files after first flush");
-    println!("✅ First flush: {} WAL files created", first_wal_files.len());
+    assert!(
+        !first_wal_files.is_empty(),
+        "Expected WAL files after first flush"
+    );
+    println!(
+        "✅ First flush: {} WAL files created",
+        first_wal_files.len()
+    );
 
     // Wait a bit to ensure timestamps are different
     tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
@@ -1783,13 +1817,19 @@ async fn test_wal_cleanup_after_flush() {
             status_message: Some("OK".to_string()),
         });
     }
-    
-    pipeline.add_spans(second_batch, 50 * 256).await.expect("second add");
+
+    pipeline
+        .add_spans(second_batch, 50 * 256)
+        .await
+        .expect("second add");
     pipeline.force_flush_spans().await.expect("second flush");
-    
+
     let second_wal_files = pipeline.list_wal_files("spans").expect("second wal files");
-    println!("✅ Second flush: {} WAL files remaining", second_wal_files.len());
-    
+    println!(
+        "✅ Second flush: {} WAL files remaining",
+        second_wal_files.len()
+    );
+
     // WAL cleanup happens when watermark is updated (during flush)
     // After second flush, we should have at most the same number of files
     // (cleanup deletes files older than old_watermark + 1 second)
@@ -1800,8 +1840,11 @@ async fn test_wal_cleanup_after_flush() {
         "Expected WAL files after second flush, found {}",
         second_wal_files.len()
     );
-    
-    println!("✅ WAL cleanup verified: {} WAL files after second flush", second_wal_files.len());
+
+    println!(
+        "✅ WAL cleanup verified: {} WAL files after second flush",
+        second_wal_files.len()
+    );
 }
 
 #[tokio::test]
@@ -1899,7 +1942,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         "Expected union view to show {} spans from staged files, found {}",
         expected_count, union_count_before
     );
-    println!("✅ Union view shows {} spans (from staged)", union_count_before);
+    println!(
+        "✅ Union view shows {} spans (from staged)",
+        union_count_before
+    );
 
     // Step 4: Get initial metadata pinning state
     println!("📌 Step 4: Capturing initial metadata pinning state...");
@@ -1908,7 +1954,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .path()
         .join("iceberg_metadata")
         .join("traces.json");
-    
+
     let initial_metadata = if pointer_path.exists() {
         let contents = std::fs::read_to_string(&pointer_path).expect("read metadata pointer");
         let json: serde_json::Value = serde_json::from_str(&contents).expect("parse metadata json");
@@ -1938,7 +1984,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         "Expected staged files to be removed after optimizer, found {:?}",
         staged_files_after
     );
-    println!("✅ Staged files removed (found {} files)", staged_files_after.len());
+    println!(
+        "✅ Staged files removed (found {} files)",
+        staged_files_after.len()
+    );
 
     // Step 7: Verify metadata pinning is updated
     println!("📌 Step 7: Verifying metadata pinning is updated...");
@@ -1946,7 +1995,8 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         pointer_path.exists(),
         "Expected metadata pointer file to exist after commit"
     );
-    let updated_contents = std::fs::read_to_string(&pointer_path).expect("read updated metadata pointer");
+    let updated_contents =
+        std::fs::read_to_string(&pointer_path).expect("read updated metadata pointer");
     let updated_json: serde_json::Value =
         serde_json::from_str(&updated_contents).expect("parse updated metadata json");
     let updated_snapshot = updated_json.get("snapshot_id").and_then(|v| v.as_i64());
@@ -1966,8 +2016,8 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     // Verify metadata was updated (either snapshot_id or location changed)
     if let Some((initial_snapshot, initial_location)) = initial_metadata {
-        let metadata_updated = updated_snapshot != initial_snapshot
-            || updated_location != initial_location;
+        let metadata_updated =
+            updated_snapshot != initial_snapshot || updated_location != initial_location;
         assert!(
             metadata_updated,
             "Expected metadata pinning to be updated after commit. Initial: {:?}, Updated: {:?}",
@@ -1981,7 +2031,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
             updated_location != initial_location
         );
     } else {
-        println!("✅ Metadata pinning created: snapshot_id {:?}", updated_snapshot);
+        println!(
+            "✅ Metadata pinning created: snapshot_id {:?}",
+            updated_snapshot
+        );
     }
 
     // Step 8: Verify union view doesn't double count (should still be expected_count, not 2x)
@@ -2007,7 +2060,9 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     );
 
     // Step 9: Verify data appears in union view (which includes Iceberg after optimizer)
-    println!("🧊 Step 9: Verifying data appears in union view (includes Iceberg after optimizer)...");
+    println!(
+        "🧊 Step 9: Verifying data appears in union view (includes Iceberg after optimizer)..."
+    );
     let iceberg_sql = format!(
         "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
         escaped
@@ -2036,7 +2091,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         "Final check: Expected union view to show {} spans, found {}",
         expected_count, final_union_count
     );
-    println!("✅ Final union view count: {} (correct, no double counting)", final_union_count);
+    println!(
+        "✅ Final union view count: {} (correct, no double counting)",
+        final_union_count
+    );
 
     println!("\n✅ All checks passed! Commit flow verified:");
     println!("  ✓ Staged files created");

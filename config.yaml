@@ -14,12 +14,7 @@ span_buffering:
   flush_interval_seconds: 60
 
 ingest_engine:
-  wal_bucket: "warehouse"
-  wal_prefix: "wal"
   cache_dir: "/tmp/ingest-cache"
-  wal_dir: "/tmp/ingest-wal"
-  optimizer_interval_seconds: 300
-  replay_wal_on_startup: false
 
 compaction:
   enabled: true
@@ -39,19 +34,10 @@ s3:
   access_key_id: "minioadmin"
   secret_access_key: "minioadmin"
 
-iceberg:
-  catalog_type: "rest"
-  catalog_uri: "http://localhost:8181/catalog"
-  warehouse: "default"
-  write_target_file_size_bytes: 67108864  # 64MB
-  write_row_group_size_bytes: 134217728  # 128MB
-  write_page_size_bytes: 1048576  # 1MB
-  force_close_after_append: false
-
 ducklake:
-  catalog_type: "duckdb"
-  metadata_path: "./warehouse/ducklake/metadata.ducklake"
+  catalog_type: "postgres"
+  metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
-  metadata_schema: "main"
-  data_inlining_row_limit: 0
+  metadata_schema: "softprobe"
+  data_inlining_row_limit: 10000

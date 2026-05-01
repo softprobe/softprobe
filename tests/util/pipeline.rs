@@ -1,6 +1,6 @@
 use softprobe_runtime::config::Config;
-use softprobe_runtime::query::{self, QueryEngine};
 use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::query::{self, QueryEngine};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -42,12 +42,12 @@ impl TestPipeline {
             }
         }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
-        
+
         // Pass tiered storage to query engine so it can access buffer snapshots
         let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");
-        
+
         Self {
             config,
             cache_dir,

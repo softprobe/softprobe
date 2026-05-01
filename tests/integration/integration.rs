@@ -1,3 +1,5 @@
+use crate::util::http::start_test_server;
+use crate::util::otlp::create_test_otlp_request;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
@@ -7,8 +9,6 @@ use reqwest::Client;
 use reqwest::StatusCode;
 use serde_json;
 use uuid::Uuid;
-use crate::util::http::start_test_server;
-use crate::util::otlp::create_test_otlp_request;
 
 // Note: `create_test_otlp_request` and `start_test_server` live under `tests/util/`.
 

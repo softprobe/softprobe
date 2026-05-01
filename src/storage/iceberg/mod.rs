@@ -63,9 +63,27 @@ impl IcebergWriter {
             TableIdent::from_strs(&[namespace_name, OtlpMetricsTable::table_name()])?;
 
         // Ensure tables exist
-        ensure_table_exists(catalog.catalog(), &spans_table_ident, TableType::Spans, config).await?;
-        ensure_table_exists(catalog.catalog(), &logs_table_ident, TableType::Logs, config).await?;
-        ensure_table_exists(catalog.catalog(), &metrics_table_ident, TableType::Metrics, config).await?;
+        ensure_table_exists(
+            catalog.catalog(),
+            &spans_table_ident,
+            TableType::Spans,
+            config,
+        )
+        .await?;
+        ensure_table_exists(
+            catalog.catalog(),
+            &logs_table_ident,
+            TableType::Logs,
+            config,
+        )
+        .await?;
+        ensure_table_exists(
+            catalog.catalog(),
+            &metrics_table_ident,
+            TableType::Metrics,
+            config,
+        )
+        .await?;
 
         // Create writers
         let spans_writer = TableWriter::new(catalog.catalog().clone(), spans_table_ident.clone());
@@ -239,7 +257,8 @@ impl IcebergWriter {
                             let mut download_tasks = Vec::new();
                             for manifest_entry in manifest.entries() {
                                 if manifest_entry.is_alive()
-                                    && manifest_entry.content_type() == iceberg::spec::DataContentType::Data
+                                    && manifest_entry.content_type()
+                                        == iceberg::spec::DataContentType::Data
                                 {
                                     let file_path = manifest_entry.file_path();
                                     if file_path.contains("://") {
@@ -248,7 +267,10 @@ impl IcebergWriter {
                                         let data_dir = data_dir.clone();
                                         let file_io = table.file_io().clone();
                                         download_tasks.push(tokio::spawn(async move {
-                                            Self::download_single_file(&file_path, &data_dir, &file_io).await
+                                            Self::download_single_file(
+                                                &file_path, &data_dir, &file_io,
+                                            )
+                                            .await
                                         }));
                                     }
                                 }
@@ -270,8 +292,13 @@ impl IcebergWriter {
         if !downloaded_files.is_empty() {
             let data_files_json_path = table_cache_dir.join("data_files.json");
             if let Ok(existing) = std::fs::read_to_string(&data_files_json_path) {
-                if let Ok(mut data_files_value) = serde_json::from_str::<serde_json::Value>(&existing) {
-                    if let Some(files_array) = data_files_value.get_mut("files").and_then(|f| f.as_array_mut()) {
+                if let Ok(mut data_files_value) =
+                    serde_json::from_str::<serde_json::Value>(&existing)
+                {
+                    if let Some(files_array) = data_files_value
+                        .get_mut("files")
+                        .and_then(|f| f.as_array_mut())
+                    {
                         // Replace S3 paths with local paths where available
                         for file in files_array.iter_mut() {
                             if let Some(s3_path) = file.as_str() {
@@ -280,8 +307,11 @@ impl IcebergWriter {
                                     for local_path in &downloaded_files {
                                         // Extract filename from both paths and compare
                                         let s3_filename = s3_path.rsplit('/').next().unwrap_or("");
-                                        let local_filename = local_path.rsplit('/').next().unwrap_or("");
-                                        if s3_filename == local_filename || local_path.contains(s3_filename) {
+                                        let local_filename =
+                                            local_path.rsplit('/').next().unwrap_or("");
+                                        if s3_filename == local_filename
+                                            || local_path.contains(s3_filename)
+                                        {
                                             *file = serde_json::Value::String(local_path.clone());
                                             break;
                                         }
@@ -698,7 +728,9 @@ impl IcebergWriter {
                                 {
                                     let file_path = normalize_data_path(manifest_entry.file_path());
                                     // Check if file is already cached locally
-                                    if let Some(local_path) = self.check_local_cache(&file_path, &table_cache_dir) {
+                                    if let Some(local_path) =
+                                        self.check_local_cache(&file_path, &table_cache_dir)
+                                    {
                                         data_files.push(local_path);
                                     } else {
                                         // Use remote path - files will be downloaded lazily on first query
@@ -751,8 +783,7 @@ impl IcebergWriter {
                     }
                     if let Some(snapshot) = table.metadata().current_snapshot() {
                         let file_io = FileIO::new_with_fs();
-                        let output_path =
-                            local_manifest_list_path.to_string_lossy().to_string();
+                        let output_path = local_manifest_list_path.to_string_lossy().to_string();
                         match file_io.new_output(&output_path) {
                             Ok(output) => {
                                 let parent_snapshot_id: Option<i64> = snapshot.parent_snapshot_id();
@@ -918,9 +949,18 @@ async fn ensure_table_exists(
 
     // Get promotion config for this table type
     let promotion_config = match table_type {
-        TableType::Spans => config.schema_promotion.as_ref().and_then(|sp| sp.traces.as_ref()),
-        TableType::Logs => config.schema_promotion.as_ref().and_then(|sp| sp.logs.as_ref()),
-        TableType::Metrics => config.schema_promotion.as_ref().and_then(|sp| sp.metrics.as_ref()),
+        TableType::Spans => config
+            .schema_promotion
+            .as_ref()
+            .and_then(|sp| sp.traces.as_ref()),
+        TableType::Logs => config
+            .schema_promotion
+            .as_ref()
+            .and_then(|sp| sp.logs.as_ref()),
+        TableType::Metrics => config
+            .schema_promotion
+            .as_ref()
+            .and_then(|sp| sp.metrics.as_ref()),
     };
 
     // Create table based on type

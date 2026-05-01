@@ -1,15 +1,17 @@
 # SoftProbe OTLP Backend
 
-OpenTelemetry-compatible backend for recording storage/retrieval with Apache Iceberg and S3.
+OpenTelemetry-compatible backend for recording storage/retrieval with DuckLake and object storage.
 
 ## Overview
 
 This Rust service provides:
 - **OTLP-compatible ingestion API** for receiving recordings from Java agents
-- **Iceberg metadata storage** for queryable recording metadata
+- **DuckLake metadata/catalog storage** with snapshot-safe reads
 - **S3 payload storage** for request/response bodies in batched Parquet files
 - **DuckDB query engine** for fast analytics queries
 - **Automatic compaction** to maintain query performance
+
+DuckLake reference: <https://blobs.duckdb.org/docs/ducklake-docs.md>
 
 ## Architecture
 
@@ -116,13 +118,13 @@ Event values still take precedence over attribute fallback when both are present
 
 ## Performance Stress Tool
 
-`perf_stress` is a lightweight CLI that repeatedly writes WAL records (spans/logs/metrics) through the ingest pipeline and runs SQL queries over the DuckDB union views so you exercise the same components that serve real traffic.
+`perf_stress` is a lightweight CLI that repeatedly writes spans/logs/metrics through the ingest pipeline and runs SQL queries over DuckLake-backed tables so you exercise the same components that serve real traffic.
 
 ### Features
 
 - Drives configurable QPS of spans, logs, and metrics through the ingest pipeline.
 - Runs parallel DuckDB query workers to mimic dashboard load.
-- Reuses the production `IngestPipeline` and query engine so the benchmark touches Iceberg, cache_httpfs, object storage, and WAL maintenance.
+- Reuses the production `IngestPipeline` and query engine so the benchmark touches DuckLake catalog operations, cache_httpfs, and object storage.
 - Prints a concise summary of produced records, query latency percentiles, and observed errors.
 
 ### Usage
@@ -144,7 +146,7 @@ Event values still take precedence over attribute fallback when both are present
    ```
 3. Review the printed report (records produced, errors, query latency p95) and adjust the QPS or duration until you meet your real-time goals.
 
-Use this tool locally or in GCP/AWS (make sure `ingest_engine.cache_dir` points at a local SSD) to validate WAL/query performance before deploying to production.
+Use this tool locally or in GCP/AWS to validate DuckLake query/write performance before deploying to production. Tune `ducklake.data_inlining_row_limit` during perf runs to compare hot-data behavior.
 
 ## Make Commands (Holistic View)
 

@@ -1,2 +1,2 @@
-mod util;
 mod integration;
+mod util;

@@ -37,13 +37,14 @@ fn configure_cache_httpfs(cache_dir: &PathBuf, conn: &Connection) -> Result<()> 
     // with DuckDB's native external_file_cache.
     //
     // Note: cache_httpfs is not bundled by default; we must INSTALL it before LOAD.
-    conn.execute_batch(DUCKDB_CACHE_HTTPFS_INIT_SQL).map_err(|err| {
-        anyhow!(
-            "Failed to initialize cache_httpfs via community registry: {}. \
+    conn.execute_batch(DUCKDB_CACHE_HTTPFS_INIT_SQL)
+        .map_err(|err| {
+            anyhow!(
+                "Failed to initialize cache_httpfs via community registry: {}. \
             Ensure DuckDB is built with extension support and the community registry is available.",
-            err
-        )
-    })?;
+                err
+            )
+        })?;
     // Enable glob result caching (best-effort; setting may vary by extension version).
     let _ = conn.execute("SET cache_httpfs_enable_glob_cache = true;", []);
     conn.execute(

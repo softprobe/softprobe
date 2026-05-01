@@ -370,10 +370,8 @@ mod tests {
             "http.request.headers".to_string(),
             "{\"x-a\":\"1\"}".to_string(),
         );
-        span.attributes.insert(
-            "http.request.body".to_string(),
-            "{\"in\":true}".to_string(),
-        );
+        span.attributes
+            .insert("http.request.body".to_string(), "{\"in\":true}".to_string());
         span.attributes.insert(
             "http.response.headers".to_string(),
             "{\"content-type\":\"application/json\"}".to_string(),
@@ -385,7 +383,10 @@ mod tests {
 
         span.extract_http_data_from_events();
 
-        assert_eq!(span.http_request_headers.as_deref(), Some("{\"x-a\":\"1\"}"));
+        assert_eq!(
+            span.http_request_headers.as_deref(),
+            Some("{\"x-a\":\"1\"}")
+        );
         assert_eq!(span.http_request_body.as_deref(), Some("{\"in\":true}"));
         assert_eq!(
             span.http_response_headers.as_deref(),
@@ -397,10 +398,14 @@ mod tests {
     #[test]
     fn extract_http_data_prefers_event_values_over_attribute_fallback() {
         let mut span = base_span();
-        span.attributes
-            .insert("http.request.body".to_string(), "from-attribute".to_string());
-        span.attributes
-            .insert("http.response.body".to_string(), "from-attribute".to_string());
+        span.attributes.insert(
+            "http.request.body".to_string(),
+            "from-attribute".to_string(),
+        );
+        span.attributes.insert(
+            "http.response.body".to_string(),
+            "from-attribute".to_string(),
+        );
 
         let mut request_attrs = HashMap::new();
         request_attrs.insert("http.request.body".to_string(), "from-event".to_string());

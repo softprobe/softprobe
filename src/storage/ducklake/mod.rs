@@ -31,7 +31,8 @@ pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) ->
             return Ok(());
         }
     };
-    let secret = match std::env::var("GCS_HMAC_SECRET").or_else(|_| std::env::var("GCP_HMAC_SECRET"))
+    let secret = match std::env::var("GCS_HMAC_SECRET")
+        .or_else(|_| std::env::var("GCP_HMAC_SECRET"))
     {
         Ok(s) => s,
         Err(_) => {
@@ -44,9 +45,8 @@ pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) ->
     };
     let kid = key_id.replace('\'', "''");
     let sec = secret.replace('\'', "''");
-    let sql = format!(
-        "CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '{kid}', SECRET '{sec}');"
-    );
+    let sql =
+        format!("CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '{kid}', SECRET '{sec}');");
     conn.execute_batch(&sql)?;
     Ok(())
 }
@@ -74,11 +74,7 @@ impl DuckLakeWriter {
         let conn = self.open_connection()?;
         self.attach_ducklake(&conn)?;
         self.ensure_schema(&conn)?;
-        if std::env::var("SPLAKE_RESET_DUCKLAKE")
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
             self.reset_tables_for_dev(&conn)?;
         }
         Ok(())
@@ -95,7 +91,8 @@ impl DuckLakeWriter {
                 record_batches.push(Span::to_record_batch(&batch, schema.as_ref())?);
             }
         }
-        self.write_record_batches_internal("traces", record_batches).await
+        self.write_record_batches_internal("traces", record_batches)
+            .await
     }
 
     pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
@@ -109,7 +106,8 @@ impl DuckLakeWriter {
                 record_batches.push(arrow::logs_to_record_batch(&batch, schema.as_ref())?);
             }
         }
-        self.write_record_batches_internal("logs", record_batches).await
+        self.write_record_batches_internal("logs", record_batches)
+            .await
     }
 
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
@@ -123,22 +121,26 @@ impl DuckLakeWriter {
                 record_batches.push(arrow::metrics_to_record_batch(&batch, schema.as_ref())?);
             }
         }
-        self.write_record_batches_internal("metrics", record_batches).await
+        self.write_record_batches_internal("metrics", record_batches)
+            .await
     }
 
     pub async fn write_span_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.write_record_batches_internal("traces", record_batches).await
+        self.write_record_batches_internal("traces", record_batches)
+            .await
     }
 
     pub async fn write_log_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.write_record_batches_internal("logs", record_batches).await
+        self.write_record_batches_internal("logs", record_batches)
+            .await
     }
 
     pub async fn write_metric_record_batches(
         &self,
         record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
-        self.write_record_batches_internal("metrics", record_batches).await
+        self.write_record_batches_internal("metrics", record_batches)
+            .await
     }
 
     pub async fn spans_schema(&self) -> Result<Arc<IcebergSchema>> {
@@ -199,7 +201,10 @@ impl DuckLakeWriter {
                 order_clause = self.insert_order_clause(table_name),
             );
             conn.execute_batch("BEGIN TRANSACTION;")?;
-            match conn.execute_batch(&ddl).and_then(|_| conn.execute_batch(&insert)) {
+            match conn
+                .execute_batch(&ddl)
+                .and_then(|_| conn.execute_batch(&insert))
+            {
                 Ok(_) => {
                     conn.execute_batch("COMMIT;")?;
                     self.apply_table_options(&conn, &qualified_table);
@@ -208,7 +213,11 @@ impl DuckLakeWriter {
                 }
                 Err(err) => {
                     let _ = conn.execute_batch("ROLLBACK;");
-                    last_err = Some(anyhow!("DuckLake write failed for {}: {}", qualified_table, err));
+                    last_err = Some(anyhow!(
+                        "DuckLake write failed for {}: {}",
+                        qualified_table,
+                        err
+                    ));
                 }
             }
         }
@@ -230,8 +239,11 @@ impl DuckLakeWriter {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let file = std::fs::File::create(&temp_path)?;
-        let mut writer =
-            ArrowWriter::try_new(file, batches[0].schema(), Some(WriterProperties::builder().build()))?;
+        let mut writer = ArrowWriter::try_new(
+            file,
+            batches[0].schema(),
+            Some(WriterProperties::builder().build()),
+        )?;
         for batch in batches {
             writer.write(batch)?;
         }
@@ -240,7 +252,8 @@ impl DuckLakeWriter {
     }
 
     fn open_connection(&self) -> Result<Connection> {
-        let conn = Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
+        let conn =
+            Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
         configure_httpfs_gcs_for_data_path(&conn, &self.ducklake.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;

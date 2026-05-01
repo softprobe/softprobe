@@ -81,15 +81,15 @@ pub fn hosted_routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/v1/meta", get(v1_meta))
-        .route("/v1/sessions", post(v1_create_session).get(v1_list_sessions))
+        .route(
+            "/v1/sessions",
+            post(v1_create_session).get(v1_list_sessions),
+        )
         .route("/v1/sessions/{id}/close", post(v1_close_session))
         .route("/v1/sessions/{id}/load-case", post(v1_load_case))
         .route("/v1/sessions/{id}/rules", post(v1_apply_rules))
         .route("/v1/sessions/{id}/policy", post(v1_apply_policy))
-        .route(
-            "/v1/sessions/{id}/fixtures/auth",
-            post(v1_fixtures_auth),
-        )
+        .route("/v1/sessions/{id}/fixtures/auth", post(v1_fixtures_auth))
         .route("/v1/sessions/{id}/stats", get(v1_session_stats))
         .route("/v1/sessions/{id}/state", get(v1_session_state))
         .route("/v1/inject", post(v1_inject))
@@ -101,19 +101,16 @@ async fn v1_create_session(
     Extension(_tenant): Extension<TenantInfo>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let mode = body
-        .get("mode")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid create session request"})),
-            )
-        })?;
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let mode = body.get("mode").and_then(|m| m.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid create session request"})),
+        )
+    })?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let s = store.create(mode).await;
     Ok(Json(json!({
@@ -126,7 +123,10 @@ async fn v1_list_sessions(
     State(state): State<AppState>,
     Extension(_tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let hosted = state.hosted.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let hosted = state
+        .hosted
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let mut store = hosted.session_store.lock().await;
     let list = store.list().await;
     let sessions: Vec<_> = list
@@ -146,18 +146,55 @@ async fn v1_close_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
-    let mut store = hosted.session_store.lock().await;
-    if !store.close(&id).await {
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
+    let session = {
+        let mut store = hosted.session_store.lock().await;
+        store.get(&id).await
+    };
+    let Some(session) = session else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+        ));
+    };
+    // Capture export reads `committed_*` views; spans may still be in RAM until flush.
+    if session.mode.eq_ignore_ascii_case("capture") {
+        if let Err(e) = flush_buffers_for_capture_export(&state).await {
+            tracing::warn!("capture session close: buffer flush failed: {e}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "flush_failed", "message": e.to_string()}})),
+            ));
+        }
+    }
+    let closed = {
+        let mut store = hosted.session_store.lock().await;
+        store.close(&id).await
+    };
+    if !closed {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
         ));
     }
     Ok(Json(json!({"sessionId": id, "closed": true})))
+}
+
+/// Ensure buffered telemetry is persisted so capture SQL over `committed_*` sees recent data.
+async fn flush_buffers_for_capture_export(state: &AppState) -> anyhow::Result<()> {
+    if let Some(buf) = state.span_buffer.as_ref() {
+        buf.force_flush().await?;
+    }
+    if let Some(buf) = state.log_buffer.as_ref() {
+        buf.force_flush().await?;
+    }
+    if let Some(buf) = state.metric_buffer.as_ref() {
+        buf.force_flush().await?;
+    }
+    Ok(())
 }
 
 async fn v1_load_case(
@@ -171,10 +208,10 @@ async fn v1_load_case(
             Json(json!({"error": "invalid load-case request"})),
         ));
     }
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.load_case(&id, body.to_vec()).await else {
         return Err((
@@ -210,10 +247,10 @@ async fn v1_apply_rules(
             })),
         ));
     }
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.apply_rules(&id, body.to_vec()).await else {
         return Err((
@@ -238,10 +275,10 @@ async fn v1_apply_policy(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.apply_policy(&id, body.to_vec()).await else {
         return Err((
@@ -266,10 +303,10 @@ async fn v1_fixtures_auth(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.apply_fixtures_auth(&id, body.to_vec()).await else {
         return Err((
@@ -287,10 +324,10 @@ async fn v1_session_stats(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.get(&id).await else {
         return Err((
@@ -314,10 +351,10 @@ async fn v1_session_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state
-        .hosted
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no hosted"}))))?;
+    let hosted = state.hosted.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"no hosted"})),
+    ))?;
     let mut store = hosted.session_store.lock().await;
     let Some(s) = store.get(&id).await else {
         return Err((
@@ -419,9 +456,9 @@ fn span_attr(sp: &Span, key: &str) -> String {
     for kv in &sp.attributes {
         if kv.key == key {
             if let Some(v) = &kv.value {
-                if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                    s,
-                )) = &v.value
+                if let Some(
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                ) = &v.value
                 {
                     return s.clone();
                 }
@@ -435,9 +472,9 @@ fn resource_attr_str(res: &Resource, key: &str) -> String {
     for kv in &res.attributes {
         if kv.key == key {
             if let Some(v) = &kv.value {
-                if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                    s,
-                )) = &v.value
+                if let Some(
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                ) = &v.value
                 {
                     return s.clone();
                 }
@@ -481,9 +518,11 @@ fn kv_str(key: &str, val: &str) -> KeyValue {
     KeyValue {
         key: key.to_string(),
         value: Some(AnyValue {
-            value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                val.to_string(),
-            )),
+            value: Some(
+                opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                    val.to_string(),
+                ),
+            ),
         }),
     }
 }
@@ -496,8 +535,10 @@ async fn v1_inject(
         .hosted
         .as_ref()
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "no hosted".into()))?;
-    let payload = normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let lookup = parse_inject_lookup(&payload).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let payload =
+        normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let lookup =
+        parse_inject_lookup(&payload).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     if lookup.session_id.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing session id".into()));
     }
@@ -529,9 +570,7 @@ async fn v1_inject(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "mock rule missing response".into(),
             ))?;
-            let _ = store
-                .record_injected_spans(&lookup.session_id, 1)
-                .await;
+            let _ = store.record_injected_spans(&lookup.session_id, 1).await;
             drop(store);
             let body = encode_inject_response_proto(&resp)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -544,9 +583,7 @@ async fn v1_inject(
         "error" => {
             let (st, msg) = build_error_response(&m.rule);
             if m.source == "policy" {
-                let _ = store
-                    .record_strict_miss(&lookup.session_id, 1)
-                    .await;
+                let _ = store.record_strict_miss(&lookup.session_id, 1).await;
             }
             drop(store);
             let code = StatusCode::from_u16(st as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

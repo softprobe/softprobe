@@ -98,7 +98,9 @@ impl Resolver {
         if !payload.success {
             return Err(anyhow!("authn: invalid API key"));
         }
-        let data = payload.data.ok_or_else(|| anyhow!("authn: invalid API key"))?;
+        let data = payload
+            .data
+            .ok_or_else(|| anyhow!("authn: invalid API key"))?;
 
         let mut info = TenantInfo {
             tenant_id: data.tenant_id.clone(),
@@ -108,7 +110,9 @@ impl Resolver {
 
         if let Some(resources) = data.resources {
             for res in resources {
-                if res.resource_type != "BIGQUERY_DATASET" && res.resource_type != "BIGQUERY_STORAGE" {
+                if res.resource_type != "BIGQUERY_DATASET"
+                    && res.resource_type != "BIGQUERY_STORAGE"
+                {
                     continue;
                 }
                 if let Ok(cfg) = serde_json::from_str::<BqCfg>(&res.config_json) {

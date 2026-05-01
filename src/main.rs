@@ -121,10 +121,17 @@ async fn hosted_runtime_from_env() -> anyhow::Result<Option<HostedRuntime>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6379);
-    let pw = std::env::var("REDIS_PASSWORD").ok().filter(|s| !s.is_empty());
-    let store =
-        RedisStore::connect_host_port(&redis_host, port, pw.as_deref(), "global", Duration::from_secs(86_400))
-            .await?;
+    let pw = std::env::var("REDIS_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let store = RedisStore::connect_host_port(
+        &redis_host,
+        port,
+        pw.as_deref(),
+        "global",
+        Duration::from_secs(86_400),
+    )
+    .await?;
     let resolver = Resolver::new(auth, Duration::from_secs(60));
     Ok(Some(HostedRuntime {
         resolver,

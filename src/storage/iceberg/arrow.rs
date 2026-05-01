@@ -2,8 +2,8 @@ use crate::config::TablePromotionConfig;
 use crate::models::{Log, Metric, Span};
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, ListArray, MapArray, StringArray,
-    StructArray, TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, ListArray, MapArray,
+    StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -15,11 +15,29 @@ use tracing::{debug, trace};
 
 /// Base field names for traces table (used to identify promoted columns)
 const TRACES_BASE_FIELDS: &[&str] = &[
-    "session_id", "trace_id", "span_id", "parent_span_id", "app_id", "organization_id", "tenant_id",
-    "message_type", "span_kind", "timestamp", "end_timestamp", "attributes", "events",
-    "status_code", "status_message", "http_request_method", "http_request_path",
-    "http_request_headers", "http_request_body", "http_response_status_code",
-    "http_response_headers", "http_response_body", "record_date",
+    "session_id",
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "app_id",
+    "organization_id",
+    "tenant_id",
+    "message_type",
+    "span_kind",
+    "timestamp",
+    "end_timestamp",
+    "attributes",
+    "events",
+    "status_code",
+    "status_message",
+    "http_request_method",
+    "http_request_path",
+    "http_request_headers",
+    "http_request_body",
+    "http_response_status_code",
+    "http_response_headers",
+    "http_response_body",
+    "record_date",
 ];
 
 /// Extract promoted column values from attributes/resource_attributes
@@ -81,33 +99,25 @@ fn build_promoted_columns_for_spans(
 
         // Build array based on field type
         let array: ArrayRef = match field.data_type() {
-            arrow::datatypes::DataType::Utf8 => {
-                Arc::new(StringArray::from(values))
-            }
-            arrow::datatypes::DataType::Int32 => {
-                Arc::new(Int32Array::from(
-                    values
-                        .iter()
-                        .map(|v| v.as_ref().and_then(|s| s.parse::<i32>().ok()))
-                        .collect::<Vec<_>>(),
-                ))
-            }
-            arrow::datatypes::DataType::Float64 => {
-                Arc::new(Float64Array::from(
-                    values
-                        .iter()
-                        .map(|v| v.as_ref().and_then(|s| s.parse::<f64>().ok()))
-                        .collect::<Vec<_>>(),
-                ))
-            }
-            arrow::datatypes::DataType::Boolean => {
-                Arc::new(BooleanArray::from(
-                    values
-                        .iter()
-                        .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
-                        .collect::<Vec<_>>(),
-                ))
-            }
+            arrow::datatypes::DataType::Utf8 => Arc::new(StringArray::from(values)),
+            arrow::datatypes::DataType::Int32 => Arc::new(Int32Array::from(
+                values
+                    .iter()
+                    .map(|v| v.as_ref().and_then(|s| s.parse::<i32>().ok()))
+                    .collect::<Vec<_>>(),
+            )),
+            arrow::datatypes::DataType::Float64 => Arc::new(Float64Array::from(
+                values
+                    .iter()
+                    .map(|v| v.as_ref().and_then(|s| s.parse::<f64>().ok()))
+                    .collect::<Vec<_>>(),
+            )),
+            arrow::datatypes::DataType::Boolean => Arc::new(BooleanArray::from(
+                values
+                    .iter()
+                    .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
+                    .collect::<Vec<_>>(),
+            )),
             _ => {
                 // Default to String for unknown types
                 Arc::new(StringArray::from(values))

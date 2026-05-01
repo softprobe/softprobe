@@ -1,22 +1,25 @@
 use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
+use opentelemetry_proto::tonic::collector::{
+    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
+    trace::v1::ExportTraceServiceRequest,
+};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+use opentelemetry_proto::tonic::metrics::v1::{
+    Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use opentelemetry_proto::tonic::trace::v1::{
+    span, ResourceSpans, ScopeSpans, Span as OtlpSpan, Status,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use serde::{Deserialize, Serialize};
-use opentelemetry_proto::tonic::collector::{
-    logs::v1::ExportLogsServiceRequest,
-    metrics::v1::ExportMetricsServiceRequest,
-    trace::v1::ExportTraceServiceRequest,
-};
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span as OtlpSpan, Status};
-use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::metrics::v1::{Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics};
 
 use softprobe_runtime::models::{Log, Metric, Span};
 use tracing_subscriber;
@@ -24,7 +27,7 @@ use tracing_subscriber;
 #[derive(Parser)]
 #[command(
     author = "SoftProbe Team",
-    about = "Stress test the OTLP ingestion+query pipeline against Iceberg storage"
+    about = "Stress test the OTLP ingestion+query pipeline against DuckLake storage"
 )]
 struct Args {
     /// Path to the YAML configuration file. Uses CONFIG_FILE env fallback if omitted.
@@ -35,15 +38,15 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     duration: u64,
 
-    /// Spans per second to ingest via WAL.
+    /// Spans per second to ingest through the pipeline.
     #[arg(long, default_value_t = 100)]
     span_qps: u32,
 
-    /// Logs per second to ingest via WAL.
+    /// Logs per second to ingest through the pipeline.
     #[arg(long, default_value_t = 200)]
     log_qps: u32,
 
-    /// Metrics per second to ingest via WAL.
+    /// Metrics per second to ingest through the pipeline.
     #[arg(long, default_value_t = 200)]
     metric_qps: u32,
 
@@ -55,7 +58,7 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     query_interval_ms: u64,
 
-    /// Seconds to wait for WAL watermarks/warm-up before recording steady-state query stats.
+    /// Seconds to wait for warm-up before recording steady-state query stats.
     #[arg(long, default_value_t = 10)]
     warmup_secs: u64,
 
@@ -228,13 +231,17 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
             .map(|u| u.as_bytes().to_vec())
             .unwrap_or_else(|_| vec![0u8; 8])
     });
-    let parent_span_id_bytes = span.parent_span_id.as_ref().map(|id| {
-        hex::decode(id).unwrap_or_else(|_| {
-            uuid::Uuid::parse_str(id)
-                .map(|u| u.as_bytes().to_vec())
-                .unwrap_or_else(|_| vec![0u8; 8])
+    let parent_span_id_bytes = span
+        .parent_span_id
+        .as_ref()
+        .map(|id| {
+            hex::decode(id).unwrap_or_else(|_| {
+                uuid::Uuid::parse_str(id)
+                    .map(|u| u.as_bytes().to_vec())
+                    .unwrap_or_else(|_| vec![0u8; 8])
+            })
         })
-    }).unwrap_or_default();
+        .unwrap_or_default();
 
     let mut attributes = vec![];
     for (k, v) in &span.attributes {
@@ -248,7 +255,7 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
 
     let status_code = match span.status_code.as_deref() {
         Some("ERROR") => 2, // Status_StatusCode_ERROR
-        _ => 1, // Status_StatusCode_OK
+        _ => 1,             // Status_StatusCode_OK
     };
 
     let otlp_span = OtlpSpan {
@@ -256,7 +263,9 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
         span_id: span_id_bytes,
         parent_span_id: parent_span_id_bytes,
         name: span.message_type.clone(),
-        kind: span.span_kind.as_ref()
+        kind: span
+            .span_kind
+            .as_ref()
             .and_then(|k| match k.as_str() {
                 "SERVER" => Some(span::SpanKind::Server as i32),
                 "CLIENT" => Some(span::SpanKind::Client as i32),
@@ -264,7 +273,8 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
             })
             .unwrap_or(span::SpanKind::Internal as i32),
         start_time_unix_nano: span.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
-        end_time_unix_nano: span.end_timestamp
+        end_time_unix_nano: span
+            .end_timestamp
             .map(|t| t.timestamp_nanos_opt().unwrap_or(0) as u64)
             .unwrap_or(0),
         attributes,
@@ -276,14 +286,12 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
         ..Default::default()
     };
 
-    let mut resource_attributes = vec![
-        KeyValue {
-            key: "sp.app.id".to_string(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(span.app_id.clone())),
-            }),
-        },
-    ];
+    let mut resource_attributes = vec![KeyValue {
+        key: "sp.app.id".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(span.app_id.clone())),
+        }),
+    }];
 
     if let Some(ref org_id) = span.organization_id {
         resource_attributes.push(KeyValue {
@@ -329,20 +337,28 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
 }
 
 fn log_to_otlp(log: &Log) -> ExportLogsServiceRequest {
-    let trace_id_bytes = log.trace_id.as_ref().map(|id| {
-        hex::decode(id).unwrap_or_else(|_| {
-            uuid::Uuid::parse_str(id)
-                .map(|u| u.as_bytes().to_vec())
-                .unwrap_or_else(|_| vec![0u8; 16])
+    let trace_id_bytes = log
+        .trace_id
+        .as_ref()
+        .map(|id| {
+            hex::decode(id).unwrap_or_else(|_| {
+                uuid::Uuid::parse_str(id)
+                    .map(|u| u.as_bytes().to_vec())
+                    .unwrap_or_else(|_| vec![0u8; 16])
+            })
         })
-    }).unwrap_or_default();
-    let span_id_bytes = log.span_id.as_ref().map(|id| {
-        hex::decode(id).unwrap_or_else(|_| {
-            uuid::Uuid::parse_str(id)
-                .map(|u| u.as_bytes().to_vec())
-                .unwrap_or_else(|_| vec![0u8; 8])
+        .unwrap_or_default();
+    let span_id_bytes = log
+        .span_id
+        .as_ref()
+        .map(|id| {
+            hex::decode(id).unwrap_or_else(|_| {
+                uuid::Uuid::parse_str(id)
+                    .map(|u| u.as_bytes().to_vec())
+                    .unwrap_or_else(|_| vec![0u8; 8])
+            })
         })
-    }).unwrap_or_default();
+        .unwrap_or_default();
 
     let mut attributes = vec![];
     for (k, v) in &log.attributes {
@@ -356,7 +372,8 @@ fn log_to_otlp(log: &Log) -> ExportLogsServiceRequest {
 
     let log_record = LogRecord {
         time_unix_nano: log.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
-        observed_time_unix_nano: log.observed_timestamp
+        observed_time_unix_nano: log
+            .observed_timestamp
             .map(|t| t.timestamp_nanos_opt().unwrap_or(0) as u64)
             .unwrap_or(0),
         severity_number: log.severity_number as i32,
@@ -422,7 +439,11 @@ fn metric_to_otlp(metric: &Metric) -> ExportMetricsServiceRequest {
         attributes,
         start_time_unix_nano: 0,
         time_unix_nano: metric.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
-        value: Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(metric.value)),
+        value: Some(
+            opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(
+                metric.value,
+            ),
+        ),
         exemplars: vec![],
         flags: 0,
     };
@@ -431,11 +452,13 @@ fn metric_to_otlp(metric: &Metric) -> ExportMetricsServiceRequest {
         name: metric.metric_name.clone(),
         description: metric.description.clone(),
         unit: metric.unit.clone(),
-        data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
-            opentelemetry_proto::tonic::metrics::v1::Gauge {
-                data_points: vec![data_point],
-            }
-        )),
+        data: Some(
+            opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
+                opentelemetry_proto::tonic::metrics::v1::Gauge {
+                    data_points: vec![data_point],
+                },
+            ),
+        ),
         metadata: vec![],
     };
 
@@ -639,12 +662,7 @@ async fn run_query_worker_http(
         let (label, sql) = build_query(case, seed);
         let start = Instant::now();
         let request = SqlQueryRequest { sql };
-        match client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-        {
+        match client.post(&url).json(&request).send().await {
             Ok(response) => {
                 let elapsed = start.elapsed();
                 if response.status().is_success() {
@@ -654,7 +672,10 @@ async fn run_query_worker_http(
                         }
                         Err(err) => {
                             stats.record(label, elapsed).await;
-                            tracing::warn!("query worker {worker_id} {label} JSON parse error: {}", err);
+                            tracing::warn!(
+                                "query worker {worker_id} {label} JSON parse error: {}",
+                                err
+                            );
                             stats.record_error(label).await;
                         }
                     }
@@ -662,8 +683,15 @@ async fn run_query_worker_http(
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
                     stats.record(label, elapsed).await;
-                    eprintln!("ERROR: query worker {worker_id} {label} HTTP error {}: {}", status, error_text);
-                    tracing::warn!("query worker {worker_id} {label} HTTP error {}: {}", status, error_text);
+                    eprintln!(
+                        "ERROR: query worker {worker_id} {label} HTTP error {}: {}",
+                        status, error_text
+                    );
+                    tracing::warn!(
+                        "query worker {worker_id} {label} HTTP error {}: {}",
+                        status,
+                        error_text
+                    );
                     stats.record_error(label).await;
                 }
             }
@@ -671,8 +699,14 @@ async fn run_query_worker_http(
                 let elapsed = start.elapsed();
                 // Record latency even for failures: alerts still pay the cost, and we want to see it.
                 stats.record(label, elapsed).await;
-                eprintln!("ERROR: query worker {worker_id} {label} HTTP request error: {}", err);
-                tracing::warn!("query worker {worker_id} {label} HTTP request error: {}", err);
+                eprintln!(
+                    "ERROR: query worker {worker_id} {label} HTTP request error: {}",
+                    err
+                );
+                tracing::warn!(
+                    "query worker {worker_id} {label} HTTP request error: {}",
+                    err
+                );
                 stats.record_error(label).await;
             }
         }
@@ -898,7 +932,10 @@ fn sample_span(counter: u64) -> Span {
     attributes.insert("sp.session.id".to_string(), session_id.clone());
     attributes.insert("http.request.method".to_string(), method.to_string());
     attributes.insert("http.request.path".to_string(), path.to_string());
-    attributes.insert("http.response.status_code".to_string(), http_status.to_string());
+    attributes.insert(
+        "http.response.status_code".to_string(),
+        http_status.to_string(),
+    );
 
     Span {
         session_id,
@@ -986,7 +1023,11 @@ fn sample_metric(counter: u64) -> Metric {
     );
 
     let burst = (counter / 200) % 10 == 0;
-    let value = if burst { 900.0 } else { 100.0 + (counter % 50) as f64 };
+    let value = if burst {
+        900.0
+    } else {
+        100.0 + (counter % 50) as f64
+    };
 
     Metric {
         metric_name: "stress.metric.latency".to_string(),

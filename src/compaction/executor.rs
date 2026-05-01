@@ -364,7 +364,10 @@ impl MaintenanceExecutor {
         Ok(MaintenanceSummary { tables: results })
     }
 
-    fn open_ducklake_connection(&self, ducklake: &crate::config::DuckLakeConfig) -> Result<Connection> {
+    fn open_ducklake_connection(
+        &self,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
         crate::storage::ducklake::configure_httpfs_gcs_for_data_path(&conn, &ducklake.data_path)?;
@@ -476,9 +479,7 @@ impl MaintenanceExecutor {
         let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', {});",
-            ducklake.catalog_alias,
-            target_file_size,
-            scope
+            ducklake.catalog_alias, target_file_size, scope
         );
         if let Err(err) = execute_batch_with_serialization_retry(
             conn,
@@ -913,8 +914,7 @@ impl MaintenanceExecutor {
 fn is_ducklake_unsupported(err: &duckdb::Error) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("catalog error")
-        || msg.contains("function")
-            && (msg.contains("does not exist") || msg.contains("not found"))
+        || msg.contains("function") && (msg.contains("does not exist") || msg.contains("not found"))
         || msg.contains("no function matches")
         || msg.contains("not implemented")
 }

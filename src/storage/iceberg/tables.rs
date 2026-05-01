@@ -24,9 +24,7 @@ fn generate_promoted_columns(
                 Some(PromotedDataType::Boolean) => Type::Primitive(PrimitiveType::Boolean),
                 None => Type::Primitive(PrimitiveType::String), // Default to String if not specified
             };
-            fields.push(
-                NestedField::optional(current_field_id, column_name, field_type).into(),
-            );
+            fields.push(NestedField::optional(current_field_id, column_name, field_type).into());
             current_field_id += 1;
         }
 
@@ -40,9 +38,7 @@ fn generate_promoted_columns(
                 Some(PromotedDataType::Boolean) => Type::Primitive(PrimitiveType::Boolean),
                 None => Type::Primitive(PrimitiveType::String), // Default to String if not specified
             };
-            fields.push(
-                NestedField::optional(current_field_id, column_name, field_type).into(),
-            );
+            fields.push(NestedField::optional(current_field_id, column_name, field_type).into());
             current_field_id += 1;
         }
     }
@@ -60,148 +56,141 @@ impl TraceTable {
 
     pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
         let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
-                // Primary Identifiers
-                NestedField::required(1, "session_id", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(2, "trace_id", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(3, "span_id", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(4, "parent_span_id", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // Application Context
-                NestedField::required(5, "app_id", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(6, "organization_id", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::optional(7, "tenant_id", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // Span Metadata
-                NestedField::required(8, "message_type", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::optional(9, "span_kind", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(10, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
-                    .into(),
-                NestedField::optional(
-                    11,
-                    "end_timestamp",
-                    Type::Primitive(PrimitiveType::Timestamptz),
-                )
+            // Primary Identifiers
+            NestedField::required(1, "session_id", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(2, "trace_id", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(3, "span_id", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(4, "parent_span_id", Type::Primitive(PrimitiveType::String))
                 .into(),
-                // Attributes MAP<STRING, STRING>
-                NestedField::optional(
-                    12,
-                    "attributes",
-                    Type::Map(MapType::new(
-                        NestedField::required(17, "key", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::optional(18, "value", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                    )),
-                )
+            // Application Context
+            NestedField::required(5, "app_id", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(6, "organization_id", Type::Primitive(PrimitiveType::String))
                 .into(),
-                // Events ARRAY<STRUCT<name, timestamp, attributes>>
-                NestedField::optional(
-                    13,
-                    "events",
-                    Type::List(ListType::new(
-                        NestedField::optional(
-                            19,
-                            "element",
-                            Type::Struct(StructType::new(vec![
-                                NestedField::required(
-                                    20,
-                                    "name",
-                                    Type::Primitive(PrimitiveType::String),
-                                )
-                                .into(),
-                                NestedField::required(
-                                    21,
-                                    "timestamp",
-                                    Type::Primitive(PrimitiveType::Timestamptz),
-                                )
-                                .into(),
-                                NestedField::optional(
-                                    22,
-                                    "attributes",
-                                    Type::Map(MapType::new(
-                                        NestedField::required(
-                                            23,
-                                            "key",
-                                            Type::Primitive(PrimitiveType::String),
-                                        )
-                                        .into(),
-                                        NestedField::optional(
-                                            24,
-                                            "value",
-                                            Type::Primitive(PrimitiveType::String),
-                                        )
-                                        .into(),
-                                    )),
-                                )
-                                .into(),
-                            ])),
-                        )
+            NestedField::optional(7, "tenant_id", Type::Primitive(PrimitiveType::String)).into(),
+            // Span Metadata
+            NestedField::required(8, "message_type", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(9, "span_kind", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(10, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
+                .into(),
+            NestedField::optional(
+                11,
+                "end_timestamp",
+                Type::Primitive(PrimitiveType::Timestamptz),
+            )
+            .into(),
+            // Attributes MAP<STRING, STRING>
+            NestedField::optional(
+                12,
+                "attributes",
+                Type::Map(MapType::new(
+                    NestedField::required(17, "key", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(18, "value", Type::Primitive(PrimitiveType::String))
                         .into(),
-                    )),
-                )
-                .into(),
-                // Status
-                NestedField::optional(14, "status_code", Type::Primitive(PrimitiveType::String))
+                )),
+            )
+            .into(),
+            // Events ARRAY<STRUCT<name, timestamp, attributes>>
+            NestedField::optional(
+                13,
+                "events",
+                Type::List(ListType::new(
+                    NestedField::optional(
+                        19,
+                        "element",
+                        Type::Struct(StructType::new(vec![
+                            NestedField::required(
+                                20,
+                                "name",
+                                Type::Primitive(PrimitiveType::String),
+                            )
+                            .into(),
+                            NestedField::required(
+                                21,
+                                "timestamp",
+                                Type::Primitive(PrimitiveType::Timestamptz),
+                            )
+                            .into(),
+                            NestedField::optional(
+                                22,
+                                "attributes",
+                                Type::Map(MapType::new(
+                                    NestedField::required(
+                                        23,
+                                        "key",
+                                        Type::Primitive(PrimitiveType::String),
+                                    )
+                                    .into(),
+                                    NestedField::optional(
+                                        24,
+                                        "value",
+                                        Type::Primitive(PrimitiveType::String),
+                                    )
+                                    .into(),
+                                )),
+                            )
+                            .into(),
+                        ])),
+                    )
                     .into(),
-                NestedField::optional(15, "status_message", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // HTTP Bodies (extracted from span events)
-                // These columns are populated by parsing the 'events' array for 'http.request' and 'http.response' events
-                // Field IDs 25-32 chosen to avoid conflicts with nested field IDs (17-24)
-                NestedField::optional(
-                    25,
-                    "http_request_method",
-                    Type::Primitive(PrimitiveType::String),
-                )
+                )),
+            )
+            .into(),
+            // Status
+            NestedField::optional(14, "status_code", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(15, "status_message", Type::Primitive(PrimitiveType::String))
                 .into(),
-                NestedField::optional(
-                    26,
-                    "http_request_path",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into(),
-                NestedField::optional(
-                    27,
-                    "http_request_headers",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into(),
-                NestedField::optional(
-                    28,
-                    "http_request_body",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into(),
-                NestedField::optional(
-                    29,
-                    "http_response_status_code",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into(),
-                NestedField::optional(
-                    30,
-                    "http_response_headers",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into(),
-                NestedField::optional(
-                    31,
-                    "http_response_body",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into(),
-                // Partition Key (comes last in declaration order to match Arrow schema)
-                NestedField::required(32, "record_date", Type::Primitive(PrimitiveType::Date))
-                    .into(),
-            ];
-        
+            // HTTP Bodies (extracted from span events)
+            // These columns are populated by parsing the 'events' array for 'http.request' and 'http.response' events
+            // Field IDs 25-32 chosen to avoid conflicts with nested field IDs (17-24)
+            NestedField::optional(
+                25,
+                "http_request_method",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            NestedField::optional(
+                26,
+                "http_request_path",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            NestedField::optional(
+                27,
+                "http_request_headers",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            NestedField::optional(
+                28,
+                "http_request_body",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            NestedField::optional(
+                29,
+                "http_response_status_code",
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into(),
+            NestedField::optional(
+                30,
+                "http_response_headers",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            NestedField::optional(
+                31,
+                "http_response_body",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
+            // Partition Key (comes last in declaration order to match Arrow schema)
+            NestedField::required(32, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
+        ];
+
         // Add promoted columns (starting at field ID 33, after record_date which is 32)
         base_fields.extend(generate_promoted_columns(promotion_config, 33));
-        
+
         IcebergSchema::builder()
             .with_schema_id(0)
             .with_fields(base_fields)
@@ -293,60 +282,55 @@ impl OtlpLogsTable {
 
     pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
         let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
-                // Session context
-                NestedField::optional(1, "session_id", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // Timestamps
-                NestedField::required(2, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
-                    .into(),
-                NestedField::optional(
-                    3,
-                    "observed_timestamp",
-                    Type::Primitive(PrimitiveType::Timestamptz),
-                )
+            // Session context
+            NestedField::optional(1, "session_id", Type::Primitive(PrimitiveType::String)).into(),
+            // Timestamps
+            NestedField::required(2, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
                 .into(),
-                // Severity
-                NestedField::required(4, "severity_number", Type::Primitive(PrimitiveType::Int))
-                    .into(),
-                NestedField::required(5, "severity_text", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // Log content
-                NestedField::required(6, "body", Type::Primitive(PrimitiveType::String)).into(),
-                // Attributes MAP<STRING, STRING>
-                NestedField::optional(
-                    7,
-                    "attributes",
-                    Type::Map(MapType::new(
-                        NestedField::required(11, "key", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::optional(12, "value", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                    )),
-                )
+            NestedField::optional(
+                3,
+                "observed_timestamp",
+                Type::Primitive(PrimitiveType::Timestamptz),
+            )
+            .into(),
+            // Severity
+            NestedField::required(4, "severity_number", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::required(5, "severity_text", Type::Primitive(PrimitiveType::String))
                 .into(),
-                // Resource attributes MAP<STRING, STRING>
-                NestedField::optional(
-                    8,
-                    "resource_attributes",
-                    Type::Map(MapType::new(
-                        NestedField::required(13, "key", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::optional(14, "value", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                    )),
-                )
-                .into(),
-                // Trace correlation
-                NestedField::optional(9, "trace_id", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(10, "span_id", Type::Primitive(PrimitiveType::String)).into(),
-                // Partition Key
-                NestedField::required(15, "record_date", Type::Primitive(PrimitiveType::Date))
-                    .into(),
-            ];
-        
+            // Log content
+            NestedField::required(6, "body", Type::Primitive(PrimitiveType::String)).into(),
+            // Attributes MAP<STRING, STRING>
+            NestedField::optional(
+                7,
+                "attributes",
+                Type::Map(MapType::new(
+                    NestedField::required(11, "key", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(12, "value", Type::Primitive(PrimitiveType::String))
+                        .into(),
+                )),
+            )
+            .into(),
+            // Resource attributes MAP<STRING, STRING>
+            NestedField::optional(
+                8,
+                "resource_attributes",
+                Type::Map(MapType::new(
+                    NestedField::required(13, "key", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(14, "value", Type::Primitive(PrimitiveType::String))
+                        .into(),
+                )),
+            )
+            .into(),
+            // Trace correlation
+            NestedField::optional(9, "trace_id", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(10, "span_id", Type::Primitive(PrimitiveType::String)).into(),
+            // Partition Key
+            NestedField::required(15, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
+        ];
+
         // Add promoted columns (starting at field ID 16, after record_date which is 15)
         base_fields.extend(generate_promoted_columns(promotion_config, 16));
-        
+
         IcebergSchema::builder()
             .with_schema_id(0)
             .with_fields(base_fields)
@@ -432,50 +416,44 @@ impl OtlpMetricsTable {
 
     pub fn schema(promotion_config: Option<&TablePromotionConfig>) -> IcebergSchema {
         let mut base_fields: Vec<std::sync::Arc<NestedField>> = vec![
-                // Metric identity
-                NestedField::required(1, "metric_name", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(2, "description", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(3, "unit", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(4, "metric_type", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                // Timestamp and value
-                NestedField::required(5, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
-                    .into(),
-                NestedField::required(6, "value", Type::Primitive(PrimitiveType::Double)).into(),
-                // Attributes MAP<STRING, STRING>
-                NestedField::optional(
-                    7,
-                    "attributes",
-                    Type::Map(MapType::new(
-                        NestedField::required(9, "key", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::optional(10, "value", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                    )),
-                )
+            // Metric identity
+            NestedField::required(1, "metric_name", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(2, "description", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(3, "unit", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(4, "metric_type", Type::Primitive(PrimitiveType::String)).into(),
+            // Timestamp and value
+            NestedField::required(5, "timestamp", Type::Primitive(PrimitiveType::Timestamptz))
                 .into(),
-                // Resource attributes MAP<STRING, STRING>
-                NestedField::optional(
-                    8,
-                    "resource_attributes",
-                    Type::Map(MapType::new(
-                        NestedField::required(11, "key", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::optional(12, "value", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                    )),
-                )
-                .into(),
-                // Partition Key
-                NestedField::required(13, "record_date", Type::Primitive(PrimitiveType::Date))
-                    .into(),
-            ];
-        
+            NestedField::required(6, "value", Type::Primitive(PrimitiveType::Double)).into(),
+            // Attributes MAP<STRING, STRING>
+            NestedField::optional(
+                7,
+                "attributes",
+                Type::Map(MapType::new(
+                    NestedField::required(9, "key", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(10, "value", Type::Primitive(PrimitiveType::String))
+                        .into(),
+                )),
+            )
+            .into(),
+            // Resource attributes MAP<STRING, STRING>
+            NestedField::optional(
+                8,
+                "resource_attributes",
+                Type::Map(MapType::new(
+                    NestedField::required(11, "key", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(12, "value", Type::Primitive(PrimitiveType::String))
+                        .into(),
+                )),
+            )
+            .into(),
+            // Partition Key
+            NestedField::required(13, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
+        ];
+
         // Add promoted columns (starting at field ID 14, after record_date which is 13)
         base_fields.extend(generate_promoted_columns(promotion_config, 14));
-        
+
         IcebergSchema::builder()
             .with_schema_id(0)
             .with_fields(base_fields)

@@ -9,11 +9,15 @@ pub fn capture_query_sql(tenant_id: &str, capture_id: &str) -> String {
     let te = tenant_id.replace('\'', "''");
     let ce = capture_id.replace('\'', "''");
     format!(
-        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM union_spans WHERE attributes['sp.capture.id'] = '{ce}' AND attributes['sp.tenant.id'] = '{te}' ORDER BY timestamp ASC"
+        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM committed_spans WHERE attributes['sp.capture.id'] = '{ce}' AND attributes['sp.tenant.id'] = '{te}' ORDER BY timestamp ASC"
     )
 }
 
-pub fn build_capture_json(capture_id: &str, columns: &[String], rows: &[Vec<Value>]) -> Result<Vec<u8>> {
+pub fn build_capture_json(
+    capture_id: &str,
+    columns: &[String],
+    rows: &[Vec<Value>],
+) -> Result<Vec<u8>> {
     let mut traces: Vec<Value> = Vec::new();
     for row in rows {
         let mut entry = Map::new();
@@ -57,15 +61,9 @@ pub fn build_capture_json(capture_id: &str, columns: &[String], rows: &[Vec<Valu
                     map_lookup(attrs, "http.request.header.:path"),
                 ],
             );
-            full_url = first_non_empty(
-                &full_url,
-                &[map_lookup(attrs, "url.full"), path.clone()],
-            );
+            full_url = first_non_empty(&full_url, &[map_lookup(attrs, "url.full"), path.clone()]);
             body = first_non_empty(&body, &[map_lookup(attrs, "http.response.body")]);
-            direction = first_non_empty(
-                &direction,
-                &[map_lookup(attrs, "sp.traffic.direction")],
-            );
+            direction = first_non_empty(&direction, &[map_lookup(attrs, "sp.traffic.direction")]);
             if status_code == 0 {
                 let s = map_lookup(attrs, "http.response.status_code");
                 if let Ok(n) = s.parse::<i64>() {
@@ -167,5 +165,17 @@ fn hex_to_b64(s: &str) -> String {
     match hex::decode(s) {
         Ok(b) => base64::engine::general_purpose::STANDARD.encode(b),
         Err(_) => s.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_query_sql;
+
+    #[test]
+    fn capture_query_reads_committed_spans_only() {
+        let sql = capture_query_sql("tenant-a", "cap-1");
+        assert!(sql.contains("FROM committed_spans"));
+        assert!(!sql.contains("FROM union_spans"));
     }
 }

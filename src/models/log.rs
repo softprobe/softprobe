@@ -202,10 +202,7 @@ impl Log {
     ) -> Option<String> {
         // Check log record attributes first
         for attr in &log_record.attributes {
-            if attr.key == "session.id"
-                || attr.key == "session_id"
-                || attr.key == "sp.session.id"
-            {
+            if attr.key == "session.id" || attr.key == "session_id" || attr.key == "sp.session.id" {
                 if let Some(value) = &attr.value {
                     if let Some(
                         opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),

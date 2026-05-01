@@ -3,6 +3,26 @@ networks:
     driver: bridge
 
 services:
+  ducklake-postgres:
+    image: postgres:17
+    container_name: ducklake-postgres
+    environment:
+      - POSTGRES_PASSWORD=ducklake
+      - POSTGRES_USER=ducklake
+      - POSTGRES_DB=ducklake
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -p 5432 -d ducklake"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend_net
+    volumes:
+      - ducklake-postgres-data:/var/lib/postgresql/data
+
   minio:
     image: minio/minio:latest
     container_name: minio
@@ -138,3 +158,4 @@ services:
 volumes:
   grafana-storage:
   lakekeeper-postgres:
+  ducklake-postgres-data:

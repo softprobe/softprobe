@@ -1,10 +1,10 @@
 use chrono::Utc;
+use iceberg::Catalog;
 use softprobe_runtime::config::{PromotedDataType, SchemaPromotionConfig, TablePromotionConfig};
 use softprobe_runtime::models::Span as SpanData;
 use softprobe_runtime::storage::iceberg::arrow::spans_to_record_batch_with_promotion;
 use softprobe_runtime::storage::iceberg::tables::TraceTable;
 use std::collections::HashMap;
-use iceberg::Catalog;
 
 use crate::util::iceberg::load_test_config;
 
@@ -48,7 +48,10 @@ async fn test_arrow_conversion_with_promoted_columns() {
         attributes.insert("count".to_string(), (i * 10).to_string());
         attributes.insert("price".to_string(), format!("{}.99", i));
         attributes.insert("is_active".to_string(), (i % 2 == 0).to_string());
-        attributes.insert("other_attr".to_string(), "should_not_be_promoted".to_string());
+        attributes.insert(
+            "other_attr".to_string(),
+            "should_not_be_promoted".to_string(),
+        );
 
         spans.push(SpanData {
             session_id: format!("session-{}", i),
@@ -77,8 +80,9 @@ async fn test_arrow_conversion_with_promoted_columns() {
     }
 
     // Convert to RecordBatch with promotion config
-    let record_batch = spans_to_record_batch_with_promotion(&spans, &schema, Some(&promotion_config))
-        .expect("should convert");
+    let record_batch =
+        spans_to_record_batch_with_promotion(&spans, &schema, Some(&promotion_config))
+            .expect("should convert");
 
     // Verify schema matches (convert Iceberg to Arrow for comparison)
     let arrow_schema = arrow::datatypes::Schema::try_from(&schema).expect("should convert");
@@ -160,13 +164,11 @@ async fn test_arrow_conversion_with_promoted_columns() {
 async fn test_arrow_conversion_with_missing_promoted_attributes() {
     // Test that missing attributes result in NULL values
     let promotion_config = TablePromotionConfig {
-        attributes: vec![
-            softprobe_runtime::config::PromotedColumn {
-                attribute_key: "user.id".to_string(),
-                column_name: Some("user_id".to_string()),
-                data_type: Some(PromotedDataType::String),
-            },
-        ],
+        attributes: vec![softprobe_runtime::config::PromotedColumn {
+            attribute_key: "user.id".to_string(),
+            column_name: Some("user_id".to_string()),
+            data_type: Some(PromotedDataType::String),
+        }],
         resource_attributes: vec![],
     };
 
@@ -207,8 +209,9 @@ async fn test_arrow_conversion_with_missing_promoted_attributes() {
         });
     }
 
-    let record_batch = spans_to_record_batch_with_promotion(&spans, &schema, Some(&promotion_config))
-        .expect("should convert");
+    let record_batch =
+        spans_to_record_batch_with_promotion(&spans, &schema, Some(&promotion_config))
+            .expect("should convert");
 
     // Find user_id column
     let user_id_idx = record_batch
@@ -241,17 +244,15 @@ async fn test_table_creation_with_promotion() {
         // Schema promotion itself is still validated in the unit tests in this file.
         return;
     }
-    
+
     // Add schema promotion config
     config.schema_promotion = Some(SchemaPromotionConfig {
         traces: Some(TablePromotionConfig {
-            attributes: vec![
-                softprobe_runtime::config::PromotedColumn {
-                    attribute_key: "user.id".to_string(),
-                    column_name: Some("user_id".to_string()),
-                    data_type: Some(PromotedDataType::String),
-                },
-            ],
+            attributes: vec![softprobe_runtime::config::PromotedColumn {
+                attribute_key: "user.id".to_string(),
+                column_name: Some("user_id".to_string()),
+                data_type: Some(PromotedDataType::String),
+            }],
             resource_attributes: vec![],
         }),
         logs: None,
@@ -264,9 +265,9 @@ async fn test_table_creation_with_promotion() {
         .expect("should create catalog");
     let namespace_name = config.iceberg.namespace.as_str();
     let table_name = softprobe_runtime::storage::iceberg::tables::TraceTable::table_name();
-    let table_ident = iceberg::TableIdent::from_strs([namespace_name, table_name])
-        .expect("table ident");
-    
+    let table_ident =
+        iceberg::TableIdent::from_strs([namespace_name, table_name]).expect("table ident");
+
     // Try to drop the table if it exists (ignore errors if it doesn't exist)
     let _ = catalog.catalog().drop_table(&table_ident).await;
 
@@ -277,7 +278,8 @@ async fn test_table_creation_with_promotion() {
 
     // Get the schema and verify promoted column exists
     let iceberg_schema = writer.spans_schema().await.expect("should get schema");
-    let arrow_schema = arrow::datatypes::Schema::try_from(iceberg_schema.as_ref()).expect("should convert");
+    let arrow_schema =
+        arrow::datatypes::Schema::try_from(iceberg_schema.as_ref()).expect("should convert");
     let fields: Vec<String> = arrow_schema
         .fields()
         .iter()

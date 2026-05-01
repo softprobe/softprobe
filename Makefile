@@ -6,15 +6,20 @@
 # - CI/CD environments
 #
 # Usage:
-#   make test-local     - Run all tests with local MinIO (requires docker-compose)
-#   make test-r2        - Run all tests with Cloudflare R2
-#   make test-ci        - Run tests in CI environment (auto-detects sandboxed env)
-#   make test-quick     - Run unit tests only (no integration tests)
-#   make setup-local    - Start local test infrastructure (MinIO + Iceberg REST)
+#   make test           - Unit tests + full local integration (MinIO; integration-e2e)
+#   make test-quick     - Unit tests only
+#   make test-smoke     - Lightweight integration tests (no MinIO)
+#   make test-local     - Full integration only (MinIO + integration-e2e)
+#   make test-r2        - Integration tests with Cloudflare R2
+#   make test-ci        - CI: MinIO → lib + integration-e2e; else lib only
+#   make setup-local    - Start MinIO (+ DuckLake Postgres for postgres-catalog dev)
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test-local test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test test-all test-local test-smoke test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+
+# Gated modules: tests/integration/mod.rs (iceberg, ingest/query, performance, …).
+INTEGRATION_E2E_FLAGS = --features integration-e2e --test tests
 
 # Ensure libduckdb is fetched when not present on host.
 # Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
@@ -25,11 +30,13 @@ help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
 	@echo ""
 	@echo "Test Targets:"
-	@echo "  make test-local      - Run integration tests with local MinIO"
-	@echo "  make test-r2         - Run integration tests with Cloudflare R2"
-	@echo "  make test-ci         - Run tests in CI environment (auto-setup)"
-	@echo "  make test-quick      - Run unit tests only (no integration)"
-	@echo "  make test-all        - Run all tests (unit + integration)"
+	@echo "  make test            - Unit tests + full local integration (MinIO + integration-e2e)"
+	@echo "  make test-all        - Same as make test"
+	@echo "  make test-local      - Full integration only (MinIO + integration-e2e)"
+	@echo "  make test-smoke      - Fast integration smoke (no MinIO; default test crate features)"
+	@echo "  make test-r2         - Integration tests with Cloudflare R2 (+ integration-e2e)"
+	@echo "  make test-ci         - CI: MinIO present → lib + integration-e2e; else lib only"
+	@echo "  make test-quick      - Unit tests only (cargo test --lib)"
 	@echo ""
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
@@ -40,9 +47,10 @@ help:
 	@echo "  make test-deployment-stress - Stress test local with large dataset"
 	@echo ""
 	@echo "Infrastructure:"
-	@echo "  make setup-local     - Start local test infrastructure"
-	@echo "  make teardown-local  - Stop local test infrastructure"
-	@echo "  make check-local     - Verify local infrastructure is running"
+	@echo "  make setup-local     - Start MinIO (+ DuckLake Postgres for dev)"
+	@echo "  make teardown-local  - Stop docker-compose stack in this directory"
+	@echo "  make check-local          - Verify MinIO (required for integration tests)"
+	@echo "  make check-local-postgres - Verify DuckLake Postgres (optional dev catalog)"
 	@echo ""
 	@echo "Data & Verification:"
 	@echo "  make generate-telemetry - Generate demo OTLP data"
@@ -97,8 +105,8 @@ clean:
 # Local infrastructure management
 setup-local:
 	@echo "🚀 Starting local test infrastructure..."
-	@echo "📦 Starting MinIO and Lakekeeper REST catalog..."
-	@docker-compose up -d minio db migrate lakekeeper
+	@echo "📦 Starting MinIO and DuckLake Postgres catalog..."
+	@docker-compose up -d minio ducklake-postgres
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
@@ -109,54 +117,14 @@ setup-local:
 		(docker exec minio mc ls local/warehouse > /dev/null 2>&1 && echo "✅ Bucket 'warehouse' already exists") || \
 		(echo "❌ Failed to create or verify bucket 'warehouse'" && exit 1)
 	@echo "✅ Bucket 'warehouse' is ready"
-	@echo "✅ Checking Lakekeeper REST health..."
-	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 || (echo "❌ Lakekeeper REST not ready" && exit 1)
-	@echo "🔧 Bootstrapping Lakekeeper (if needed)..."
-	@bootstrap_status=$$(curl -s -o /tmp/lakekeeper_bootstrap.json -w "%{http_code}" -X POST http://localhost:8181/management/v1/bootstrap \
-		-H "Content-Type: application/json" \
-		-d '{"accept-terms-of-use": true}'); \
-	if [ "$$bootstrap_status" = "204" ] || \
-		([ "$$bootstrap_status" = "400" ] && grep -q "CatalogAlreadyBootstrapped" /tmp/lakekeeper_bootstrap.json); then \
-		echo "✅ Lakekeeper bootstrapped"; \
-	else \
-		echo "❌ Lakekeeper bootstrap failed (HTTP $$bootstrap_status)"; \
-		cat /tmp/lakekeeper_bootstrap.json; \
-		exit 1; \
-	fi
-	@echo "🧊 Creating Lakekeeper warehouse 'default' (if needed)..."
-	@warehouse_status=$$(curl -s -o /tmp/lakekeeper_warehouse.json -w "%{http_code}" -X POST http://localhost:8181/management/v1/warehouse \
-		-H "Content-Type: application/json" \
-		-d '{"warehouse-name":"default","project-id":"00000000-0000-0000-0000-000000000000","storage-profile":{"type":"s3","bucket":"warehouse","key-prefix":"iceberg","endpoint":"http://minio:9000","region":"us-east-1","path-style-access":true,"flavor":"minio","sts-enabled":false},"storage-credential":{"type":"s3","credential-type":"access-key","aws-access-key-id":"minioadmin","aws-secret-access-key":"minioadmin"}}'); \
-	if [ "$$warehouse_status" = "201" ] || \
-		([ "$$warehouse_status" = "400" ] && (grep -q "CreateWarehouseStorageProfileOverlap" /tmp/lakekeeper_warehouse.json || grep -q "WarehouseAlreadyExists" /tmp/lakekeeper_warehouse.json)); then \
-		echo "✅ Warehouse 'default' is ready"; \
-	else \
-		echo "❌ Warehouse creation failed (HTTP $$warehouse_status)"; \
-		cat /tmp/lakekeeper_warehouse.json; \
-		exit 1; \
-	fi
-	@echo "🔐 Ensuring Lakekeeper storage credentials use static keys..."
-	@warehouse_id=$$(curl -s http://localhost:8181/management/v1/warehouse | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((w.get("id") or w.get("warehouse-id") for w in data.get("warehouses", []) if w.get("name")=="default"), ""))'); \
-	if [ -z "$$warehouse_id" ]; then \
-		echo "❌ Unable to resolve Lakekeeper warehouse ID"; \
-		exit 1; \
-	fi; \
-	storage_status=$$(curl -s -o /tmp/lakekeeper_storage.json -w "%{http_code}" -X POST "http://localhost:8181/management/v1/warehouse/$$warehouse_id/storage" \
-		-H "Content-Type: application/json" \
-		-d '{"storage-profile":{"type":"s3","bucket":"warehouse","key-prefix":"iceberg","endpoint":"http://minio:9000","region":"us-east-1","path-style-access":true,"flavor":"minio","sts-enabled":false},"storage-credential":{"type":"s3","credential-type":"access-key","aws-access-key-id":"minioadmin","aws-secret-access-key":"minioadmin"}}'); \
-	if [ "$$storage_status" = "200" ]; then \
-		echo "✅ Lakekeeper storage profile updated"; \
-	else \
-		echo "❌ Lakekeeper storage update failed (HTTP $$storage_status)"; \
-		cat /tmp/lakekeeper_storage.json; \
-		exit 1; \
-	fi
+	@echo "🦆 Checking DuckLake Postgres health..."
+	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "❌ DuckLake Postgres not ready" && exit 1)
 	@echo "✅ Local test infrastructure is ready!"
 	@echo ""
 	@echo "Services available:"
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  - MinIO API: http://localhost:9000"
-	@echo "  - Lakekeeper REST: http://localhost:8181/catalog"
+	@echo "  - DuckLake catalog DB: postgres://ducklake@localhost:5432/ducklake"
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."
@@ -186,22 +154,28 @@ check-minio:
 	@echo "🔍 Checking MinIO..."
 	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-minio')" && exit 1)
 
-check-local:
-	@echo "🔍 Checking local infrastructure..."
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-local')" && exit 1)
-	@docker exec lakekeeper /home/nonroot/lakekeeper healthcheck > /dev/null 2>&1 && echo "✅ Lakekeeper REST is running" || (echo "❌ Lakekeeper REST is not running (run 'make setup-local')" && exit 1)
+check-local: check-minio
+	@echo "✅ Local test prerequisites satisfied (MinIO; integration tests use file DuckLake metadata + s3://warehouse data)"
+
+check-local-postgres:
+	@echo "🔍 Checking DuckLake Postgres..."
+	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local' from softprobe-runtime/)" && exit 1)
 
 # Test targets
 test-quick:
 	@echo "🧪 Running unit tests..."
 	cargo test --lib
 
+test-smoke:
+	@echo "🧪 Running lightweight integration tests (no integration-e2e feature)..."
+	cargo test --test tests -- --test-threads=1
+
 test-local: check-local
-	@echo "🧪 Running integration tests with local MinIO..."
+	@echo "🧪 Running full integration tests with local MinIO (integration-e2e)..."
 	@echo "📝 Configuration: tests/config/test.yaml"
-	@echo "🗄️  Backend: MinIO (localhost:9000) + Lakekeeper REST (localhost:8181)"
+	@echo "🗄️  Backend: MinIO :9000 (DuckLake test data); metadata is per-run temp files"
 	@echo ""
-	SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1 --nocapture
+	SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture
 
 test-r2:
 	@echo "🧪 Running integration tests with Cloudflare R2..."
@@ -213,35 +187,37 @@ test-r2:
 		echo "🔒 Detecting environment..."; \
 		if curl -sf https://www.google.com > /dev/null 2>&1; then \
 			echo "✅ Direct internet access available"; \
-			ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
+			ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
 		else \
 			echo "⚠️  Detected restricted/sandboxed environment"; \
 			echo "⚠️  Enabling TLS validation bypass for testing"; \
-			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
+			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
 		fi \
 	else \
 		echo "🔓 TLS validation bypass already enabled"; \
-		ICEBERG_TEST_TYPE=r2 cargo test --test tests -- --test-threads=1 --nocapture; \
+		ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
 	fi
 
 test-ci:
 	@echo "🧪 Running tests in CI environment..."
 	@echo "🔍 Auto-detecting environment and requirements..."
 	@# In CI, we expect services to be available via docker-compose or service containers
-	@if curl -sf http://localhost:8181/catalog/v1/config?warehouse=default > /dev/null 2>&1; then \
-		echo "✅ Lakekeeper REST catalog detected"; \
-		echo "🧪 Running integration tests with local catalog..."; \
-		ICEBERG_TEST_TYPE=local cargo test --test tests -- --test-threads=1; \
+	@if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then \
+		echo "✅ MinIO detected"; \
+		echo "🧪 Running unit tests..."; \
+		cargo test --lib; \
+		echo "🧪 Running integration tests (integration-e2e)..."; \
+		SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1; \
 	else \
-		echo "⚠️  No local catalog found, running unit tests only"; \
+		echo "⚠️  No local MinIO on :9000, running unit tests only"; \
 		cargo test --lib; \
 	fi
 
 test-all: test-quick test-local
 	@echo "✅ All tests completed!"
 
-# Convenience targets
-test: test-local
+# Default pre-merge check: lib + full integration (requires MinIO).
+test: test-all
 
 # Development workflow
 dev-check: check-fmt lint test-quick
@@ -339,7 +315,7 @@ stress-test: setup-minio
 		TMP_CONFIG=/tmp/splake-stress.yaml; \
 		sed "s/port: 8090/port: $$PORT/" config.yaml > $$TMP_CONFIG; \
 		echo "🚀 Starting splake on port $$PORT..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-stress.log 2>&1 & \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin softprobe-runtime > /tmp/splake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \
 		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; $(MAKE) teardown-minio >/dev/null 2>&1 || true' EXIT; \
 		for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -392,7 +368,7 @@ stress-test-r2-ducklake:
 		printf "  metadata_schema: \"main\"\n" >> $$TMP_CONFIG; \
 		printf "  data_inlining_row_limit: 0\n" >> $$TMP_CONFIG; \
 		echo "🚀 Starting splake with $$R2_CONFIG on port $$PORT..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin splake > /tmp/splake-r2-ducklake-stress.log 2>&1 & \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin softprobe-runtime > /tmp/splake-r2-ducklake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \
 		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f $$TMP_CONFIG' EXIT; \
 		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
@@ -469,7 +445,7 @@ stress-test-gcs-ducklake:
 		printf "  metadata_schema: \"main\"\n" >> "$$TMP_CONFIG"; \
 		printf "  data_inlining_row_limit: 0\n" >> "$$TMP_CONFIG"; \
 		echo "🚀 Starting local splake on port $$PORT using GCS bucket $$GCS_BUCKET..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="$$TMP_CONFIG" cargo run --bin splake > /tmp/splake-gcs-ducklake-stress.log 2>&1 & \
+		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="$$TMP_CONFIG" cargo run --bin softprobe-runtime > /tmp/splake-gcs-ducklake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \
 		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f "$$TMP_CONFIG"' EXIT; \
 		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \

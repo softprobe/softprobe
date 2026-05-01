@@ -4,8 +4,8 @@ pub mod query;
 
 use crate::authn;
 use crate::config::Config;
-use crate::query::{self as query_engine, QueryEngine};
 use crate::ingest_engine::IngestPipeline;
+use crate::query::{self as query_engine, QueryEngine};
 use crate::session_redis::RedisStore;
 use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
 use axum::{

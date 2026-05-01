@@ -1,17 +1,17 @@
+use anyhow::Result;
 use chrono::Utc;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use softprobe_runtime::config::Config;
+use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Log as LogData;
 use softprobe_runtime::query;
 use softprobe_runtime::query::duckdb::{reset_view_counters, view_counters_snapshot};
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::storage;
 use softprobe_runtime::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::tempdir;
-use anyhow::Result;
 
 use crate::util::pipeline::TestPipeline;
 
@@ -138,11 +138,7 @@ async fn maybe_log_cache_profile(engine: &softprobe_runtime::query::QueryEngine,
     }
 }
 
-async fn explain_analyze(
-    engine: &softprobe_runtime::query::QueryEngine,
-    label: &str,
-    sql: &str,
-) {
+async fn explain_analyze(engine: &softprobe_runtime::query::QueryEngine, label: &str, sql: &str) {
     let explain_sql = format!("EXPLAIN ANALYZE {sql}");
     match engine.execute_query(&explain_sql).await {
         Ok(result) => {
@@ -155,11 +151,7 @@ async fn explain_analyze(
     }
 }
 
-async fn run_diagnostics(
-    engine: &softprobe_runtime::query::QueryEngine,
-    label: &str,
-    sql: &str,
-) {
+async fn run_diagnostics(engine: &softprobe_runtime::query::QueryEngine, label: &str, sql: &str) {
     let start = Instant::now();
     let result = engine.execute_query(sql).await;
     let duration = start.elapsed();
@@ -186,8 +178,12 @@ async fn retry_query_until_count(
     max_retries: u32,
 ) -> Result<softprobe_runtime::query::duckdb::QueryResult, anyhow::Error> {
     let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
-    let max_retries = if is_r2 { max_retries.max(10) } else { max_retries };
-    
+    let max_retries = if is_r2 {
+        max_retries.max(10)
+    } else {
+        max_retries
+    };
+
     for attempt in 0..max_retries {
         match engine.execute_query(sql).await {
             Ok(result) => {
@@ -205,12 +201,16 @@ async fn retry_query_until_count(
                     let delay_ms = 100 * (1 << attempt.min(5));
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                 } else {
-                    return Err(anyhow::anyhow!("Query failed after {} retries: {}", max_retries, e));
+                    return Err(anyhow::anyhow!(
+                        "Query failed after {} retries: {}",
+                        max_retries,
+                        e
+                    ));
                 }
             }
         }
     }
-    
+
     // Final attempt
     let result = engine.execute_query(sql).await?;
     let count = result.rows[0][0].as_i64().unwrap_or(0);
@@ -334,16 +334,12 @@ async fn perf_union_read_latency() {
         record_date_start(days_back),
     );
     // Retry query to handle R2 eventual consistency after write_log_batches
-    let warmup = retry_query_until_count(
-        &query_engine,
-        &warmup_iceberg_sql,
-        per_session as i64,
-        15,
-    )
-    .await
-    .expect("iceberg warmup should eventually return data");
+    let warmup =
+        retry_query_until_count(&query_engine, &warmup_iceberg_sql, per_session as i64, 15)
+            .await
+            .expect("iceberg warmup should eventually return data");
     assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
-    
+
     // Now run additional warmup queries (data should be visible now)
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -549,16 +545,11 @@ async fn perf_union_read_concurrency() {
         record_date_start(days_back),
     );
     // Retry query to handle R2 eventual consistency after write_log_batches
-    let warmup = retry_query_until_count(
-        &query_engine,
-        &warmup_sql,
-        per_session as i64,
-        15,
-    )
-    .await
-    .expect("warmup should eventually return data");
+    let warmup = retry_query_until_count(&query_engine, &warmup_sql, per_session as i64, 15)
+        .await
+        .expect("warmup should eventually return data");
     assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
-    
+
     // Now run additional warmup queries (data should be visible now)
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -768,8 +759,7 @@ async fn view_recreate_stability_local_stub() {
     let mut config = Config::load().expect("config");
     let cache_dir = tempdir().expect("temp cache dir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir =
-        Some(cache_dir.path().join("wal").to_string_lossy().to_string());
+    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
 
     let stub_dir = tempdir().expect("stub dir");
     let stub_path = stub_dir.path().join("iceberg_stub.parquet");
@@ -802,12 +792,11 @@ async fn view_recreate_stability_local_stub() {
     );
     reset_view_counters();
 
-    let pipeline = IngestPipeline::new(&config)
-        .await
-        .expect("pipeline");
-    let query_engine = query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
-        .await
-        .expect("query engine");
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let query_engine =
+        query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
+            .await
+            .expect("query engine");
     let sql = "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = 'stub-session'";
     let first = query_engine.execute_query(sql).await.expect("query");
     assert_eq!(first.rows[0][0].as_i64().unwrap_or(0), 1);

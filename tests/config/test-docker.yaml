@@ -13,11 +13,7 @@ span_buffering:
   flush_interval_seconds: 1  # Flush every second
 
 ingest_engine:
-  wal_bucket: warehouse
-  wal_prefix: wal
   cache_dir: /var/tmp/softprobe/duckdb
-  optimizer_interval_seconds: 2
-  replay_wal_on_startup: false
 
 compaction:
   enabled: true
@@ -37,11 +33,10 @@ s3:
   access_key_id: minioadmin
   secret_access_key: minioadmin
 
-iceberg:
-  catalog_type: rest
-  catalog_uri: http://lakekeeper:8181/catalog
-  warehouse: default
-  write_target_file_size_bytes: 67108864
-  write_row_group_size_bytes: 134217728
-  write_page_size_bytes: 1048576
-  force_close_after_append: false
+ducklake:
+  catalog_type: postgres
+  metadata_path: host=ducklake-postgres port=5432 dbname=ducklake user=ducklake password=ducklake
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: softprobe
+  data_inlining_row_limit: 10000

@@ -46,7 +46,11 @@ pub struct RedisStore {
 
 impl RedisStore {
     /// `redis_url` e.g. `redis://127.0.0.1:6379` or `redis://:pass@host:6379`
-    pub async fn connect_url(redis_url: &str, tenant_id: impl Into<String>, ttl: Duration) -> Result<Self> {
+    pub async fn connect_url(
+        redis_url: &str,
+        tenant_id: impl Into<String>,
+        ttl: Duration,
+    ) -> Result<Self> {
         let client = redis::Client::open(redis_url)?;
         let r = redis::aio::ConnectionManager::new(client).await?;
         Ok(Self {

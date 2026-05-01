@@ -8,11 +8,11 @@ use crate::config::Config;
 use crate::models::{Log, Metric, Span};
 use anyhow::Result;
 use buffer::SimpleBuffer;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use ducklake::DuckLakeWriter as IcebergWriter;
 use buffer::{FlushCallback, PreAddCallback};
+pub use ducklake::DuckLakeWriter;
 
 // Type aliases for buffers using unified domain models
 pub type SpanBuffer = SimpleBuffer<Span>;
@@ -21,7 +21,7 @@ pub type MetricBuffer = SimpleBuffer<Metric>;
 
 /// Tiered storage interface for query-time access.
 pub trait TieredStorage: Send + Sync {
-    fn iceberg_writer(&self) -> Arc<IcebergWriter>;
+    fn writer(&self) -> Arc<DuckLakeWriter>;
     fn snapshot_buffered_spans_sync(&self) -> Option<Vec<Span>>;
     fn snapshot_buffered_logs_sync(&self) -> Option<Vec<Log>>;
     fn snapshot_buffered_metrics_sync(&self) -> Option<Vec<Metric>>;
@@ -32,34 +32,32 @@ pub trait TieredStorage: Send + Sync {
 /// Storage components for buffer + staged + Iceberg access.
 #[derive(Clone)]
 pub struct Storage {
-    pub iceberg_writer: Arc<IcebergWriter>,
+    pub writer: Arc<DuckLakeWriter>,
     pub span_buffer: SpanBuffer,
     pub log_buffer: LogBuffer,
     pub metric_buffer: MetricBuffer,
-    cache_dir: Option<PathBuf>,
 }
 
 impl Storage {
     pub fn new(
-        iceberg_writer: Arc<IcebergWriter>,
+        writer: Arc<DuckLakeWriter>,
         span_buffer: SpanBuffer,
         log_buffer: LogBuffer,
         metric_buffer: MetricBuffer,
-        cache_dir: Option<PathBuf>,
+        _cache_dir: Option<PathBuf>,
     ) -> Self {
         Self {
-            iceberg_writer,
+            writer,
             span_buffer,
             log_buffer,
             metric_buffer,
-            cache_dir,
         }
     }
 }
 
 impl TieredStorage for Storage {
-    fn iceberg_writer(&self) -> Arc<IcebergWriter> {
-        self.iceberg_writer.clone()
+    fn writer(&self) -> Arc<DuckLakeWriter> {
+        self.writer.clone()
     }
 
     fn snapshot_buffered_spans_sync(&self) -> Option<Vec<Span>> {
@@ -73,28 +71,10 @@ impl TieredStorage for Storage {
     fn snapshot_buffered_metrics_sync(&self) -> Option<Vec<Metric>> {
         self.metric_buffer.snapshot_items_sync()
     }
-
-    fn list_staged_files(&self, kind: &str) -> Result<Vec<PathBuf>> {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let staged_dir = cache_dir.join(kind);
-        Ok(list_parquet_files(&staged_dir)?)
+    fn list_staged_files(&self, _kind: &str) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
     }
-
-    fn staged_watermark_signature(&self, kind: &str) -> String {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
-            return String::new();
-        };
-        let marker_path = cache_dir
-            .join("staged_watermarks")
-            .join(format!("{kind}.txt"));
-        if let Ok(metadata) = std::fs::metadata(&marker_path) {
-            if let Ok(modified) = metadata.modified() {
-                let modified = chrono::DateTime::<chrono::Utc>::from(modified);
-                return modified.to_rfc3339();
-            }
-        }
+    fn staged_watermark_signature(&self, _kind: &str) -> String {
         String::new()
     }
 }
@@ -139,26 +119,4 @@ pub async fn create_metric_buffer(
         pre_add_callback,
         flush_callback,
     ))
-}
-
-fn list_parquet_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_parquet_files(dir, &mut files)?;
-    Ok(files)
-}
-
-fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }

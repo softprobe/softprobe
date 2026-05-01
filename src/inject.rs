@@ -320,11 +320,7 @@ pub fn build_mock_response(rule: &InjectRule) -> Option<MockResponse> {
     for (k, v) in &r.headers {
         headers.push((k.clone(), v.clone()));
     }
-    let body = r
-        .body
-        .as_ref()
-        .map(normalize_mock_body)
-        .unwrap_or_default();
+    let body = r.body.as_ref().map(normalize_mock_body).unwrap_or_default();
     let status = if r.status == 0 { 200 } else { r.status };
     Some(MockResponse {
         status_code: status,
@@ -339,11 +335,7 @@ pub fn build_error_response(rule: &InjectRule) -> (i64, String) {
         None => return (500, String::new()),
     };
     let status = if e.status == 0 { 500 } else { e.status };
-    let msg = e
-        .body
-        .as_ref()
-        .map(normalize_mock_body)
-        .unwrap_or_default();
+    let msg = e.body.as_ref().map(normalize_mock_body).unwrap_or_default();
     (status, msg)
 }
 
