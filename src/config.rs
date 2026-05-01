@@ -10,6 +10,8 @@ pub struct Config {
     pub compaction: CompactionConfig,
     pub duckdb: DuckDBConfig,
     pub s3: S3Config,
+    /// Omitted in YAML uses `IcebergConfig::default` (DuckLake deployments do not need a real Iceberg catalog).
+    #[serde(default)]
     pub iceberg: IcebergConfig,
     #[serde(default)]
     pub ducklake: Option<DuckLakeConfig>,
@@ -109,6 +111,22 @@ pub struct IcebergConfig {
     pub write_row_group_size_bytes: usize,   // 128MB
     pub write_page_size_bytes: usize,        // 1MB
     pub force_close_after_append: bool,      // testing: close file after each append
+}
+
+impl Default for IcebergConfig {
+    fn default() -> Self {
+        Self {
+            catalog_type: "s3".to_string(),
+            catalog_uri: "s3://softprobe-recordings".to_string(),
+            catalog_token: None,
+            namespace: default_iceberg_namespace(),
+            warehouse: "s3://warehouse".to_string(),
+            write_target_file_size_bytes: 64 * 1024 * 1024,
+            write_row_group_size_bytes: 128 * 1024 * 1024,
+            write_page_size_bytes: 1024 * 1024,
+            force_close_after_append: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,17 +322,7 @@ impl Default for Config {
                 access_key_id: None,
                 secret_access_key: None,
             },
-            iceberg: IcebergConfig {
-                catalog_type: "s3".to_string(),
-                catalog_uri: "s3://softprobe-recordings".to_string(),
-                catalog_token: None,
-                namespace: default_iceberg_namespace(),
-                warehouse: "s3://warehouse".to_string(),
-                write_target_file_size_bytes: 64 * 1024 * 1024, // 64MB
-                write_row_group_size_bytes: 128 * 1024 * 1024,  // 128MB
-                write_page_size_bytes: 1024 * 1024,             // 1MB
-                force_close_after_append: false,
-            },
+            iceberg: IcebergConfig::default(),
             ducklake: Some(DuckLakeConfig {
                 catalog_type: default_ducklake_catalog_type(),
                 metadata_path: default_ducklake_metadata_path(),
