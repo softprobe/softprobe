@@ -300,6 +300,20 @@ impl Span {
             self.http_response_body = response_event.attributes.get("http.response.body").cloned();
         }
 
+        // Fall back to span attributes when events do not carry HTTP payload fields.
+        if self.http_request_headers.is_none() {
+            self.http_request_headers = self.attributes.get("http.request.headers").cloned();
+        }
+        if self.http_request_body.is_none() {
+            self.http_request_body = self.attributes.get("http.request.body").cloned();
+        }
+        if self.http_response_headers.is_none() {
+            self.http_response_headers = self.attributes.get("http.response.headers").cloned();
+        }
+        if self.http_response_body.is_none() {
+            self.http_response_body = self.attributes.get("http.response.body").cloned();
+        }
+
         // Extract standard HTTP attributes from span attributes
         self.http_request_method = self.attributes.get("http.request.method").cloned();
         self.http_request_path = self
@@ -314,5 +328,100 @@ impl Span {
         } else if let Some(status_code_str) = self.attributes.get("http.status_code") {
             self.http_response_status_code = status_code_str.parse::<i32>().ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Span, SpanEvent};
+    use std::collections::HashMap;
+
+    fn base_span() -> Span {
+        Span {
+            session_id: "s".to_string(),
+            trace_id: "t".to_string(),
+            span_id: "sp".to_string(),
+            parent_span_id: None,
+            app_id: "app".to_string(),
+            organization_id: None,
+            tenant_id: None,
+            message_type: "msg".to_string(),
+            span_kind: None,
+            timestamp: chrono::Utc::now(),
+            end_timestamp: None,
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            status_code: None,
+            status_message: None,
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
+        }
+    }
+
+    #[test]
+    fn extract_http_data_falls_back_to_attributes_for_headers_and_bodies() {
+        let mut span = base_span();
+        span.attributes.insert(
+            "http.request.headers".to_string(),
+            "{\"x-a\":\"1\"}".to_string(),
+        );
+        span.attributes.insert(
+            "http.request.body".to_string(),
+            "{\"in\":true}".to_string(),
+        );
+        span.attributes.insert(
+            "http.response.headers".to_string(),
+            "{\"content-type\":\"application/json\"}".to_string(),
+        );
+        span.attributes.insert(
+            "http.response.body".to_string(),
+            "{\"ok\":true}".to_string(),
+        );
+
+        span.extract_http_data_from_events();
+
+        assert_eq!(span.http_request_headers.as_deref(), Some("{\"x-a\":\"1\"}"));
+        assert_eq!(span.http_request_body.as_deref(), Some("{\"in\":true}"));
+        assert_eq!(
+            span.http_response_headers.as_deref(),
+            Some("{\"content-type\":\"application/json\"}")
+        );
+        assert_eq!(span.http_response_body.as_deref(), Some("{\"ok\":true}"));
+    }
+
+    #[test]
+    fn extract_http_data_prefers_event_values_over_attribute_fallback() {
+        let mut span = base_span();
+        span.attributes
+            .insert("http.request.body".to_string(), "from-attribute".to_string());
+        span.attributes
+            .insert("http.response.body".to_string(), "from-attribute".to_string());
+
+        let mut request_attrs = HashMap::new();
+        request_attrs.insert("http.request.body".to_string(), "from-event".to_string());
+        let mut response_attrs = HashMap::new();
+        response_attrs.insert("http.response.body".to_string(), "from-event".to_string());
+        span.events = vec![
+            SpanEvent {
+                name: "http.request".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: request_attrs,
+            },
+            SpanEvent {
+                name: "http.response".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: response_attrs,
+            },
+        ];
+
+        span.extract_http_data_from_events();
+
+        assert_eq!(span.http_request_body.as_deref(), Some("from-event"));
+        assert_eq!(span.http_response_body.as_deref(), Some("from-event"));
     }
 }

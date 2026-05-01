@@ -51,6 +51,13 @@ For full stress performance benchmarks on GCS:
 cargo build --release
 ```
 
+Prefer Make targets for local development:
+
+```bash
+# Keep DuckDB dynamic-link flow consistent on fresh machines.
+DUCKDB_DOWNLOAD_LIB=1 make build
+```
+
 ### Run
 
 ```bash
@@ -81,6 +88,31 @@ make test-r2         # Integration tests with Cloudflare R2
 make test-all        # All tests
 make stress-test     # Local perf stress test via perf_stress binary
 ```
+
+When running tests locally, prefer Make targets and keep dynamic DuckDB lib download enabled:
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 make test-quick
+```
+
+If you run `cargo test` directly and see linker errors like `ld: library 'duckdb' not found`,
+set `DUCKDB_DOWNLOAD_LIB=1` for that command as well.
+
+## HTTP Body/Header Extraction Notes
+
+For span rows, Softprobe first reads HTTP headers/bodies from span events:
+
+- request event: `http.request` (`http.request.headers`, `http.request.body`)
+- response event: `http.response` (`http.response.headers`, `http.response.body`)
+
+If those event fields are missing, Softprobe falls back to the span `attributes` map for:
+
+- `http.request.headers` -> `http_request_headers`
+- `http.request.body` -> `http_request_body`
+- `http.response.headers` -> `http_response_headers`
+- `http.response.body` -> `http_response_body`
+
+Event values still take precedence over attribute fallback when both are present.
 
 ## Performance Stress Tool
 
