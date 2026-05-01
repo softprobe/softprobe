@@ -629,6 +629,11 @@ impl DuckDBCore {
             if let Some(limit) = ducklake.data_inlining_row_limit {
                 options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
             }
+            if ducklake.catalog_type == "postgres" && ducklake.metadata_schema != "main" {
+                let schema = escape_sql_literal(&ducklake.metadata_schema);
+                options.push(format!("METADATA_SCHEMA '{}'", schema));
+                options.push(format!("META_SCHEMA '{}'", schema));
+            }
             format!(
                 "ATTACH 'ducklake:{}' AS {} ({});",
                 escape_sql_literal(&attach_target),

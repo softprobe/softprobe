@@ -264,6 +264,11 @@ impl DuckLakeWriter {
             "DATA_PATH '{}'",
             escape_sql_literal(&self.ducklake.data_path)
         )];
+        if self.ducklake.catalog_type == "postgres" && self.ducklake.metadata_schema != "main" {
+            let schema = escape_sql_literal(&self.ducklake.metadata_schema);
+            options.push(format!("METADATA_SCHEMA '{}'", schema));
+            options.push(format!("META_SCHEMA '{}'", schema));
+        }
         if let Some(limit) = self.ducklake.data_inlining_row_limit {
             options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
         }

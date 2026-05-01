@@ -112,6 +112,8 @@ pub fn normalize_otlp_body(body: &[u8]) -> Result<ExportTraceServiceRequest> {
     serde_json::from_slice(body).map_err(|e| anyhow!("invalid otlp payload: {e}"))
 }
 
+/// Resolves replay lookup from Softprobe inject spans (`sp.span.type=inject`). Not used for
+/// generic OTLP ingest; callers must send the inject-shaped trace envelope.
 pub fn parse_inject_lookup(req: &ExportTraceServiceRequest) -> Result<InjectLookupRequest> {
     for rs in &req.resource_spans {
         let svc = resource_attr_string(rs.resource.as_ref(), "service.name");

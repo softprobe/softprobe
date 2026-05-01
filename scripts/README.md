@@ -66,6 +66,7 @@ SELECT COUNT(*) FROM logs;
 
 ## Files
 
+- **telemetrygen_hosted.sh** - Smoke-test OTLP/HTTP ingestion (traces, metrics, logs) against a hosted runtime using [telemetrygen](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/telemetrygen) with `Authorization: Bearer` (set `SOFTPROBE_TOKEN` or `SOFTPROBE_API_KEY`; optional `OTLP_ENDPOINT`, default `runtime.softprobe.dev:443`).
 - **verify_iceberg.sql** - Comprehensive verification queries
 - **verify_session.sql** - Session-specific queries with macro
 - **interactive_query.sh** - Interactive DuckDB session launcher (used by `make duckdb-shell`)

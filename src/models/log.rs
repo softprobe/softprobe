@@ -11,7 +11,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Log {
     // Field 1: session_id (OPTIONAL in Iceberg)
-    // Extracted from log attributes (session.id or session_id) or resource attributes
+    // Extracted from log attributes (session.id, session_id, sp.session.id) or resource attributes
     pub session_id: Option<String>,
 
     // Field 2-3: Timestamps
@@ -202,7 +202,10 @@ impl Log {
     ) -> Option<String> {
         // Check log record attributes first
         for attr in &log_record.attributes {
-            if attr.key == "session.id" || attr.key == "session_id" {
+            if attr.key == "session.id"
+                || attr.key == "session_id"
+                || attr.key == "sp.session.id"
+            {
                 if let Some(value) = &attr.value {
                     if let Some(
                         opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
@@ -218,6 +221,7 @@ impl Log {
         resource_attributes
             .get("session.id")
             .or_else(|| resource_attributes.get("session_id"))
+            .or_else(|| resource_attributes.get("sp.session.id"))
             .cloned()
     }
 

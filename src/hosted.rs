@@ -381,30 +381,58 @@ pub async fn hosted_post_v1_traces(
     ))
 }
 
+/// Derives optional capture correlation from the first `sp.session.id` on any span (preferred)
+/// or resource, and counts spans. Accepts standard OTLP traces (no `sp.span.type=extract` required).
 fn parse_extract_meta(req: &ExportTraceServiceRequest) -> Result<(String, usize), String> {
-    let mut session_id = String::new();
-    let mut count = 0usize;
+    let mut session_hint = String::new();
+    let mut span_count = 0usize;
+
     for rs in &req.resource_spans {
         for ss in &rs.scope_spans {
             for sp in &ss.spans {
-                if span_attr(sp, "sp.span.type") != "extract" {
-                    continue;
-                }
-                count += 1;
-                if session_id.is_empty() {
-                    session_id = span_attr(sp, "sp.session.id");
+                span_count += 1;
+                if session_hint.is_empty() {
+                    session_hint = span_attr(sp, "sp.session.id");
                 }
             }
         }
     }
-    if count == 0 {
-        return Err("extract span not found".into());
+
+    if session_hint.is_empty() {
+        for rs in &req.resource_spans {
+            if let Some(res) = &rs.resource {
+                session_hint = resource_attr_str(res, "sp.session.id");
+                if !session_hint.is_empty() {
+                    break;
+                }
+            }
+        }
     }
-    Ok((session_id, count))
+
+    if span_count == 0 {
+        return Err("no spans in OTLP export".into());
+    }
+    Ok((session_hint, span_count))
 }
 
 fn span_attr(sp: &Span, key: &str) -> String {
     for kv in &sp.attributes {
+        if kv.key == key {
+            if let Some(v) = &kv.value {
+                if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                    s,
+                )) = &v.value
+                {
+                    return s.clone();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn resource_attr_str(res: &Resource, key: &str) -> String {
+    for kv in &res.attributes {
         if kv.key == key {
             if let Some(v) = &kv.value {
                 if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(

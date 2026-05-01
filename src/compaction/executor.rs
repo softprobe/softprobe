@@ -422,11 +422,20 @@ impl MaintenanceExecutor {
             _ => ducklake.metadata_path.clone(),
         };
         self.prepare_local_ducklake_paths(ducklake, &attach_target)?;
+        let mut opts = vec![format!(
+            "DATA_PATH '{}'",
+            ducklake.data_path.replace('\'', "''")
+        )];
+        if ducklake.catalog_type == "postgres" && ducklake.metadata_schema != "main" {
+            let schema = ducklake.metadata_schema.replace('\'', "''");
+            opts.push(format!("METADATA_SCHEMA '{}'", schema));
+            opts.push(format!("META_SCHEMA '{}'", schema));
+        }
         let attach_sql = format!(
-            "ATTACH 'ducklake:{}' AS {} (DATA_PATH '{}');",
+            "ATTACH 'ducklake:{}' AS {} ({});",
             attach_target.replace('\'', "''"),
             ducklake.catalog_alias,
-            ducklake.data_path.replace('\'', "''")
+            opts.join(", ")
         );
         conn.execute_batch(&attach_sql)?;
         Ok(())
