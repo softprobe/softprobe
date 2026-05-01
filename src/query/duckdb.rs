@@ -352,6 +352,8 @@ impl DuckDBCore {
 
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
+        let dk = self.config.ducklake_or_default();
+        crate::storage::ducklake::configure_httpfs_gcs_for_data_path(conn, &dk.data_path)?;
 
         // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
         if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {

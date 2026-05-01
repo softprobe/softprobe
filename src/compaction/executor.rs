@@ -367,6 +367,7 @@ impl MaintenanceExecutor {
     fn open_ducklake_connection(&self, ducklake: &crate::config::DuckLakeConfig) -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
+        crate::storage::ducklake::configure_httpfs_gcs_for_data_path(&conn, &ducklake.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
         if ducklake.catalog_type == "postgres" {
             conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
@@ -470,12 +471,13 @@ impl MaintenanceExecutor {
         table: &str,
     ) -> Result<CompactionStatus> {
         // DuckLake expects size literals with units for this option.
+        let qtable = format!("{}.{}.{}", ducklake.catalog_alias, ducklake.metadata_schema, table);
         let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
             ducklake.catalog_alias,
             target_file_size,
-            table
+            qtable
         );
         conn.execute_batch(&set_target)?;
         let sql = format!(

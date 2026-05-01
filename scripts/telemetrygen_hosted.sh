@@ -103,9 +103,9 @@ case "${SUB}" in
     run_logs "$@"
     ;;
   all)
-    run_traces --traces 3 --workers 1 "$@"
-    run_metrics --metrics 3 --workers 1 "$@"
-    run_logs --logs 3 --workers 1 "$@"
+    run_traces --traces 300 --workers 10 "$@"
+    run_metrics --metrics 300 --workers 10 "$@"
+    run_logs --logs 300 --workers 10 "$@"
     ;;
   *)
     echo "error: unknown subcommand: ${SUB}" >&2

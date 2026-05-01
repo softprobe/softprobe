@@ -12,6 +12,45 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// DuckDB `httpfs` uses GCS **HMAC interoperability keys** for `gs://` paths, not OAuth /
+/// Workload Identity. Set `GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET` (or `GCP_HMAC_*`).
+/// See <https://duckdb.org/docs/current/guides/network_cloud_storage/gcs_import.html>.
+pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) -> Result<()> {
+    if !data_path.starts_with("gs://") {
+        return Ok(());
+    }
+    let key_id = match std::env::var("GCS_HMAC_ACCESS_KEY_ID")
+        .or_else(|_| std::env::var("GCP_HMAC_ACCESS_KEY_ID"))
+    {
+        Ok(k) => k,
+        Err(_) => {
+            warn!(
+                "DuckLake data_path is {} but GCS_HMAC_ACCESS_KEY_ID is unset; gs:// writes may return HTTP 403",
+                data_path
+            );
+            return Ok(());
+        }
+    };
+    let secret = match std::env::var("GCS_HMAC_SECRET").or_else(|_| std::env::var("GCP_HMAC_SECRET"))
+    {
+        Ok(s) => s,
+        Err(_) => {
+            warn!(
+                "DuckLake data_path is {} but GCS_HMAC_SECRET is unset; gs:// writes may return HTTP 403",
+                data_path
+            );
+            return Ok(());
+        }
+    };
+    let kid = key_id.replace('\'', "''");
+    let sec = secret.replace('\'', "''");
+    let sql = format!(
+        "CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '{kid}', SECRET '{sec}');"
+    );
+    conn.execute_batch(&sql)?;
+    Ok(())
+}
+
 pub struct DuckLakeWriter {
     config: Config,
     ducklake: DuckLakeConfig,
@@ -203,6 +242,7 @@ impl DuckLakeWriter {
     fn open_connection(&self) -> Result<Connection> {
         let conn = Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
+        configure_httpfs_gcs_for_data_path(&conn, &self.ducklake.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
         if self.ducklake.catalog_type == "postgres" {
             conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
@@ -360,16 +400,18 @@ impl DuckLakeWriter {
     }
 
     fn apply_table_options(&self, conn: &Connection, table_name: &str) {
+        // DuckLake resolves tables as catalog.schema.name; bare names fail when metadata_schema != main.
+        let qtable = self.qualified_table_name(table_name);
         let stmts = [
             format!(
                 "CALL {}.set_option('target_file_size', '{}', table_name => '{}');",
                 self.ducklake.catalog_alias,
                 size_literal(self.config.compaction.target_file_size_bytes),
-                table_name
+                qtable
             ),
             format!(
-                "CALL {}.set_option('hive_file_pattern', 'true', table_name => '{}');",
-                self.ducklake.catalog_alias, table_name
+                "CALL {}.set_option('hive_file_pattern', true, table_name => '{}');",
+                self.ducklake.catalog_alias, qtable
             ),
         ];
         for stmt in stmts {
