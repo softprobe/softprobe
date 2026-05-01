@@ -4,5 +4,6 @@
 -- configured via parameterized SET statements in Rust.
 LOAD httpfs;
 LOAD iceberg;
+LOAD ducklake;
 SET unsafe_enable_version_guessing = true;
 

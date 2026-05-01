@@ -296,9 +296,9 @@ impl DuckDBCore {
                     && self.config.ducklake.is_some()
                 {
                     warn!(
-                        "DuckLake metadata catalog missing during query; reattaching catalog and retrying once"
+                        "DuckLake metadata catalog missing during query; force reattaching catalog and retrying once"
                     );
-                    self.attach_catalog_if_needed(&state.conn)?;
+                    self.force_reattach_catalog(&state.conn)?;
                     state.prepared_kinds.clear();
                     state.staged_signatures.clear();
                     state.iceberg_sources.clear();
@@ -378,6 +378,13 @@ impl DuckDBCore {
 
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
+        // Extension loading is connection-scoped. Match interactive production query behavior
+        // by explicitly loading the DuckLake backend extension in each worker connection.
+        match self.ducklake_config().catalog_type.as_str() {
+            "postgres" => conn.execute_batch("LOAD postgres;")?,
+            "sqlite" => conn.execute_batch("LOAD sqlite;")?,
+            _ => {}
+        }
         let dk = self.config.ducklake_or_default();
         crate::storage::ducklake::configure_httpfs_gcs_for_data_path(conn, &dk.data_path)?;
 
@@ -701,6 +708,24 @@ impl DuckDBCore {
                 }
             }
         }
+    }
+
+    fn force_reattach_catalog(&self, conn: &Connection) -> Result<()> {
+        if !self.use_attached_catalog() {
+            return Ok(());
+        }
+        let alias = self.catalog_alias();
+        let detach_sql = format!("DETACH {};", alias);
+        if let Err(err) = conn.execute_batch(&detach_sql) {
+            let message = err.to_string();
+            if !message.contains("not attached")
+                && !message.contains("does not exist")
+                && !message.contains("not found")
+            {
+                return Err(anyhow!("DuckDB DETACH failed for {}: {}", alias, err));
+            }
+        }
+        self.attach_catalog_if_needed(conn)
     }
 
     fn prepare_local_ducklake_paths(
@@ -1428,6 +1453,10 @@ mod tests {
         assert!(
             DUCKDB_SESSION_INIT_SQL.contains("LOAD iceberg;"),
             "expected session init to load iceberg"
+        );
+        assert!(
+            DUCKDB_SESSION_INIT_SQL.contains("LOAD ducklake;"),
+            "expected session init to load ducklake"
         );
         assert!(
             DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = true;"),
