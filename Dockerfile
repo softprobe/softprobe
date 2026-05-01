@@ -18,6 +18,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ENV DUCKDB_DOWNLOAD_LIB=1
+# Must be present before `cook`: otherwise cook uses the image default Rust and
+# `cargo build` (after COPY) switches to rust-toolchain.toml → second full compile.
+COPY --from=planner /app/rust-toolchain.toml rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
