@@ -225,6 +225,7 @@ impl DuckDBCore {
 
     fn init_connection_state_with(&self, conn: Connection) -> Result<ConnectionState> {
         self.configure_connection(&conn)?;
+        self.attach_catalog_if_needed(&conn)?;
         Ok(ConnectionState {
             conn,
             prepared_kinds: HashSet::new(),
@@ -244,45 +245,69 @@ impl DuckDBCore {
         query: &str,
     ) -> Result<QueryResult> {
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
-        let prepare_start = std::time::Instant::now();
-        self.prepare_union_views_for_query(state, query)?;
-        self.try_wrap_cache_httpfs_filesystems(state);
-        if diag {
-            let elapsed = prepare_start.elapsed();
-            println!("DIAG prepare_union_views: {:?}", elapsed);
-        }
-
-        let query_start = std::time::Instant::now();
-        let mut stmt = state.conn.prepare(query)?;
-        let mut query_rows = stmt.query([])?;
-        let column_names = query_rows
-            .as_ref()
-            .map(|stmt_ref| {
-                (0..stmt_ref.column_count())
-                    .filter_map(|idx| stmt_ref.column_name(idx).ok().map(|name| name.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let mut rows = Vec::new();
-        while let Some(row) = query_rows.next()? {
-            let mut values = Vec::with_capacity(column_names.len());
-            for idx in 0..column_names.len() {
-                let value: DuckValue = row.get(idx)?;
-                values.push(duck_value_to_json(value));
+        let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
+            let prepare_start = std::time::Instant::now();
+            self.prepare_union_views_for_query(state, query)?;
+            self.try_wrap_cache_httpfs_filesystems(state);
+            if diag {
+                let elapsed = prepare_start.elapsed();
+                println!("DIAG prepare_union_views: {:?}", elapsed);
             }
-            rows.push(values);
-        }
 
-        let result = QueryResult {
-            columns: column_names,
-            row_count: rows.len(),
-            rows,
+            let query_start = std::time::Instant::now();
+            let mut stmt = state.conn.prepare(query)?;
+            let mut query_rows = stmt.query([])?;
+            let column_names = query_rows
+                .as_ref()
+                .map(|stmt_ref| {
+                    (0..stmt_ref.column_count())
+                        .filter_map(|idx| stmt_ref.column_name(idx).ok().map(|name| name.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let mut rows = Vec::new();
+            while let Some(row) = query_rows.next()? {
+                let mut values = Vec::with_capacity(column_names.len());
+                for idx in 0..column_names.len() {
+                    let value: DuckValue = row.get(idx)?;
+                    values.push(duck_value_to_json(value));
+                }
+                rows.push(values);
+            }
+
+            let result = QueryResult {
+                columns: column_names,
+                row_count: rows.len(),
+                rows,
+            };
+            if diag {
+                println!("DIAG execute_query: {:?}", query_start.elapsed());
+            }
+            Ok(result)
         };
-        if diag {
-            println!("DIAG execute_query: {:?}", query_start.elapsed());
+
+        match run_once(state) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("__ducklake_metadata_")
+                    && message.contains("does not exist")
+                    && self.config.ducklake.is_some()
+                {
+                    warn!(
+                        "DuckLake metadata catalog missing during query; reattaching catalog and retrying once"
+                    );
+                    self.attach_catalog_if_needed(&state.conn)?;
+                    state.prepared_kinds.clear();
+                    state.staged_signatures.clear();
+                    state.iceberg_sources.clear();
+                    state.iceberg_signatures.clear();
+                    return run_once(state);
+                }
+                Err(err)
+            }
         }
-        Ok(result)
     }
 
     fn try_wrap_cache_httpfs_filesystems(&self, state: &mut ConnectionState) {
