@@ -40,6 +40,7 @@ struct ViewCounters {
 
 static VIEW_COUNTERS: Lazy<ViewCounters> = Lazy::new(ViewCounters::default);
 static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static PINNED_MODE_OPTION_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 #[derive(Debug, Clone)]
 pub struct ViewCounterSnapshot {
     pub iceberg_recreates: u64,
@@ -449,6 +450,7 @@ impl DuckDBCore {
         let mut prepared_any = false;
 
         let uses_spans = sql.contains("union_spans")
+            || sql.contains("committed_spans")
             || sql.contains("iceberg_spans")
             || sql.contains("staged_spans")
             || sql.contains("buffer_spans");
@@ -458,6 +460,7 @@ impl DuckDBCore {
         }
 
         let uses_logs = sql.contains("union_logs")
+            || sql.contains("committed_logs")
             || sql.contains("iceberg_logs")
             || sql.contains("staged_logs")
             || sql.contains("buffer_logs");
@@ -467,6 +470,7 @@ impl DuckDBCore {
         }
 
         let uses_metrics = sql.contains("union_metrics")
+            || sql.contains("committed_metrics")
             || sql.contains("iceberg_metrics")
             || sql.contains("staged_metrics")
             || sql.contains("buffer_metrics");
@@ -544,7 +548,7 @@ impl DuckDBCore {
                 )
             } else {
                 format!(
-                    "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
+                    "CREATE OR REPLACE TEMP VIEW staged_{kind} AS SELECT * FROM committed_{kind} WHERE 1=0;",
                     kind = kind,
                 )
             };
@@ -573,7 +577,7 @@ impl DuckDBCore {
         if !kind_ready {
             let union_view = format!(
                 "CREATE OR REPLACE TEMP VIEW union_{kind} AS \
-                 SELECT * FROM iceberg_{kind} \
+                 SELECT * FROM committed_{kind} \
                  UNION ALL SELECT * FROM staged_{kind} \
                  UNION ALL SELECT * FROM buffer_{kind};",
                 kind = kind,
@@ -703,6 +707,18 @@ impl DuckDBCore {
         kind_key: &str,
         table_name: &str,
     ) -> Result<(IcebergSource, String)> {
+        // DuckLake-backed runtime should always read committed data through the attached
+        // catalog tables. This avoids legacy pinned metadata + iceberg_scan fallback logic,
+        // which is Iceberg-specific and adds noise/latency in DuckLake deployments.
+        if self.config.ducklake.is_some() {
+            let signature = format!(
+                "catalog:{}:{}",
+                self.catalog_schema().as_str(),
+                table_name
+            );
+            return Ok((IcebergSource::Catalog, signature));
+        }
+
         // Check if we've already resolved this source for this kind.
         if let Some(source) = state.iceberg_sources.get(kind_key) {
             if matches!(source, IcebergSource::Stub(_)) {
@@ -744,7 +760,10 @@ impl DuckDBCore {
                 if pinned.data_files_path.is_some() {
                     info!("Using pinned metadata for {} with data_files_path", table_name);
                 } else {
-                    warn!("Pinned metadata for {} exists but data_files_path is None", table_name);
+                    debug!(
+                        "Pinned metadata for {} exists but data_files_path is None; will query committed table via metadata scan",
+                        table_name
+                    );
                 }
                 return Ok((
                     IcebergSource::Pinned {
@@ -869,7 +888,7 @@ impl DuckDBCore {
 
     fn create_empty_buffer_view(&self, conn: &Connection, kind: &str) -> Result<()> {
         conn.execute_batch(&format!(
-            "CREATE OR REPLACE TEMP TABLE buffer_{kind} AS SELECT * FROM iceberg_{kind} WHERE 1=0;",
+            "CREATE OR REPLACE TEMP TABLE buffer_{kind} AS SELECT * FROM committed_{kind} WHERE 1=0;",
             kind = kind
         ))?;
         Ok(())
@@ -958,13 +977,14 @@ impl DuckDBCore {
                                             used_count, kind, skipped_s3_count
                                         );
                                     }
-                                    let iceberg_view = format!(
-                                        "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
+                                    let committed_view = format!(
+                                        "CREATE OR REPLACE TEMP VIEW committed_{kind} AS \
                                          SELECT * FROM read_parquet([{files}]);",
                                         kind = kind,
                                         files = file_list,
                                     );
-                                    conn.execute_batch(&iceberg_view)?;
+                                    conn.execute_batch(&committed_view)?;
+                                    self.create_legacy_iceberg_alias(conn, kind)?;
                                     return Ok(source.clone());
                                 } else {
                                     warn!("No local files available for iceberg_{}, falling back to S3 (slow)", kind);
@@ -979,7 +999,10 @@ impl DuckDBCore {
                         warn!("Failed to read data_files.json for {}: {:?}", kind, data_files_path);
                     }
                 } else {
-                    warn!("data_files_path is None for iceberg_{}, will use iceberg_scan (slow)", kind);
+                    debug!(
+                        "data_files_path is None for committed_{}, falling back to iceberg_scan metadata path",
+                        kind
+                    );
                 }
                 // Check if metadata_path is a local file path (not S3/HTTP)
                 // iceberg_scan doesn't work with local paths, so we need to fall back
@@ -1004,14 +1027,47 @@ impl DuckDBCore {
                 if let Some(codec) = compression {
                     options.push(format!("metadata_compression_codec := '{}'", codec));
                 }
-                let options_sql = format!(", {}", options.join(", "));
-                let iceberg_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM iceberg_scan('{uri}'{options});",
+                let escaped_uri = escape_sql_literal(metadata_path);
+                let with_mode_sql = format!(
+                    "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM iceberg_scan('{uri}', {options});",
                     kind = kind,
-                    uri = escape_sql_literal(metadata_path),
-                    options = options_sql,
+                    uri = escaped_uri,
+                    options = options.join(", "),
                 );
-                if let Err(err) = conn.execute_batch(&iceberg_view) {
+                if let Err(err) = conn.execute_batch(&with_mode_sql) {
+                    let err_msg = err.to_string();
+                    if err_msg.contains("Unimplemented option mode") {
+                        if !PINNED_MODE_OPTION_WARNED.swap(true, Ordering::Relaxed) {
+                            warn!(
+                                "Pinned metadata view uses unsupported iceberg_scan mode option; retrying without mode for {}",
+                                table_name
+                            );
+                        } else {
+                            debug!(
+                                "Retrying pinned metadata view without iceberg_scan mode option for {}",
+                                table_name
+                            );
+                        }
+                        options.retain(|opt| !opt.starts_with("mode :="));
+                        let without_mode_sql = format!(
+                            "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM iceberg_scan('{uri}', {options});",
+                            kind = kind,
+                            uri = escaped_uri,
+                            options = options.join(", "),
+                        );
+                        match conn.execute_batch(&without_mode_sql) {
+                            Ok(()) => {
+                                self.create_legacy_iceberg_alias(conn, kind)?;
+                                return Ok(source.clone());
+                            }
+                            Err(retry_err) => {
+                                warn!(
+                                    "Pinned metadata view retry without mode also failed for {}: {}",
+                                    table_name, retry_err
+                                );
+                            }
+                        }
+                    }
                     warn!("Pinned metadata view failed for {}: {}", table_name, err);
                     let fallback = if self.use_attached_catalog() {
                         IcebergSource::Catalog
@@ -1020,30 +1076,35 @@ impl DuckDBCore {
                     };
                     return self.create_iceberg_view(conn, kind, table_name, &fallback);
                 }
+                self.create_legacy_iceberg_alias(conn, kind)?;
                 Ok(source.clone())
             },
             IcebergSource::Catalog => {
                 self.attach_catalog_if_needed(conn)?;
                 let alias = self.catalog_alias();
                 let schema = self.catalog_schema();
-                let iceberg_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM {alias}.{ns}.{table};",
+                let committed_view = format!(
+                    "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM {alias}.{ns}.{table};",
                     kind = kind,
                     alias = alias,
                     ns = schema,
                     table = table_name,
                 );
-                match conn.execute_batch(&iceberg_view) {
-                    Ok(()) => Ok(source.clone()),
+                match conn.execute_batch(&committed_view) {
+                    Ok(()) => {
+                        self.create_legacy_iceberg_alias(conn, kind)?;
+                        Ok(source.clone())
+                    }
                     Err(err) => {
                         let error_msg = err.to_string();
                         let alt_view = format!(
-                            "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM {alias}.{table};",
+                            "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM {alias}.{table};",
                             kind = kind,
                             alias = alias,
                             table = table_name,
                         );
                         if conn.execute_batch(&alt_view).is_ok() {
+                            self.create_legacy_iceberg_alias(conn, kind)?;
                             return Ok(source.clone());
                         }
                         // Provide helpful error message if table doesn't exist
@@ -1055,12 +1116,13 @@ impl DuckDBCore {
                             let staged_files = self.staged_files(kind);
                             if let Some(first_file) = staged_files.first() {
                                 let empty_view = format!(
-                                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS \
+                                    "CREATE OR REPLACE TEMP VIEW committed_{kind} AS \
                                      SELECT * FROM read_parquet('{path}') WHERE 1=0;",
                                     kind = kind,
                                     path = escape_sql_literal(first_file),
                                 );
                                 conn.execute_batch(&empty_view)?;
+                                self.create_legacy_iceberg_alias(conn, kind)?;
                                 return Ok(IcebergSource::Stub(first_file.clone()));
                             }
                             Err(anyhow!(
@@ -1086,24 +1148,34 @@ impl DuckDBCore {
                 }
             }
             IcebergSource::ScanUri(uri) => {
-                let iceberg_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM iceberg_scan('{uri}', allow_moved_paths := true);",
+                let committed_view = format!(
+                    "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM iceberg_scan('{uri}', allow_moved_paths := true);",
                     kind = kind,
                     uri = escape_sql_literal(uri),
                 );
-                conn.execute_batch(&iceberg_view)?;
+                conn.execute_batch(&committed_view)?;
+                self.create_legacy_iceberg_alias(conn, kind)?;
                 Ok(source.clone())
             }
             IcebergSource::Stub(path) => {
-                let iceberg_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM read_parquet('{path}');",
+                let committed_view = format!(
+                    "CREATE OR REPLACE TEMP VIEW committed_{kind} AS SELECT * FROM read_parquet('{path}');",
                     kind = kind,
                     path = escape_sql_literal(path),
                 );
-                conn.execute_batch(&iceberg_view)?;
+                conn.execute_batch(&committed_view)?;
+                self.create_legacy_iceberg_alias(conn, kind)?;
                 Ok(source.clone())
             }
         }
+    }
+
+    fn create_legacy_iceberg_alias(&self, conn: &Connection, kind: &str) -> Result<()> {
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE TEMP VIEW iceberg_{kind} AS SELECT * FROM committed_{kind};",
+            kind = kind
+        ))?;
+        Ok(())
     }
 
     fn stub_signature(&self, path: &str) -> Result<String> {
