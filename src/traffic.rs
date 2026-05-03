@@ -8,7 +8,6 @@ pub trait TrafficAnalyzer {
     fn detect_traffic_direction(&self, config: &Config) -> String;
     fn is_from_istio_ingressgateway(&self) -> bool;
     fn should_collect_by_rules(&self, config: &Config, request_headers: &HashMap<String, String>) -> bool;
-    fn is_exempted(&self, config: &Config, request_headers: &HashMap<String, String>) -> bool;
 }
 
 pub trait RequestHeadersAccess {
@@ -188,89 +187,100 @@ impl<T: Context> TrafficAnalyzer for T where T: RequestHeadersAccess {
     }
 
     fn should_collect_by_rules(&self, config: &Config, request_headers: &HashMap<String, String>) -> bool {
-        // First check exemption rules
-        if self.is_exempted(config, request_headers) {
-            crate::sp_debug!("Request is exempted from collection");
-            return false;
-        }
-
-        // If no rules configured, collect all requests
-        if config.collection_rules.is_empty() {
-            crate::sp_debug!("No collection rules configured, collecting all requests");
-            return true;
-        }
-
-        crate::sp_debug!("Checking collection rules, total rules: {}", config.collection_rules.len());
-
-        // Try inbound rules matching
-        let inbound_matched = check_inbound_rules(config, request_headers);
-        if inbound_matched {
-            crate::sp_debug!("Request matched inbound rules, collecting");
-            return true;
-        }
-
-        // Try outbound rules matching
-        let outbound_matched = check_outbound_rules(config, request_headers);
-        if outbound_matched {
-            crate::sp_debug!("Request matched outbound rules, collecting");
-            return true;
-        }
-
-        // Check if any rules are configured
-        let has_server_rules = config
-            .collection_rules
-            .iter()
-            .any(|rule| !rule.http.server.path.is_empty());
-        let has_client_rules = config
-            .collection_rules
-            .iter()
-            .any(|rule| !rule.http.client.is_empty());
-
-        if !has_server_rules && !has_client_rules {
-            crate::sp_debug!("No specific rules configured, collecting all requests");
-            return true;
-        }
-
-        crate::sp_debug!("No rules matched, not collecting");
-        false
+        should_collect_by_rules_for_headers(config, request_headers)
     }
 
-    fn is_exempted(&self, config: &Config, request_headers: &HashMap<String, String>) -> bool {
-        if config.exemption_rules.is_empty() {
-            return false;
-        }
-
-        let request_host = request_headers
-            .get("host")
-            .or_else(|| request_headers.get(":authority"))
-            .cloned();
-        let request_path = request_headers.get(":path").cloned();
-
-        let (client_host, client_path) = crate::http_helpers::extract_client_info(request_headers);
-
-        crate::sp_debug!(
-            "Checking exemption - request_host: {:?}, request_path: {:?}, client_host: {:?}, client_path: {:?}",
-            request_host, request_path, client_host, client_path
-        );
-
-        for rule in &config.exemption_rules {
-            let host_matched = check_host_patterns(&rule.host_patterns, &request_host, &client_host);
-            let path_matched = check_path_patterns(&rule.path_patterns, &request_path, &client_path);
-
-            if host_matched && path_matched {
-                crate::sp_info!(
-                    "Request exempted by rule - hostPatterns: {:?}, pathPatterns: {:?}",
-                    rule.host_patterns, rule.path_patterns
-                );
-                return true;
-            }
-        }
-
-        false
-    }
 }
 
 // Implement RequestHeadersAccess for concrete contexts (e.g., SpHttpContext) in their modules
+
+pub(crate) fn should_collect_by_rules_for_headers(
+    config: &Config,
+    request_headers: &HashMap<String, String>,
+) -> bool {
+    // First check exemption rules
+    if is_exempted_for_headers(config, request_headers) {
+        crate::sp_debug!("Request is exempted from collection");
+        return false;
+    }
+
+    // If no rules configured, collect all requests
+    if config.collection_rules.is_empty() {
+        crate::sp_debug!("No collection rules configured, collecting all requests");
+        return true;
+    }
+
+    crate::sp_debug!("Checking collection rules, total rules: {}", config.collection_rules.len());
+
+    // Try inbound rules matching
+    let inbound_matched = check_inbound_rules(config, request_headers);
+    if inbound_matched {
+        crate::sp_debug!("Request matched inbound rules, collecting");
+        return true;
+    }
+
+    // Try outbound rules matching
+    let outbound_matched = check_outbound_rules(config, request_headers);
+    if outbound_matched {
+        crate::sp_debug!("Request matched outbound rules, collecting");
+        return true;
+    }
+
+    // Check if any rules are configured
+    let has_server_rules = config
+        .collection_rules
+        .iter()
+        .any(|rule| !rule.http.server.path.is_empty());
+    let has_client_rules = config
+        .collection_rules
+        .iter()
+        .any(|rule| !rule.http.client.is_empty());
+
+    if !has_server_rules && !has_client_rules {
+        crate::sp_debug!("No specific rules configured, collecting all requests");
+        return true;
+    }
+
+    crate::sp_debug!("No rules matched, not collecting");
+    false
+}
+
+pub(crate) fn is_exempted_for_headers(
+    config: &Config,
+    request_headers: &HashMap<String, String>,
+) -> bool {
+    if config.exemption_rules.is_empty() {
+        return false;
+    }
+
+    let request_host = request_headers
+        .get("host")
+        .or_else(|| request_headers.get(":authority"))
+        .cloned();
+    let request_path = request_headers.get(":path").cloned();
+
+    let (client_host, client_path) = crate::http_helpers::extract_client_info(request_headers);
+
+    crate::sp_debug!(
+        "Checking exemption - request_host: {:?}, request_path: {:?}, client_host: {:?}, client_path: {:?}",
+        request_host, request_path, client_host, client_path
+    );
+
+    for rule in &config.exemption_rules {
+        let host_matched = check_host_patterns(&rule.host_patterns, &request_host, &client_host);
+        let path_matched = check_path_patterns(&rule.path_patterns, &request_path, &client_path);
+
+        if host_matched && path_matched {
+            crate::sp_info!(
+                "Request exempted by rule - hostPatterns: {:?}, pathPatterns: {:?}",
+                rule.host_patterns, rule.path_patterns
+            );
+            return true;
+        }
+    }
+
+    false
+}
 
 fn check_inbound_rules(config: &Config, request_headers: &HashMap<String, String>) -> bool {
     if let Some(request_path) = request_headers.get(":path") {
@@ -417,5 +427,87 @@ fn match_pattern(pattern: &str, text: &str) -> bool {
             crate::sp_debug!("Fallback to exact match: {}", result);
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        ClientConfig, CollectionRule, Config, ExemptionRule, HttpCollectionRule, ServerConfig,
+    };
+
+    fn demo_config() -> Config {
+        Config {
+            collection_rules: vec![
+                CollectionRule {
+                    http: HttpCollectionRule {
+                        server: ServerConfig {
+                            path: "^\\/(api|airline).*".to_string(),
+                        },
+                        client: vec![],
+                    },
+                },
+                CollectionRule {
+                    http: HttpCollectionRule {
+                        server: ServerConfig {
+                            path: String::new(),
+                        },
+                        client: vec![ClientConfig {
+                            host: ".*".to_string(),
+                            paths: vec!["^\\/(api|airline).*".to_string()],
+                        }],
+                    },
+                },
+            ],
+            exemption_rules: vec![ExemptionRule::default()],
+            ..Config::default()
+        }
+    }
+
+    fn headers(path: &str) -> HashMap<String, String> {
+        HashMap::from([
+            (":authority".to_string(), "demo-ota.onpremis.svc.cluster.local".to_string()),
+            (":path".to_string(), path.to_string()),
+        ])
+    }
+
+    #[test]
+    fn collects_api_paths() {
+        assert!(should_collect_by_rules_for_headers(
+            &demo_config(),
+            &headers("/api/orders")
+        ));
+    }
+
+    #[test]
+    fn collects_airline_paths() {
+        assert!(should_collect_by_rules_for_headers(
+            &demo_config(),
+            &headers("/airline-api/v1/flights")
+        ));
+    }
+
+    #[test]
+    fn skips_non_matching_paths() {
+        assert!(!should_collect_by_rules_for_headers(
+            &demo_config(),
+            &headers("/health")
+        ));
+    }
+
+    #[test]
+    fn skips_otel_logs_even_when_host_matches_client_rule() {
+        assert!(!should_collect_by_rules_for_headers(
+            &demo_config(),
+            &headers("/v1/logs")
+        ));
+    }
+
+    #[test]
+    fn missing_session_id_does_not_change_collection_decision() {
+        let request_headers = headers("/v1/logs");
+        assert!(!request_headers.contains_key("x-sp-session-id"));
+        assert!(!should_collect_by_rules_for_headers(&demo_config(), &request_headers));
     }
 }

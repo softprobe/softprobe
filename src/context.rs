@@ -104,18 +104,13 @@ impl SpHttpContext {
             return;
         }
 
-        // Check if session_id was parsed
-        let has_session_id = self.span_builder.has_session_id();
-        crate::sp_debug!("Session ID present: {}", has_session_id);
+        crate::sp_debug!("Session ID present: {}", self.span_builder.has_session_id());
 
-        // If no session_id found, force trace upload for isolation
-        if !has_session_id {
-            crate::sp_debug!("No session ID found, forcing trace upload for isolation");
-        } else {
-            // Check collection rules
-            if !self.should_collect_by_rules(&self.config, &self.request_headers) {
-                crate::sp_debug!("Data extraction skipped based on collection rules");
-            }
+        // Collection rules are authoritative. Requests that do not match, including
+        // telemetry endpoints such as /v1/logs, must not create or upload spans.
+        if !self.should_collect_by_rules(&self.config, &self.request_headers) {
+            crate::sp_debug!("Data extraction skipped based on collection rules");
+            return;
         }
 
         crate::sp_debug!("Storing agent data asynchronously (backend={})", self.config.sp_backend_url);
