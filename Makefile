@@ -18,11 +18,17 @@
 
 .PHONY: help test test-all test-local test-smoke test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
 
-# Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). Performance tests live in
-# `tests/integration_perf.rs` (separate binary) to avoid libduckdb SIGSEGV after long single-process runs.
+# Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
+# tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
+# setup/teardown in a single test binary.
 INTEGRATION_E2E_FEATURE = --features integration-e2e
-INTEGRATION_E2E_TESTS = --test tests --test integration_perf
+INTEGRATION_E2E_TESTS = --test tests
 INTEGRATION_E2E_FLAGS = $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS)
+INTEGRATION_PERF_TESTS = \
+	performance::perf_union_read_concurrency \
+	performance::perf_union_read_latency \
+	performance::perf_view_recreate_stability \
+	performance::view_recreate_stability_local_stub
 
 # Ensure libduckdb is fetched when not present on host.
 # Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
@@ -179,6 +185,10 @@ test-local: check-local
 	@echo "🗄️  Backend: MinIO :9000 (DuckLake test data); metadata is per-run temp files"
 	@echo ""
 	SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --test-threads=1 --nocapture
+	@for test_name in $(INTEGRATION_PERF_TESTS); do \
+		echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+		SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+	done
 
 test-r2:
 	@echo "🧪 Running integration tests with Cloudflare R2..."
@@ -190,15 +200,27 @@ test-r2:
 		echo "🔒 Detecting environment..."; \
 		if curl -sf https://www.google.com > /dev/null 2>&1; then \
 			echo "✅ Direct internet access available"; \
-			ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
+			ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
+			for test_name in $(INTEGRATION_PERF_TESTS); do \
+				echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+				ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+			done; \
 		else \
 			echo "⚠️  Detected restricted/sandboxed environment"; \
 			echo "⚠️  Enabling TLS validation bypass for testing"; \
-			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
+			ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
+			for test_name in $(INTEGRATION_PERF_TESTS); do \
+				echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+				ICEBERG_DISABLE_TLS_VALIDATION=1 ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+			done; \
 		fi \
 	else \
 		echo "🔓 TLS validation bypass already enabled"; \
-		ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture; \
+		ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
+		for test_name in $(INTEGRATION_PERF_TESTS); do \
+			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+			ICEBERG_TEST_TYPE=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+		done; \
 	fi
 
 test-ci:
@@ -211,6 +233,10 @@ test-ci:
 		cargo test --lib; \
 		echo "🧪 Running integration tests (integration-e2e)..."; \
 		SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --test-threads=1; \
+		for test_name in $(INTEGRATION_PERF_TESTS); do \
+			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+			SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 || exit $$?; \
+		done; \
 	else \
 		echo "⚠️  No local MinIO on :9000, running unit tests only"; \
 		cargo test --lib; \
