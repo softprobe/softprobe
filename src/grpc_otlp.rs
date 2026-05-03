@@ -81,11 +81,8 @@ mod tests {
             .expect("state");
         assert!(state.hosted.is_none());
         let svc = GrpcTraceService { state };
-        let got = TraceService::export(
-            &svc,
-            Request::new(ExportTraceServiceRequest::default()),
-        )
-        .await;
+        let got =
+            TraceService::export(&svc, Request::new(ExportTraceServiceRequest::default())).await;
         assert!(got.is_ok(), "{:?}", got);
     }
 }

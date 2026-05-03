@@ -71,7 +71,10 @@ impl DropdownCatalog {
                     pg.password(v);
                 }
                 other => {
-                    debug!("dropdown catalog: ignoring unknown postgres config key {}", other);
+                    debug!(
+                        "dropdown catalog: ignoring unknown postgres config key {}",
+                        other
+                    );
                 }
             }
         }
@@ -82,10 +85,7 @@ impl DropdownCatalog {
         let mgr = Manager::from_config(pg, NoTls, mgr_config);
         let pool = Pool::builder(mgr).max_size(8).build()?;
         let schema_name = catalog_schema_name(dl);
-        let qualified_table = format!(
-            "{}.ui_dropdown_catalog",
-            quote_pg_ident(&schema_name)
-        );
+        let qualified_table = format!("{}.ui_dropdown_catalog", quote_pg_ident(&schema_name));
         Ok(Self {
             pool,
             schema_name,
@@ -144,18 +144,11 @@ ON {} (tenant_id, entity_type, last_seen_at DESC);"#,
         self.upsert_pairs_sql(tenant_id, pairs).await
     }
 
-    async fn upsert_pairs_sql(
-        &self,
-        tenant_id: &str,
-        pairs: Vec<(String, String)>,
-    ) -> Result<()> {
+    async fn upsert_pairs_sql(&self, tenant_id: &str, pairs: Vec<(String, String)>) -> Result<()> {
         if pairs.is_empty() {
             return Ok(());
         }
-        let batch = self
-            .cfg
-            .upsert_batch_size
-            .clamp(1, 5000);
+        let batch = self.cfg.upsert_batch_size.clamp(1, 5000);
         let client = self.pool.get().await?;
         for chunk in pairs.chunks(batch) {
             let values_sql = catalog_multi_values_sql(chunk.len());
@@ -393,8 +386,8 @@ pub fn resolve_trace_tenant_id(batches: &[RecordBatch]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::iceberg::tables::TraceTable;
     use crate::models::Span;
+    use crate::storage::iceberg::tables::TraceTable;
     use iceberg::spec::Schema as IcebergSchema;
 
     fn sample_span(tenant: Option<&str>) -> Span {
@@ -428,8 +421,7 @@ mod tests {
     fn collect_pairs_skips_ids_and_collects_dimensions() {
         let schema: IcebergSchema = TraceTable::schema(None);
         let spans = vec![sample_span(Some("ten-1"))];
-        let batch =
-            crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
+        let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
         let cfg = DropdownCatalogConfig::default();
         let pairs = collect_trace_catalog_pairs(std::slice::from_ref(&batch), &cfg).unwrap();
         let types: HashSet<_> = pairs.iter().map(|(a, _)| a.as_str()).collect();
@@ -442,10 +434,7 @@ mod tests {
 
     #[test]
     fn catalog_multi_values_sql_placeholders() {
-        assert_eq!(
-            catalog_multi_values_sql(1),
-            "($1, $2, $3, NOW())"
-        );
+        assert_eq!(catalog_multi_values_sql(1), "($1, $2, $3, NOW())");
         assert_eq!(
             catalog_multi_values_sql(2),
             "($1, $2, $3, NOW()), ($1, $4, $5, NOW())"
@@ -460,8 +449,7 @@ mod tests {
     fn resolve_tenant_roundtrip() {
         let schema: IcebergSchema = TraceTable::schema(None);
         let spans = vec![sample_span(Some("tid"))];
-        let batch =
-            crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
+        let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
         assert_eq!(
             resolve_trace_tenant_id(std::slice::from_ref(&batch)).as_deref(),
             Some("tid")

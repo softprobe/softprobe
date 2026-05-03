@@ -253,8 +253,8 @@ mod tests {
     use crate::storage::buffer::Bufferable;
     use chrono::{TimeZone, Utc};
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs};
-    use std::collections::HashMap;
     use std::cmp::Ordering;
+    use std::collections::HashMap;
 
     fn sample_log(ts_nano: i64) -> Log {
         Log {

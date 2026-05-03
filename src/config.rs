@@ -462,8 +462,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("unit-test-config.yaml");
         let original = Config::default();
-        std::fs::write(&path, serde_yaml::to_string(&original).expect("yaml"))
-            .expect("write");
+        std::fs::write(&path, serde_yaml::to_string(&original).expect("yaml")).expect("write");
 
         let prev = std::env::var("CONFIG_FILE").ok();
         std::env::set_var("CONFIG_FILE", path.to_str().expect("utf8 path"));

@@ -1060,10 +1060,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     pipeline.force_flush_metrics().await.expect("force flush");
 
     let staged_files = pipeline.list_staged_files("metrics").expect("staged files");
-    println!(
-        "📁 Staged metric paths after flush: {}",
-        staged_files.len()
-    );
+    println!("📁 Staged metric paths after flush: {}", staged_files.len());
 
     println!("⚙️  Running optimizer to commit staged metrics to Iceberg...");
     pipeline.run_optimizer_once().await.expect("optimizer");
@@ -1778,18 +1775,10 @@ async fn test_wal_cleanup_after_flush() {
 
     let sql1 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-1'";
     let sql2 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-2'";
-    let c1 = test_pipeline
-        .execute_query(sql1)
-        .await
-        .expect("q1")
-        .rows[0][0]
+    let c1 = test_pipeline.execute_query(sql1).await.expect("q1").rows[0][0]
         .as_i64()
         .unwrap_or(0);
-    let c2 = test_pipeline
-        .execute_query(sql2)
-        .await
-        .expect("q2")
-        .rows[0][0]
+    let c2 = test_pipeline.execute_query(sql2).await.expect("q2").rows[0][0]
         .as_i64()
         .unwrap_or(0);
     assert_eq!(c1, 50, "expected 50 spans for session 1");

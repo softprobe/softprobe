@@ -134,20 +134,31 @@ mod tests {
 
     #[tokio::test]
     async fn tiered_storage_default_paths() {
-        let (storage, _t) = crate::test_support::sample_storage().await.expect("storage");
+        let (storage, _t) = crate::test_support::sample_storage()
+            .await
+            .expect("storage");
         assert!(storage.list_staged_files("any").unwrap().is_empty());
         assert!(storage.staged_watermark_signature("any").is_empty());
         let _ = storage.writer();
         assert_eq!(
-            storage.snapshot_buffered_spans_sync().as_ref().map(|v| v.len()),
+            storage
+                .snapshot_buffered_spans_sync()
+                .as_ref()
+                .map(|v| v.len()),
             Some(0)
         );
         assert_eq!(
-            storage.snapshot_buffered_logs_sync().as_ref().map(|v| v.len()),
+            storage
+                .snapshot_buffered_logs_sync()
+                .as_ref()
+                .map(|v| v.len()),
             Some(0)
         );
         assert_eq!(
-            storage.snapshot_buffered_metrics_sync().as_ref().map(|v| v.len()),
+            storage
+                .snapshot_buffered_metrics_sync()
+                .as_ref()
+                .map(|v| v.len()),
             Some(0)
         );
     }

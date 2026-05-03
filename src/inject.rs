@@ -499,7 +499,9 @@ mod tests {
     #[test]
     fn is_strict_external_http_policy_detects() {
         assert!(!is_strict_external_http_policy(b""));
-        assert!(!is_strict_external_http_policy(br#"{"externalHttp":"lax"}"#));
+        assert!(!is_strict_external_http_policy(
+            br#"{"externalHttp":"lax"}"#
+        ));
         assert!(is_strict_external_http_policy(
             br#"{"externalHttp":"strict"}"#
         ));

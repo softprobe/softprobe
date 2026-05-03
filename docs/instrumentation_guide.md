@@ -2,6 +2,13 @@
 
 This guide shows how to instrument your application to capture HTTP bodies and business attributes for storage in the Softprobe OTLP backend.
 
+## Session wording (read this first)
+
+- **`sp.session.id` on spans** is the **correlation id** the runtime uses for Iceberg partitioning / grouping (it defaults to `trace_id` if unset). Typical production use: **end-user session**, checkout flow, or any stable id you want to query by.
+- **Control session / test session** is a different object: `sessionId` from `POST /v1/sessions` in the hybrid JSON control API. Hybrid capture/replay sets `x-softprobe-session-id` and the proxy mirrors that into `sp.session.id` on proxy-generated spans so inject/extract hit the same server-side session document.
+
+If documentation mentions “session” without context, check whether it means **control API session** (testing) or **`sp.session.id` / `session_id` column** (telemetry correlation).
+
 ## Design Philosophy
 
 We use two complementary OpenTelemetry features:

@@ -36,24 +36,14 @@ const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql"
 /// DuckDB build. Rewrite the public `union_*` / `committed_*` surface to neutral `tm_*` names.
 fn telemetry_view_names(kind: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match kind {
-        "logs" => (
-            "tm_cq_log",
-            "tm_buf_log",
-            "tm_all_log",
-            "tm_icb_log",
-        ),
+        "logs" => ("tm_cq_log", "tm_buf_log", "tm_all_log", "tm_icb_log"),
         "metrics" => (
             "tm_cq_metric",
             "tm_buf_metric",
             "tm_all_metric",
             "tm_icb_metric",
         ),
-        _ => (
-            "tm_cq_span",
-            "tm_buf_span",
-            "tm_all_span",
-            "tm_icb_span",
-        ),
+        _ => ("tm_cq_span", "tm_buf_span", "tm_all_span", "tm_icb_span"),
     }
 }
 
@@ -644,7 +634,8 @@ impl DuckDBCore {
             if source_changed || !kind_ready {
                 let applied_source =
                     self.create_iceberg_view(&state.conn, kind, table_name, &source)?;
-                let applied_signature = self.iceberg_source_signature(&applied_source, table_name)?;
+                let applied_signature =
+                    self.iceberg_source_signature(&applied_source, table_name)?;
                 state
                     .iceberg_signatures
                     .insert(kind_key.clone(), applied_signature);
@@ -1655,10 +1646,7 @@ mod tests {
     fn replace_standalone_ident_rewrites_tm_cq_span() {
         let s = "SELECT count(*) AS c FROM tm_cq_span";
         let out = replace_standalone_ident(s, "tm_cq_span", "softprobe.softprobe.traces");
-        assert!(
-            out.contains("softprobe.softprobe.traces"),
-            "got {out}"
-        );
+        assert!(out.contains("softprobe.softprobe.traces"), "got {out}");
         assert!(!out.contains("tm_cq_span"));
     }
 

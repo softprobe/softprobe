@@ -200,13 +200,9 @@ impl DuckLakeWriter {
         if table_name == "traces" {
             if let Some(ref cat) = self.dropdown_catalog {
                 if self.config.dropdown_catalog.enabled {
-                    if let Some(tenant) = crate::catalog::resolve_trace_tenant_id(&record_batches)
-                    {
+                    if let Some(tenant) = crate::catalog::resolve_trace_tenant_id(&record_batches) {
                         if let Err(e) = cat.upsert_trace_batches(&tenant, &record_batches).await {
-                            warn!(
-                                "dropdown catalog upsert failed (non-fatal): {}",
-                                e
-                            );
+                            warn!("dropdown catalog upsert failed (non-fatal): {}", e);
                         }
                     }
                 }

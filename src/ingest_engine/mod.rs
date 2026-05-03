@@ -89,10 +89,7 @@ impl IngestEngine {
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let dropdown_catalog = DropdownCatalog::connect(config).await?;
-        let writer = Arc::new(
-            DuckLakeWriter::new(config, dropdown_catalog.clone())
-                .await?,
-        );
+        let writer = Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone()).await?);
         let ingest_engine = Arc::new(IngestEngine::new(writer.clone()));
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
 

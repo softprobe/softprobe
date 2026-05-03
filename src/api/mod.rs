@@ -1,6 +1,7 @@
 pub mod health;
 pub mod ingestion;
 pub mod query;
+pub mod telemetry;
 
 use crate::authn;
 use crate::catalog::DropdownCatalog;
@@ -103,6 +104,21 @@ pub async fn create_router(
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/v1/query/sql", post(query::execute_sql))
+        .route("/v1/telemetry/search", post(telemetry::search))
+        .route("/v1/telemetry/details", post(telemetry::details_post))
+        .route("/v1/telemetry/fields", get(telemetry::fields))
+        .route(
+            "/v1/telemetry/fields/{field}/values",
+            get(telemetry::field_values),
+        )
+        .route(
+            "/v1/telemetry/sessions/{session_id}",
+            get(telemetry::session_details),
+        )
+        .route(
+            "/v1/telemetry/traces/{trace_id}",
+            get(telemetry::trace_details),
+        )
         .with_state(state.clone());
 
     Ok((router, state))

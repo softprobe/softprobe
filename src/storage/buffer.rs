@@ -466,10 +466,7 @@ mod tests {
             None,
             Arc::new(|_| Box::pin(async { Ok(()) })),
         );
-        assert_eq!(
-            buf.snapshot_items_sync().as_ref().map(|v| v.len()),
-            Some(0)
-        );
+        assert_eq!(buf.snapshot_items_sync().as_ref().map(|v| v.len()), Some(0));
     }
 
     #[test]

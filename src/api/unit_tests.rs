@@ -12,6 +12,11 @@ use tower::ServiceExt;
 
 use crate::api::ingestion::metrics::{ingest_metrics_json, ingest_metrics_protobuf};
 use crate::api::ingestion::traces::{ingest_traces_json, ingest_traces_protobuf};
+use crate::api::telemetry::{
+    compile_details_sql, compile_search_sql, TelemetryDetailsTarget, TelemetryFilter,
+    TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
+    TelemetrySortDirection, TelemetryTimeRange,
+};
 use crate::test_support::oss_router_and_state;
 
 #[tokio::test]
@@ -191,4 +196,100 @@ async fn unit_query_sql_invalid_returns_500() {
         .unwrap();
     let resp = router.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn unit_telemetry_search_compiles_session_summary_with_safe_filters() {
+    let request = TelemetrySearchRequest {
+        version: 1,
+        scope: TelemetrySearchScope::Sessions,
+        time_range: Some(TelemetryTimeRange {
+            from: "2026-05-03T10:00:00Z".to_string(),
+            to: "2026-05-03T11:00:00Z".to_string(),
+        }),
+        filter: Some(TelemetryFilterExpr::And {
+            and: vec![
+                TelemetryFilterExpr::Predicate(TelemetryFilter {
+                    field: "service.name".to_string(),
+                    op: "eq".to_string(),
+                    value: Some(json!("checkout-api")),
+                }),
+                TelemetryFilterExpr::Predicate(TelemetryFilter {
+                    field: "http_request_path".to_string(),
+                    op: "prefix".to_string(),
+                    value: Some(json!("/api/checkout")),
+                }),
+                TelemetryFilterExpr::Predicate(TelemetryFilter {
+                    field: "http_response_status_code".to_string(),
+                    op: "gte".to_string(),
+                    value: Some(json!(500)),
+                }),
+            ],
+        }),
+        columns: vec!["session_id".to_string(), "trace_count".to_string()],
+        sort: vec![TelemetrySort {
+            field: "timestamp".to_string(),
+            direction: TelemetrySortDirection::Desc,
+        }],
+        limit: Some(50),
+        cursor: None,
+    };
+
+    let sql = compile_search_sql(&request).expect("compile search");
+
+    assert!(sql.contains("FROM union_spans"));
+    assert!(sql.contains("GROUP BY session_id"));
+    assert!(sql.contains("app_id = 'checkout-api'"));
+    assert!(sql.contains("http_request_path LIKE '/api/checkout%'"));
+    assert!(sql.contains("http_response_status_code >= 500"));
+    assert!(sql.contains("LIMIT 50"));
+}
+
+#[test]
+fn unit_telemetry_search_rejects_unknown_fields_and_sql_fragments() {
+    let mut request = TelemetrySearchRequest {
+        version: 1,
+        scope: TelemetrySearchScope::Traces,
+        time_range: Some(TelemetryTimeRange {
+            from: "2026-05-03T10:00:00Z".to_string(),
+            to: "2026-05-03T11:00:00Z".to_string(),
+        }),
+        filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+            field: "attributes['x']; DROP TABLE traces; --".to_string(),
+            op: "eq".to_string(),
+            value: Some(json!("bad")),
+        })),
+        columns: vec![],
+        sort: vec![],
+        limit: Some(10),
+        cursor: None,
+    };
+
+    assert!(compile_search_sql(&request).is_err());
+
+    request.filter = Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+        field: "session_id".to_string(),
+        op: "contains".to_string(),
+        value: Some(json!("sess")),
+    }));
+    assert!(compile_search_sql(&request).is_err());
+}
+
+#[test]
+fn unit_telemetry_details_compiles_correlated_signal_queries() {
+    let target = TelemetryDetailsTarget {
+        kind: "session".to_string(),
+        id: "sess_abc".to_string(),
+    };
+
+    let compiled = compile_details_sql(&target, None, 100).expect("compile details");
+
+    assert!(compiled.spans.contains("FROM union_spans"));
+    assert!(compiled.logs.contains("FROM union_logs"));
+    assert!(compiled.metrics.contains("FROM union_metrics"));
+    assert!(compiled.spans.contains("session_id = 'sess_abc'"));
+    assert!(compiled.logs.contains("session_id = 'sess_abc'"));
+    assert!(compiled
+        .metrics
+        .contains("attributes['sp.session.id'] = 'sess_abc'"));
 }

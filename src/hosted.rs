@@ -718,10 +718,7 @@ mod bearer_tests {
 
     #[test]
     fn trims_and_extracts_after_prefix() {
-        assert_eq!(
-            parse_bearer("  Bearer   tok  ").as_deref(),
-            Some("tok")
-        );
+        assert_eq!(parse_bearer("  Bearer   tok  ").as_deref(), Some("tok"));
     }
 
     #[test]
