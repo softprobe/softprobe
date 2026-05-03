@@ -402,3 +402,246 @@ fn mock_response_key_values(response: &MockResponse) -> Vec<KeyValue> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+    fn string_kv(key: &str, v: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(AvValue::StringValue(v.to_string())),
+            }),
+        }
+    }
+
+    fn inject_lookup_request_sample() -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_kv("service.name", "my-svc")],
+                    dropped_attributes_count: 0,
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        attributes: vec![
+                            string_kv("sp.span.type", "inject"),
+                            string_kv("sp.session.id", "sess-1"),
+                            string_kv("sp.service.name", ""),
+                            string_kv("sp.traffic.direction", "outbound"),
+                            string_kv("url.host", "api.example"),
+                            string_kv("http.request.method", "POST"),
+                            string_kv("url.path", "/v1/x"),
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn normalize_otlp_body_proto_roundtrip() {
+        let req = inject_lookup_request_sample();
+        let mut buf = Vec::new();
+        req.encode(&mut buf).unwrap();
+        let out = normalize_otlp_body(&buf).unwrap();
+        assert!(!out.resource_spans.is_empty());
+    }
+
+    #[test]
+    fn normalize_otlp_body_json() {
+        let j = br#"{"resourceSpans":[]}"#;
+        let out = normalize_otlp_body(j).unwrap();
+        assert!(out.resource_spans.is_empty());
+    }
+
+    #[test]
+    fn parse_inject_lookup_ok() {
+        let req = inject_lookup_request_sample();
+        let lu = parse_inject_lookup(&req).unwrap();
+        assert_eq!(lu.session_id, "sess-1");
+        assert_eq!(lu.service_name, "my-svc");
+        assert_eq!(lu.request_method, "POST");
+        assert_eq!(lu.url_path, "/v1/x");
+        assert_eq!(lu.url_host, "api.example");
+    }
+
+    #[test]
+    fn parse_inject_lookup_missing_span_errors() {
+        let req = ExportTraceServiceRequest::default();
+        assert!(parse_inject_lookup(&req).is_err());
+    }
+
+    #[test]
+    fn parse_inject_rules_document_empty_and_rules() {
+        assert!(parse_inject_rules_document(b"").unwrap().is_empty());
+        let doc = br#"{"rules":[{"name":"r1","priority":1,"when":{},"then":{"action":"mock","response":{"status":200}}}]} "#;
+        let rules = parse_inject_rules_document(doc).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "r1");
+    }
+
+    #[test]
+    fn case_embedded_rules_empty_and_ok() {
+        assert!(case_embedded_rules(b"").is_empty());
+        let case = br#"{"rules":[],"version":"1"}"#;
+        assert!(case_embedded_rules(case).is_empty());
+    }
+
+    #[test]
+    fn is_strict_external_http_policy_detects() {
+        assert!(!is_strict_external_http_policy(b""));
+        assert!(!is_strict_external_http_policy(br#"{"externalHttp":"lax"}"#));
+        assert!(is_strict_external_http_policy(
+            br#"{"externalHttp":"strict"}"#
+        ));
+    }
+
+    #[test]
+    fn rule_matches_inject_matrix() {
+        let req = InjectLookupRequest {
+            session_id: "s".into(),
+            service_name: "svc".into(),
+            traffic_direction: "out".into(),
+            url_host: "h".into(),
+            url_path: "/api".into(),
+            request_method: "GET".into(),
+        };
+        let rule = InjectRule {
+            name: "a".into(),
+            priority: 1,
+            when: InjectRuleWhen {
+                direction: "out".into(),
+                service: "svc".into(),
+                host: "h".into(),
+                method: "GET".into(),
+                path: "/api".into(),
+                path_prefix: "".into(),
+            },
+            then: InjectRuleThen {
+                action: "mock".into(),
+                response: None,
+                error: None,
+            },
+        };
+        assert!(rule_matches_inject(&rule, &req));
+        let mut bad = rule.clone();
+        bad.when.method = "POST".into();
+        assert!(!rule_matches_inject(&bad, &req));
+        let mut px = rule.clone();
+        px.when.path = "".into();
+        px.when.path_prefix = "/ap".into();
+        assert!(rule_matches_inject(&px, &req));
+    }
+
+    #[test]
+    fn select_inject_rule_priority_and_strict_policy() {
+        let req = InjectLookupRequest {
+            session_id: "s".into(),
+            service_name: "svc".into(),
+            traffic_direction: "".into(),
+            url_host: "".into(),
+            url_path: "/x".into(),
+            request_method: "GET".into(),
+        };
+        let session_rule = InjectRule {
+            name: "sr".into(),
+            priority: 1,
+            when: InjectRuleWhen {
+                path: "/x".into(),
+                ..Default::default()
+            },
+            then: InjectRuleThen {
+                action: "mock".into(),
+                response: Some(InjectMockResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: None,
+                }),
+                error: None,
+            },
+        };
+        let hit = select_inject_rule(&req, false, &[], &[session_rule.clone()]).unwrap();
+        assert_eq!(hit.layer, RuleLayer::SessionRules);
+
+        let strict_hit = select_inject_rule(&req, true, &[], &[]).unwrap();
+        assert_eq!(strict_hit.rule.name, STRICT_POLICY_RULE_NAME);
+
+        let hi = InjectRule {
+            name: "hi".into(),
+            priority: 99,
+            when: InjectRuleWhen {
+                path: "/x".into(),
+                ..Default::default()
+            },
+            then: InjectRuleThen {
+                action: "mock".into(),
+                response: Some(InjectMockResponse {
+                    status: 201,
+                    headers: Default::default(),
+                    body: None,
+                }),
+                error: None,
+            },
+        };
+        let winner = select_inject_rule(&req, false, &[hi.clone()], &[session_rule]).unwrap();
+        assert_eq!(winner.rule.name, "hi");
+    }
+
+    #[test]
+    fn build_mock_and_error_response_helpers() {
+        let mock_rule = InjectRule {
+            name: "m".into(),
+            priority: 0,
+            when: Default::default(),
+            then: InjectRuleThen {
+                action: "mock".into(),
+                response: Some(InjectMockResponse {
+                    status: 0,
+                    headers: [("X-T".into(), "v".into())].into_iter().collect(),
+                    body: Some(serde_json::json!("plain")),
+                }),
+                error: None,
+            },
+        };
+        let mr = build_mock_response(&mock_rule).unwrap();
+        assert_eq!(mr.status_code, 200);
+        assert_eq!(mr.body, "plain");
+
+        let err_rule = InjectRule {
+            name: "e".into(),
+            priority: 0,
+            when: Default::default(),
+            then: InjectRuleThen {
+                action: "error".into(),
+                response: None,
+                error: Some(InjectErrorResponse {
+                    status: 0,
+                    body: Some(serde_json::json!("oops")),
+                }),
+            },
+        };
+        let (st, msg) = build_error_response(&err_rule);
+        assert_eq!(st, 500);
+        assert!(msg.contains("oops"));
+    }
+
+    #[test]
+    fn encode_inject_response_proto_non_empty() {
+        let mr = MockResponse {
+            status_code: 201,
+            headers: vec![("H".into(), "V".into())],
+            body: "b".into(),
+        };
+        let bytes = encode_inject_response_proto(&mr).unwrap();
+        assert!(!bytes.is_empty());
+    }
+}

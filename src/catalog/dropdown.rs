@@ -7,6 +7,8 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 use tracing::{debug, warn};
 
@@ -147,20 +149,30 @@ ON {} (tenant_id, entity_type, last_seen_at DESC);"#,
         tenant_id: &str,
         pairs: Vec<(String, String)>,
     ) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let batch = self
+            .cfg
+            .upsert_batch_size
+            .clamp(1, 5000);
         let client = self.pool.get().await?;
-        for (etype, eval) in pairs {
-            client
-                .execute(
-                    &format!(
-                        r#"INSERT INTO {} (tenant_id, entity_type, entity_value, last_seen_at)
-VALUES ($1, $2, $3, NOW())
+        for chunk in pairs.chunks(batch) {
+            let values_sql = catalog_multi_values_sql(chunk.len());
+            let sql = format!(
+                r#"INSERT INTO {} (tenant_id, entity_type, entity_value, last_seen_at)
+VALUES {}
 ON CONFLICT (tenant_id, entity_type, entity_value) DO UPDATE SET
 last_seen_at = GREATEST({}.last_seen_at, EXCLUDED.last_seen_at)"#,
-                        self.qualified_table, self.qualified_table
-                    ),
-                    &[&tenant_id, &etype, &eval],
-                )
-                .await?;
+                self.qualified_table, values_sql, self.qualified_table
+            );
+            let mut args: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(1 + 2 * chunk.len());
+            args.push(&tenant_id as &(dyn ToSql + Sync));
+            for (et, ev) in chunk {
+                args.push(et as &(dyn ToSql + Sync));
+                args.push(ev as &(dyn ToSql + Sync));
+            }
+            client.execute(&sql, &args[..]).await?;
         }
         Ok(())
     }
@@ -247,6 +259,21 @@ fn catalog_schema_name(dl: &DuckLakeConfig) -> String {
 
 fn quote_pg_ident(id: &str) -> String {
     format!("\"{}\"", id.replace('"', "\"\""))
+}
+
+/// `INSERT` values clause: `($1, $2, $3, NOW()), ($1, $4, $5, NOW()), …` where `$1` is always `tenant_id`.
+fn catalog_multi_values_sql(num_rows: usize) -> String {
+    debug_assert!(num_rows > 0);
+    let mut p: i32 = 2;
+    let mut out = String::new();
+    for i in 0..num_rows {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(&mut out, "($1, ${}, ${}, NOW())", p, p + 1);
+        p += 2;
+    }
+    out
 }
 
 /// Default columns excluded (high-cardinality IDs or tenant scope key).
@@ -411,6 +438,22 @@ mod tests {
         assert!(types.contains("app_id"));
         assert!(types.contains("message_type"));
         assert!(pairs.contains(&("http_response_status_code".into(), "200".into())));
+    }
+
+    #[test]
+    fn catalog_multi_values_sql_placeholders() {
+        assert_eq!(
+            catalog_multi_values_sql(1),
+            "($1, $2, $3, NOW())"
+        );
+        assert_eq!(
+            catalog_multi_values_sql(2),
+            "($1, $2, $3, NOW()), ($1, $4, $5, NOW())"
+        );
+        assert_eq!(
+            catalog_multi_values_sql(3),
+            "($1, $2, $3, NOW()), ($1, $4, $5, NOW()), ($1, $6, $7, NOW())"
+        );
     }
 
     #[test]

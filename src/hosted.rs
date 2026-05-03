@@ -705,3 +705,30 @@ async fn v1_get_capture(
         )),
     }
 }
+
+#[cfg(test)]
+mod bearer_tests {
+    use super::parse_bearer;
+
+    #[test]
+    fn parses_valid_bearer_token() {
+        assert_eq!(parse_bearer("Bearer abc").as_deref(), Some("abc"));
+        assert_eq!(parse_bearer("Bearer  ").as_deref(), None);
+    }
+
+    #[test]
+    fn trims_and_extracts_after_prefix() {
+        assert_eq!(
+            parse_bearer("  Bearer   tok  ").as_deref(),
+            Some("tok")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_empty_token() {
+        assert!(parse_bearer("Bearer").is_none());
+        assert!(parse_bearer("Bearer ").is_none());
+        assert!(parse_bearer("").is_none());
+        assert!(parse_bearer("Basic x").is_none());
+    }
+}

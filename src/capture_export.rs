@@ -170,12 +170,53 @@ fn hex_to_b64(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::capture_query_sql;
+    use super::{build_capture_json, capture_query_sql};
+    use serde_json::{json, Value};
 
     #[test]
     fn capture_query_reads_committed_spans_only() {
         let sql = capture_query_sql("tenant-a", "cap-1");
         assert!(sql.contains("FROM committed_spans"));
         assert!(!sql.contains("FROM union_spans"));
+    }
+
+    #[test]
+    fn capture_query_sql_escapes_quotes() {
+        let sql = capture_query_sql("ten'ant", "cap'1");
+        assert!(sql.contains("ten''ant"));
+        assert!(sql.contains("cap''1"));
+    }
+
+    #[test]
+    fn build_capture_json_single_row_minimal() {
+        let columns = vec![
+            "trace_id".into(),
+            "span_id".into(),
+            "parent_span_id".into(),
+            "http_request_method".into(),
+            "http_request_path".into(),
+            "http_response_body".into(),
+            "message_type".into(),
+            "http_response_status_code".into(),
+            "attributes".into(),
+        ];
+        let rows = vec![vec![
+            Value::String("abcd".into()),
+            Value::String("ef01".into()),
+            Value::Null,
+            Value::String("GET".into()),
+            Value::String("/r".into()),
+            Value::String("resp".into()),
+            Value::String("/sock".into()),
+            json!(200),
+            json!({
+                "http.response.status_code": "418",
+                "sp.traffic.direction": "inbound"
+            }),
+        ]];
+        let out = build_capture_json("cap-x", &columns, &rows).expect("build");
+        let v: Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(v["mode"], "capture");
+        assert!(v["traces"].as_array().unwrap().len() >= 1);
     }
 }

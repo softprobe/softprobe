@@ -129,3 +129,58 @@ impl Resolver {
         Ok(info)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Resolver;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn empty_api_key_errors() {
+        let srv = MockServer::start().await;
+        let r = Resolver::new(srv.uri(), Duration::from_secs(60));
+        let err = r.resolve("").await.expect_err("empty");
+        assert!(err.to_string().contains("empty API key"));
+    }
+
+    #[tokio::test]
+    async fn wiremock_success_json_contract() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "tenantId": "t-u",
+                    "resources": [{
+                        "resourceType": "BIGQUERY_STORAGE",
+                        "configJson": "{\"dataset_id\":\"d\",\"bucket_name\":\"bk\"}"
+                    }]
+                }
+            })))
+            .mount(&srv)
+            .await;
+
+        let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
+        let info = r.resolve("key").await.expect("ok");
+        assert_eq!(info.tenant_id, "t-u");
+        assert_eq!(info.dataset_id, "d");
+        assert_eq!(info.bucket_name, "bk");
+    }
+
+    #[tokio::test]
+    async fn wiremock_non_success_response_errors() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": false
+            })))
+            .mount(&srv)
+            .await;
+        let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
+        let err = r.resolve("k").await.expect_err("auth");
+        assert!(err.to_string().contains("invalid API key"), "{err}");
+    }
+}

@@ -1,3 +1,4 @@
+pub mod config;
 pub mod http;
 pub mod iceberg;
 pub mod otlp;

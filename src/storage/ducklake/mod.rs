@@ -9,6 +9,7 @@ use iceberg::spec::Schema as IcebergSchema;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -56,6 +57,8 @@ pub struct DuckLakeWriter {
     ducklake: DuckLakeConfig,
     cache_dir: Option<PathBuf>,
     dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+    /// Bumped after each successful committed write so query-side DuckDB connections can reattach.
+    catalog_write_generation: Arc<AtomicU64>,
 }
 
 impl DuckLakeWriter {
@@ -69,6 +72,7 @@ impl DuckLakeWriter {
             ducklake,
             cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
             dropdown_catalog,
+            catalog_write_generation: Arc::new(AtomicU64::new(0)),
         };
         writer.initialize_catalog().await?;
         info!("DuckLake writer initialized");
@@ -77,6 +81,10 @@ impl DuckLakeWriter {
 
     pub fn dropdown_catalog(&self) -> Option<std::sync::Arc<crate::catalog::DropdownCatalog>> {
         self.dropdown_catalog.clone()
+    }
+
+    pub fn catalog_write_generation(&self) -> u64 {
+        self.catalog_write_generation.load(Ordering::Acquire)
     }
 
     async fn initialize_catalog(&self) -> Result<()> {
@@ -253,6 +261,8 @@ impl DuckLakeWriter {
         }
         self.update_metadata_pointer(table_name)?;
         let _ = std::fs::remove_file(&temp_path);
+        self.catalog_write_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 

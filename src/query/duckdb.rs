@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
+use crate::storage::ducklake::ducklake_qualified_table_name;
 use crate::storage::iceberg::arrow::{
     logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
 };
@@ -162,6 +163,8 @@ struct ConnectionState {
     iceberg_sources: HashMap<String, IcebergSource>,
     iceberg_signatures: HashMap<String, String>,
     tiered_storage: Arc<dyn TieredStorage>,
+    /// Last `TieredStorage::catalog_write_generation()` applied after reattach for this worker.
+    last_seen_catalog_write_generation: u64,
     cache_httpfs_wrap_supported: bool,
     cache_httpfs_wrapped_s3: bool,
     cache_httpfs_wrapped_httpfs: bool,
@@ -314,6 +317,7 @@ impl DuckDBCore {
             iceberg_sources: HashMap::new(),
             iceberg_signatures: HashMap::new(),
             tiered_storage: self.tiered_storage.clone(),
+            last_seen_catalog_write_generation: 0,
             cache_httpfs_wrap_supported: true,
             cache_httpfs_wrapped_s3: false,
             cache_httpfs_wrapped_httpfs: false,
@@ -325,6 +329,18 @@ impl DuckDBCore {
         state: &mut ConnectionState,
         query: &str,
     ) -> Result<QueryResult> {
+        if self.config.ducklake.is_some() {
+            let gen = state.tiered_storage.catalog_write_generation();
+            if gen != state.last_seen_catalog_write_generation {
+                self.force_reattach_catalog(&state.conn)?;
+                state.prepared_kinds.clear();
+                state.staged_signatures.clear();
+                state.iceberg_sources.clear();
+                state.iceberg_signatures.clear();
+                state.last_seen_catalog_write_generation = gen;
+            }
+        }
+
         let query_prep = rewrite_reserved_telemetry_view_names(query);
         let query_run = if self.use_attached_catalog() {
             self.ducklake_inline_sql(&query_prep)
@@ -693,13 +709,10 @@ impl DuckDBCore {
         Ok(())
     }
 
+    /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`] (writer DDL uses
+    /// `catalog.table` when `metadata_schema` is `main`, not `catalog.main.table`).
     fn ducklake_qualified_table(&self, table: &str) -> String {
-        format!(
-            "{}.{}.{}",
-            self.catalog_alias(),
-            self.catalog_schema(),
-            table
-        )
+        ducklake_qualified_table_name(&self.ducklake_config(), table)
     }
 
     /// Replace internal telemetry aliases with real DuckLake table refs (and inline unions).

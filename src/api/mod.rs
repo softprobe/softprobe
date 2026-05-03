@@ -107,3 +107,6 @@ pub async fn create_router(
 
     Ok((router, state))
 }
+
+#[cfg(test)]
+mod unit_tests;

@@ -47,3 +47,5 @@ dropdown_catalog:
   enabled: false
   active_values_days: 7
   maintenance_prune_enabled: true
+  # Pairs per INSERT (reduces round-trips vs one row per execute). Clamped 1..=5000 in code.
+  upsert_batch_size: 500

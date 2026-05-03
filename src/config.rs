@@ -30,6 +30,9 @@ pub struct DropdownCatalogConfig {
     pub active_values_days: u32,
     #[serde(default = "default_dropdown_catalog_maintenance_prune")]
     pub maintenance_prune_enabled: bool,
+    /// Max (entity_type, entity_value) pairs per single Postgres `INSERT … VALUES …` (fewer round-trips under high ingest).
+    #[serde(default = "default_dropdown_catalog_upsert_batch_size")]
+    pub upsert_batch_size: usize,
     #[serde(default)]
     pub skip_entity_columns: Vec<String>,
 }
@@ -40,6 +43,7 @@ impl Default for DropdownCatalogConfig {
             enabled: default_dropdown_catalog_enabled(),
             active_values_days: default_dropdown_catalog_active_days(),
             maintenance_prune_enabled: default_dropdown_catalog_maintenance_prune(),
+            upsert_batch_size: default_dropdown_catalog_upsert_batch_size(),
             skip_entity_columns: Vec::new(),
         }
     }
@@ -55,6 +59,10 @@ fn default_dropdown_catalog_active_days() -> u32 {
 
 fn default_dropdown_catalog_maintenance_prune() -> bool {
     true
+}
+
+fn default_dropdown_catalog_upsert_batch_size() -> usize {
+    500
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,5 +437,74 @@ impl Config {
         }
 
         // Add more environment variable overrides as needed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::sync::Mutex;
+
+    static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn default_roundtrip_yaml() {
+        let c = Config::default();
+        let yaml = serde_yaml::to_string(&c).expect("serialize");
+        let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(parsed.server.port, c.server.port);
+        assert_eq!(parsed.storage.s3_region, c.storage.s3_region);
+    }
+
+    #[test]
+    fn load_reads_config_file_from_env() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("unit-test-config.yaml");
+        let original = Config::default();
+        std::fs::write(&path, serde_yaml::to_string(&original).expect("yaml"))
+            .expect("write");
+
+        let prev = std::env::var("CONFIG_FILE").ok();
+        std::env::set_var("CONFIG_FILE", path.to_str().expect("utf8 path"));
+        let loaded = Config::load().expect("load");
+        match prev {
+            Some(p) => std::env::set_var("CONFIG_FILE", p),
+            None => std::env::remove_var("CONFIG_FILE"),
+        }
+
+        assert_eq!(loaded.server.port, original.server.port);
+    }
+
+    #[test]
+    fn env_overrides_port_and_region() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let prev_port = std::env::var("PORT").ok();
+        let prev_region = std::env::var("S3_REGION").ok();
+        let prev_ns = std::env::var("ICEBERG_NAMESPACE").ok();
+
+        std::env::set_var("PORT", "9191");
+        std::env::set_var("S3_REGION", "eu-west-1");
+        std::env::set_var("ICEBERG_NAMESPACE", "acctests");
+
+        let mut c = Config::default();
+        c.apply_env_overrides();
+
+        match prev_port {
+            Some(p) => std::env::set_var("PORT", p),
+            None => std::env::remove_var("PORT"),
+        }
+        match prev_region {
+            Some(p) => std::env::set_var("S3_REGION", p),
+            None => std::env::remove_var("S3_REGION"),
+        }
+        match prev_ns {
+            Some(p) => std::env::set_var("ICEBERG_NAMESPACE", p),
+            None => std::env::remove_var("ICEBERG_NAMESPACE"),
+        }
+
+        assert_eq!(c.server.port, 9191);
+        assert_eq!(c.storage.s3_region, "eu-west-1");
+        assert_eq!(c.iceberg.namespace, "acctests");
     }
 }

@@ -209,3 +209,37 @@ impl Default for SessionStats {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Session, SessionStats};
+
+    #[test]
+    fn session_roundtrip_json() {
+        let s = Session {
+            id: "id1".into(),
+            tenant_id: "t1".into(),
+            mode: "replay".into(),
+            revision: 3,
+            loaded_case: b"case".to_vec(),
+            policy: b"pol".to_vec(),
+            rules: b"rules".to_vec(),
+            fixtures_auth: vec![],
+            stats: SessionStats {
+                injected_spans: 2,
+                extracted_spans: 1,
+                strict_misses: 0,
+            },
+        };
+        let v = serde_json::to_vec(&s).unwrap();
+        let d: Session = serde_json::from_slice(&v).unwrap();
+        assert_eq!(d.id, s.id);
+        assert_eq!(d.stats.injected_spans, 2);
+    }
+
+    #[test]
+    fn session_stats_default_zero() {
+        let s = SessionStats::default();
+        assert_eq!(s.injected_spans, 0);
+    }
+}

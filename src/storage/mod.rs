@@ -22,6 +22,9 @@ pub type MetricBuffer = SimpleBuffer<Metric>;
 /// Tiered storage interface for query-time access.
 pub trait TieredStorage: Send + Sync {
     fn writer(&self) -> Arc<DuckLakeWriter>;
+    /// Monotonic counter bumped after each successful DuckLake table mutation; query workers use it
+    /// to reattach so catalog metadata matches the writer connection.
+    fn catalog_write_generation(&self) -> u64;
     fn snapshot_buffered_spans_sync(&self) -> Option<Vec<Span>>;
     fn snapshot_buffered_logs_sync(&self) -> Option<Vec<Log>>;
     fn snapshot_buffered_metrics_sync(&self) -> Option<Vec<Metric>>;
@@ -58,6 +61,10 @@ impl Storage {
 impl TieredStorage for Storage {
     fn writer(&self) -> Arc<DuckLakeWriter> {
         self.writer.clone()
+    }
+
+    fn catalog_write_generation(&self) -> u64 {
+        self.writer.catalog_write_generation()
     }
 
     fn snapshot_buffered_spans_sync(&self) -> Option<Vec<Span>> {
@@ -119,4 +126,29 @@ pub async fn create_metric_buffer(
         pre_add_callback,
         flush_callback,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TieredStorage;
+
+    #[tokio::test]
+    async fn tiered_storage_default_paths() {
+        let (storage, _t) = crate::test_support::sample_storage().await.expect("storage");
+        assert!(storage.list_staged_files("any").unwrap().is_empty());
+        assert!(storage.staged_watermark_signature("any").is_empty());
+        let _ = storage.writer();
+        assert_eq!(
+            storage.snapshot_buffered_spans_sync().as_ref().map(|v| v.len()),
+            Some(0)
+        );
+        assert_eq!(
+            storage.snapshot_buffered_logs_sync().as_ref().map(|v| v.len()),
+            Some(0)
+        );
+        assert_eq!(
+            storage.snapshot_buffered_metrics_sync().as_ref().map(|v| v.len()),
+            Some(0)
+        );
+    }
 }

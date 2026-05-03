@@ -4,6 +4,10 @@
 - **Multi-tenancy:** Primary key `(tenant_id, entity_type, entity_value)`. Tenant comes from trace batches (`tenant_id` column); mixed tenants in one batch skip upsert (logged).
 - **Product:** Hosted-only surface for the HTTP catalog APIs (same bearer middleware as `/v1/*`). No synthetic default tenant for non-hosted paths in this feature.
 
+## Ingest throughput
+
+- Distinct pairs are upserted using **batched multi-row `INSERT … VALUES`** (`dropdown_catalog.upsert_batch_size`, default 500, clamped 1–5000) so fast ingest does not issue one Postgres round-trip per pair.
+
 ## Failure behavior
 
 - Catalog upsert failure is **non-fatal** for ingest (logged); lake write continues.

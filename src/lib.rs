@@ -1,4 +1,7 @@
 // Re-export key modules for testing
+#[cfg(test)]
+mod test_support;
+
 pub mod api;
 pub mod authn;
 pub mod catalog;

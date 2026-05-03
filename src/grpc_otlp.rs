@@ -69,3 +69,23 @@ pub async fn run_trace_grpc_server(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn grpc_export_empty_trace_non_hosted_ok() {
+        let (_r, state, _t) = crate::test_support::oss_router_and_state()
+            .await
+            .expect("state");
+        assert!(state.hosted.is_none());
+        let svc = GrpcTraceService { state };
+        let got = TraceService::export(
+            &svc,
+            Request::new(ExportTraceServiceRequest::default()),
+        )
+        .await;
+        assert!(got.is_ok(), "{:?}", got);
+    }
+}

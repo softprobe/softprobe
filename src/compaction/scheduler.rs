@@ -50,3 +50,20 @@ pub async fn start_maintenance_scheduler(
 
     Ok(Some(handle))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::start_maintenance_scheduler;
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn scheduler_skips_when_compaction_and_metadata_disabled() {
+        let mut c = Config::default();
+        c.compaction.enabled = false;
+        c.compaction.metadata_maintenance_enabled = false;
+        let out = start_maintenance_scheduler(&c, None)
+            .await
+            .expect("scheduler");
+        assert!(out.is_none());
+    }
+}

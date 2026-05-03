@@ -411,3 +411,75 @@ pub struct BufferStats {
     pub buffered_items: usize,
     pub buffered_bytes: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Bufferable, SimpleBuffer};
+    use crate::config::Config;
+    use chrono::{TimeZone, Utc};
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug)]
+    struct TItem {
+        ts: chrono::DateTime<chrono::Utc>,
+        key: String,
+    }
+
+    impl Bufferable for TItem {
+        fn partition_key(&self) -> chrono::NaiveDate {
+            self.ts.date_naive()
+        }
+
+        fn grouping_key(&self) -> String {
+            self.key.clone()
+        }
+
+        fn compare_for_sort(&self, other: &Self) -> Ordering {
+            self.ts.cmp(&other.ts)
+        }
+
+        fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+            self.ts
+        }
+    }
+
+    #[tokio::test]
+    async fn add_items_empty_is_ok() {
+        let cfg = Config::default().span_buffering;
+        let buf: SimpleBuffer<TItem> = SimpleBuffer::new(
+            "test_buf".into(),
+            cfg,
+            None,
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+        );
+        buf.add_items(vec![], 0).await.expect("empty add");
+        assert_eq!(buf.stats().await.buffered_items, 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_sync_empty_buffer() {
+        let cfg = Config::default().span_buffering;
+        let buf: SimpleBuffer<TItem> = SimpleBuffer::new(
+            "snap".into(),
+            cfg,
+            None,
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+        );
+        assert_eq!(
+            buf.snapshot_items_sync().as_ref().map(|v| v.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn bufferable_item_traits() {
+        let t = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let a = TItem {
+            ts: t,
+            key: "k".into(),
+        };
+        assert_eq!(a.grouping_key(), "k");
+        assert_eq!(a.partition_key(), t.date_naive());
+    }
+}

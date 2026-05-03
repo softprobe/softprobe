@@ -98,10 +98,10 @@ tonic-build = "0.12"
 tokio-test = "0.4"
 mockall = "0.12"
 tempfile = "3.10"
-axum-test = "15.7"
 serde_json = "1.0"
 tower = "0.5"
 hyper = "1.0"
+wiremock = "0.6"
 
 [lib]
 name = "softprobe_runtime"
@@ -132,4 +132,9 @@ default = ["iceberg_catalog"]
 iceberg_catalog = ["iceberg", "iceberg-catalog-rest", "object_store"]
 # REST catalog + MinIO + full ingest/query integration tests (run in CI or with local stack on :8181)
 integration-e2e = []
+
+[[test]]
+name = "integration_perf"
+path = "tests/integration_perf.rs"
+required-features = ["integration-e2e"]
 
