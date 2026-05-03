@@ -82,6 +82,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Redis session store
 redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
 
+# Postgres (dropdown metadata catalog on DuckLake metadata DB)
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+
 # Axum middleware / extractors
 http = "1"
 http-body-util = "0.1"

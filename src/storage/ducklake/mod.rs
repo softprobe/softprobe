@@ -55,19 +55,28 @@ pub struct DuckLakeWriter {
     config: Config,
     ducklake: DuckLakeConfig,
     cache_dir: Option<PathBuf>,
+    dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
 }
 
 impl DuckLakeWriter {
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(
+        config: &Config,
+        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+    ) -> Result<Self> {
         let ducklake = config.ducklake_or_default();
         let writer = Self {
             config: config.clone(),
             ducklake,
             cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
+            dropdown_catalog,
         };
         writer.initialize_catalog().await?;
         info!("DuckLake writer initialized");
         Ok(writer)
+    }
+
+    pub fn dropdown_catalog(&self) -> Option<std::sync::Arc<crate::catalog::DropdownCatalog>> {
+        self.dropdown_catalog.clone()
     }
 
     async fn initialize_catalog(&self) -> Result<()> {
@@ -177,6 +186,23 @@ impl DuckLakeWriter {
     ) -> Result<()> {
         if record_batches.is_empty() {
             return Ok(());
+        }
+
+        // Dropdown catalog from ingest batches **before** DuckLake INSERT (covers data inlining into Postgres).
+        if table_name == "traces" {
+            if let Some(ref cat) = self.dropdown_catalog {
+                if self.config.dropdown_catalog.enabled {
+                    if let Some(tenant) = crate::catalog::resolve_trace_tenant_id(&record_batches)
+                    {
+                        if let Err(e) = cat.upsert_trace_batches(&tenant, &record_batches).await {
+                            warn!(
+                                "dropdown catalog upsert failed (non-fatal): {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         let temp_path = self.write_temp_parquet(table_name, &record_batches)?;

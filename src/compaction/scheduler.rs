@@ -1,11 +1,16 @@
+use crate::catalog::DropdownCatalog;
 use crate::compaction::executor::MaintenanceExecutor;
 use crate::config::Config;
 use anyhow::Result;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-pub async fn start_maintenance_scheduler(config: &Config) -> Result<Option<JoinHandle<()>>> {
+pub async fn start_maintenance_scheduler(
+    config: &Config,
+    dropdown_catalog: Option<Arc<DropdownCatalog>>,
+) -> Result<Option<JoinHandle<()>>> {
     let metadata_enabled = config.compaction.metadata_maintenance_enabled;
     let compaction_enabled = config.compaction.enabled;
 
@@ -24,7 +29,7 @@ pub async fn start_maintenance_scheduler(config: &Config) -> Result<Option<JoinH
         config.compaction.compaction_interval_seconds
     };
 
-    let executor = MaintenanceExecutor::new(config).await?;
+    let executor = MaintenanceExecutor::new(config, dropdown_catalog).await?;
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_seconds));
         loop {

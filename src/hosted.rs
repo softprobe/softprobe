@@ -11,7 +11,7 @@ use crate::inject::{
 };
 use axum::{
     body::Bytes,
-    extract::{Extension, Path, Request, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -22,6 +22,7 @@ use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::Span;
 use prost::Message;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -94,6 +95,74 @@ pub fn hosted_routes() -> axum::Router<AppState> {
         .route("/v1/sessions/{id}/state", get(v1_session_state))
         .route("/v1/inject", post(v1_inject))
         .route("/v1/captures/{capture_id}", get(v1_get_capture))
+        .route("/v1/catalog/entity-types", get(v1_catalog_entity_types))
+        .route("/v1/catalog/values", get(v1_catalog_values))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CatalogValuesQuery {
+    #[serde(rename = "entityType")]
+    pub entity_type: String,
+    #[serde(default = "default_catalog_limit")]
+    pub limit: i64,
+}
+
+fn default_catalog_limit() -> i64 {
+    500
+}
+
+async fn v1_catalog_entity_types(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let Some(cat) = state.dropdown_catalog.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "dropdown_catalog_unavailable"})),
+        ));
+    };
+    let days = cat.active_values_days();
+    match cat.list_entity_types(&tenant.tenant_id, days).await {
+        Ok(types) => Ok(Json(json!({ "entityTypes": types }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{}", e)})),
+        )),
+    }
+}
+
+async fn v1_catalog_values(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
+    Query(q): Query<CatalogValuesQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if q.entity_type.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "entityType is required"})),
+        ));
+    }
+    let Some(cat) = state.dropdown_catalog.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "dropdown_catalog_unavailable"})),
+        ));
+    };
+    let limit = q.limit.clamp(1, 10_000);
+    let days = cat.active_values_days();
+    match cat
+        .list_entity_values(&tenant.tenant_id, &q.entity_type, days, limit)
+        .await
+    {
+        Ok(values) => Ok(Json(json!({
+            "entityType": q.entity_type,
+            "values": values
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{}", e)})),
+        )),
+    }
 }
 
 async fn v1_create_session(

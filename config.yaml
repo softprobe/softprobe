@@ -41,3 +41,9 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
   data_inlining_row_limit: 10000
+
+# UI dropdown EAV (Postgres); requires ducklake.catalog_type=postgres
+dropdown_catalog:
+  enabled: false
+  active_values_days: 7
+  maintenance_prune_enabled: true

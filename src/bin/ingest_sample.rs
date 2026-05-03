@@ -11,7 +11,7 @@ use softprobe_runtime::config::Config;
 async fn main() {
     if std::env::var("MAINTENANCE_RUN_ONCE").ok().as_deref() == Some("1") {
         let config = Config::load().expect("failed to load config");
-        let executor = MaintenanceExecutor::new(&config)
+        let executor = MaintenanceExecutor::new(&config, None)
             .await
             .expect("failed to create maintenance executor");
         let summary = executor.run_once().await.expect("maintenance run failed");

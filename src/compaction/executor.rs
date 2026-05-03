@@ -1,3 +1,4 @@
+use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::storage::iceberg::IcebergCatalog;
 use anyhow::{anyhow, Result};
@@ -18,6 +19,7 @@ pub struct MaintenanceExecutor {
     catalog_api_base_url: Option<String>,
     catalog_token: Option<String>,
     ducklake: Option<crate::config::DuckLakeConfig>,
+    dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +192,10 @@ async fn resolve_catalog_api_base_url(
 }
 
 impl MaintenanceExecutor {
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(
+        config: &Config,
+        dropdown_catalog: Option<Arc<DropdownCatalog>>,
+    ) -> Result<Self> {
         let http_client = if std::env::var("ICEBERG_DISABLE_TLS_VALIDATION").is_ok() {
             reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
@@ -207,6 +212,7 @@ impl MaintenanceExecutor {
                 catalog_api_base_url: None,
                 catalog_token: None,
                 ducklake: Some(config.ducklake_or_default()),
+                dropdown_catalog,
             });
         }
 
@@ -237,6 +243,7 @@ impl MaintenanceExecutor {
             catalog_api_base_url: Some(catalog_api_base_url),
             catalog_token,
             ducklake: None,
+            dropdown_catalog,
         })
     }
 
@@ -361,6 +368,19 @@ impl MaintenanceExecutor {
                 },
             });
         }
+
+        if let Some(ref dc) = self.dropdown_catalog {
+            if self.config.dropdown_catalog.enabled
+                && self.config.dropdown_catalog.maintenance_prune_enabled
+            {
+                let days = self.config.dropdown_catalog.active_values_days;
+                match dc.prune_older_than_days(days).await {
+                    Ok(n) => info!("dropdown catalog TTL prune removed {} rows", n),
+                    Err(e) => warn!("dropdown catalog TTL prune failed: {}", e),
+                }
+            }
+        }
+
         Ok(MaintenanceSummary { tables: results })
     }
 

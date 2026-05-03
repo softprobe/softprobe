@@ -1,3 +1,4 @@
+use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::models::{Log, Metric, Span};
 use crate::storage::buffer::{FlushCallback, FlushFuture, PreAddCallback, PreAddFuture};
@@ -17,14 +18,14 @@ pub struct IngestEngine {
 pub struct IngestPipeline {
     pub storage: Storage,
     ingest_engine: Arc<IngestEngine>,
+    /// Shared with maintenance scheduler for TTL prune.
+    pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
     cache_dir: Option<PathBuf>,
 }
 
 impl IngestEngine {
-    pub async fn new(config: &Config) -> Result<Self> {
-        Ok(Self {
-            writer: Arc::new(DuckLakeWriter::new(config).await?),
-        })
+    pub fn new(writer: Arc<DuckLakeWriter>) -> Self {
+        Self { writer }
     }
 
     pub fn span_pre_add_callback(&self) -> Arc<PreAddCallback<Span>> {
@@ -87,8 +88,12 @@ impl IngestEngine {
 
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
-        let writer = Arc::new(DuckLakeWriter::new(config).await?);
-        let ingest_engine = Arc::new(IngestEngine::new(config).await?);
+        let dropdown_catalog = DropdownCatalog::connect(config).await?;
+        let writer = Arc::new(
+            DuckLakeWriter::new(config, dropdown_catalog.clone())
+                .await?,
+        );
+        let ingest_engine = Arc::new(IngestEngine::new(writer.clone()));
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
 
         let span_buffer = create_span_buffer(
@@ -121,6 +126,7 @@ impl IngestPipeline {
         Ok(Self {
             storage,
             ingest_engine,
+            dropdown_catalog,
             cache_dir,
         })
     }

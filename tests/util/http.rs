@@ -56,6 +56,7 @@ pub async fn start_test_server() -> (String, TempDir) {
         Some(pipeline.storage.metric_buffer.clone()),
         post(ingest_traces),
         None,
+        None,
     )
     .await
     .expect("router");

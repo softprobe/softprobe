@@ -1,6 +1,7 @@
 // Re-export key modules for testing
 pub mod api;
 pub mod authn;
+pub mod catalog;
 pub mod capture_export;
 pub mod compaction;
 pub mod config;

@@ -35,11 +35,16 @@ async fn main() -> anyhow::Result<()> {
 
     let pipeline = IngestPipeline::new(&config).await?;
     let storage = pipeline.storage.clone();
+    let dropdown_catalog = pipeline.dropdown_catalog.clone();
     let query_engine =
         softprobe_runtime::query::create_query_engine(&config, Arc::new(storage.clone())).await?;
 
     if let Some(_handle) =
-        softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(&config).await?
+        softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
+            &config,
+            dropdown_catalog.clone(),
+        )
+        .await?
     {
         info!("Maintenance scheduler started");
     }
@@ -60,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         Some(pipeline.storage.metric_buffer.clone()),
         traces,
         hosted.clone(),
+        dropdown_catalog,
     )
     .await?;
 

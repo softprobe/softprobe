@@ -3,6 +3,7 @@ pub mod ingestion;
 pub mod query;
 
 use crate::authn;
+use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
@@ -31,6 +32,8 @@ pub struct AppState {
     pub metric_buffer: Option<Arc<MetricBuffer>>,
     /// When set, `/v1/sessions`, `/v1/inject`, and hosted trace ingest are enabled.
     pub hosted: Option<HostedRuntime>,
+    /// UI dropdown metadata (Postgres EAV); requires `dropdown_catalog.enabled` and DuckLake+Postgres.
+    pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
 
 pub struct AppPipeline {
@@ -65,6 +68,7 @@ impl AppPipeline {
             Some(self.metric_buffer),
             post(ingestion::traces::ingest_traces),
             None,
+            None,
         )
         .await?;
         Ok(r)
@@ -79,6 +83,7 @@ pub async fn create_router(
     metric_buffer: Option<MetricBuffer>,
     traces: MethodRouter<AppState>,
     hosted: Option<HostedRuntime>,
+    dropdown_catalog: Option<Arc<DropdownCatalog>>,
 ) -> anyhow::Result<(Router, AppState)> {
     let state = AppState {
         storage: Arc::new(storage),
@@ -87,6 +92,7 @@ pub async fn create_router(
         log_buffer: log_buffer.map(Arc::new),
         metric_buffer: metric_buffer.map(Arc::new),
         hosted,
+        dropdown_catalog,
     };
 
     // OTLP standard endpoints (`with_state` closes the state type → `Router` is ready for `axum::serve`)

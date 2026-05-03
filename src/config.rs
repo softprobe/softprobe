@@ -17,6 +17,44 @@ pub struct Config {
     pub ducklake: Option<DuckLakeConfig>,
     #[serde(default)]
     pub schema_promotion: Option<SchemaPromotionConfig>,
+    #[serde(default)]
+    pub dropdown_catalog: DropdownCatalogConfig,
+}
+
+/// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for hosted UI filter dropdowns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropdownCatalogConfig {
+    #[serde(default = "default_dropdown_catalog_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_dropdown_catalog_active_days")]
+    pub active_values_days: u32,
+    #[serde(default = "default_dropdown_catalog_maintenance_prune")]
+    pub maintenance_prune_enabled: bool,
+    #[serde(default)]
+    pub skip_entity_columns: Vec<String>,
+}
+
+impl Default for DropdownCatalogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_dropdown_catalog_enabled(),
+            active_values_days: default_dropdown_catalog_active_days(),
+            maintenance_prune_enabled: default_dropdown_catalog_maintenance_prune(),
+            skip_entity_columns: Vec::new(),
+        }
+    }
+}
+
+fn default_dropdown_catalog_enabled() -> bool {
+    false
+}
+
+fn default_dropdown_catalog_active_days() -> u32 {
+    7
+}
+
+fn default_dropdown_catalog_maintenance_prune() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +370,7 @@ impl Default for Config {
                 data_inlining_row_limit: Some(0),
             }),
             schema_promotion: None,
+            dropdown_catalog: DropdownCatalogConfig::default(),
         }
     }
 }

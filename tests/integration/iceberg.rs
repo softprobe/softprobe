@@ -1590,7 +1590,7 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
 
     let mut config = load_test_config();
     if config.ducklake.is_some() {
-        let executor = MaintenanceExecutor::new(&config).await.unwrap();
+        let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
         let _ = executor.run_once().await.unwrap();
         return;
     }
@@ -1673,7 +1673,7 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
         snapshot_count_before
     );
 
-    let executor = MaintenanceExecutor::new(&config).await.unwrap();
+    let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
     let summary = executor
         .run_once_for_tables(&[table_ident.clone()])
         .await
