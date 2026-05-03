@@ -22,9 +22,19 @@ public class ClickHouseConfig {
         if (properties.getPassword() != null && !properties.getPassword().isEmpty()) {
             props.setProperty("password", properties.getPassword());
         }
-        props.setProperty("database", properties.getDatabase());
+        // Connect to 'default' database initially, we'll create the target database later
+        props.setProperty("database", "default");
+        // Disable compression to avoid LZ4 dependency issues
+        props.setProperty("compress", "0");
         
-        return new ClickHouseDataSource(properties.getUrl(), props);
+        // Always use 'default' database in URL for initial connection
+        // Extract host and port from the original URL
+        String url = properties.getUrl();
+        // Replace the database part with 'default'
+        // URL format: jdbc:clickhouse://host:port/database
+        url = url.replaceFirst("/([^/]+)$", "/default");
+        
+        return new ClickHouseDataSource(url, props);
     }
 }
 

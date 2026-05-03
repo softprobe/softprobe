@@ -35,11 +35,11 @@ import java.util.zip.CRC32;
 @Repository
 public class OtelCacheRepository implements SpanRepository {
 
-    private final RedisTemplate<String, String> redisTemplate;
+    private final RedisTemplate<String, String> redisTemplate; // Optional - can be null if Redis is not available
     private final ResourceLoader resourceLoader;
     private final StorageProperties storageProperties;
     private final InjectionProperties injectionProperties;
-    private final Storage storage;
+    private final Storage storage; // Optional - can be null if GCS is not configured
     private final com.google.gson.Gson gson = new com.google.gson.GsonBuilder()
             .registerTypeAdapter(Instant.class, new com.google.gson.JsonSerializer<Instant>() {
                 @Override
@@ -56,7 +56,7 @@ public class OtelCacheRepository implements SpanRepository {
             .create();
 
 
-    @Autowired
+    @Autowired(required = false)
     public OtelCacheRepository(RedisTemplate<String, String> redisTemplate,
                                ResourceLoader resourceLoader,
                                StorageProperties storageProperties,
@@ -202,13 +202,15 @@ public class OtelCacheRepository implements SpanRepository {
         }
 
         try {
-            // Check Redis index first
-            String redisKey = "req:" + requestHash;
-            String s3Key = redisTemplate.opsForValue().get(redisKey);
+            // Check Redis index first (if Redis is available)
+            if (redisTemplate != null) {
+                String redisKey = "req:" + requestHash;
+                String s3Key = redisTemplate.opsForValue().get(redisKey);
 
-            if (s3Key != null) {
-                // Fetch from storage
-                return fetchFromStorage(s3Key);
+                if (s3Key != null) {
+                    // Fetch from storage
+                    return fetchFromStorage(s3Key);
+                }
             }
         } catch (Exception e) {
             log.warn("Failed to lookup in cache for hash {}: {}", requestHash, e.getMessage());
@@ -339,16 +341,12 @@ public class OtelCacheRepository implements SpanRepository {
 
     private void storeInStorageAndIndex(String hash, Map<String, Object> responseData, String bucketName) {
         try {
-            log.info("=== Starting storeInStorageAndIndex with bucketName: {} ===", bucketName);
-            log.info("DEBUG: storageProperties.isGcs() = {}", storageProperties.isGcs());
+            log.debug("Storing span data in storage with bucketName: {}", bucketName);
             
-            if (storageProperties.isGcs()) {
-                log.info("DEBUG: About to call ensureBucketExists for bucket: {}", bucketName);
-                // 确保bucket存在
+            // For S3-compatible storage (MinIO), bucket should already exist (created by setup job)
+            // For GCS, we ensure bucket exists
+            if (storageProperties.isGcs() && storage != null) {
                 ensureBucketExists(bucketName);
-                log.info("=== After ensureBucketExists call ===");
-            } else {
-                log.info("DEBUG: Storage provider is not GCS, skipping bucket creation");
             }
             
             String date = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
@@ -366,14 +364,22 @@ public class OtelCacheRepository implements SpanRepository {
                 throw new IllegalStateException("Storage resource is not writable: " + storagePath);
             }
 
-            // Index in Redis
-            String redisKey = "req:" + hash;
-            redisTemplate.opsForValue().set(redisKey, storagePath, injectionProperties.getCacheTtlSeconds(), TimeUnit.SECONDS);
+            // Index in Redis (if Redis is available)
+            if (redisTemplate != null) {
+                try {
+                    String redisKey = "req:" + hash;
+                    redisTemplate.opsForValue().set(redisKey, storagePath, injectionProperties.getCacheTtlSeconds(), TimeUnit.SECONDS);
 
-            // Add to date index for cleanup
-            String dateIndexKey = "idx:date:" + date;
-            redisTemplate.opsForSet().add(dateIndexKey, hash);
-            redisTemplate.expire(dateIndexKey, injectionProperties.getCacheTtlSeconds(), TimeUnit.SECONDS);
+                    // Add to date index for cleanup
+                    String dateIndexKey = "idx:date:" + date;
+                    redisTemplate.opsForSet().add(dateIndexKey, hash);
+                    redisTemplate.expire(dateIndexKey, injectionProperties.getCacheTtlSeconds(), TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    log.warn("Failed to index in Redis (continuing without index): {}", e.getMessage());
+                }
+            } else {
+                log.debug("Redis not available, skipping index for hash: {}", hash);
+            }
 
             log.debug("Stored and indexed span data for hash {} in storage object {} (provider: {})",
                     hash, objectName, storageProperties.getProvider());
@@ -426,6 +432,9 @@ public class OtelCacheRepository implements SpanRepository {
     }
     
     private boolean bucketExists(String bucketName) throws StorageException {
+        if (storage == null) {
+            return false; // No storage configured
+        }
         try {
             com.google.cloud.storage.Bucket bucket = storage.get(bucketName);
             return bucket != null;
@@ -441,6 +450,10 @@ public class OtelCacheRepository implements SpanRepository {
     }
     
     private void createBucket(String bucketName) throws StorageException {
+        if (storage == null) {
+            log.warn("Storage not configured, cannot create bucket: {}", bucketName);
+            return;
+        }
         try {
             BucketInfo bucketInfo = BucketInfo.newBuilder(bucketName).build();
             storage.create(bucketInfo);

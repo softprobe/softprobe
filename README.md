@@ -67,9 +67,8 @@ curl -L https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/sc
 ### 2. Deploy the backend and context viewer
 
 ```bash
-# Deploy ClickHouse and Redis
+# Deploy ClickHouse
 kubectl apply -f deploy/quickstart/clickhouse.yaml
-kubectl apply -f deploy/quickstart/redis.yaml
 
 # Build and load backend image into Kind
 cd backend

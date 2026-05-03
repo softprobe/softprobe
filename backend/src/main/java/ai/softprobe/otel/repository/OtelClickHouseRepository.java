@@ -11,6 +11,7 @@ import io.opentelemetry.proto.metrics.v1.Metric;
 import io.opentelemetry.proto.common.v1.KeyValue;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Repository;
 
 import javax.sql.DataSource;
@@ -22,6 +23,7 @@ import java.util.zip.CRC32;
 
 @Slf4j
 @Repository
+@Primary
 public class OtelClickHouseRepository implements LogRepository, MetricRepository, SpanRepository {
 
     @Autowired
@@ -327,10 +329,8 @@ public class OtelClickHouseRepository implements LogRepository, MetricRepository
         row.put("kind", span.getKind().toString());
         row.put("name", span.getName());
         
-        Timestamp startTime = new Timestamp(span.getStartTimeUnixNano() / 1_000_000);
-        Timestamp endTime = new Timestamp(span.getEndTimeUnixNano() / 1_000_000);
-        row.put("start_time", startTime);
-        row.put("end_time", endTime);
+        row.put("start_time", Timestamp.from(Instant.ofEpochSecond(0, span.getStartTimeUnixNano())));
+        row.put("end_time", Timestamp.from(Instant.ofEpochSecond(0, span.getEndTimeUnixNano())));
         
         row.put("resource", gson.toJson(transformKeyValueList(resource.getAttributesList())));
         row.put("attributes", gson.toJson(transformKeyValueList(span.getAttributesList())));
@@ -361,10 +361,8 @@ public class OtelClickHouseRepository implements LogRepository, MetricRepository
         row.put("parent_span_id", span.getParentSpanId().isEmpty() ? null : bytesToHex(span.getParentSpanId().toByteArray()));
         row.put("name", span.getName());
         
-        Timestamp startTime = new Timestamp(span.getStartTimeUnixNano() / 1_000_000);
-        Timestamp endTime = new Timestamp(span.getEndTimeUnixNano() / 1_000_000);
-        row.put("start_time", startTime);
-        row.put("end_time", endTime);
+        row.put("start_time", Timestamp.from(Instant.ofEpochSecond(0, span.getStartTimeUnixNano())));
+        row.put("end_time", Timestamp.from(Instant.ofEpochSecond(0, span.getEndTimeUnixNano())));
         
         row.put("http_request_body", (String) attributes.get("http_request_body"));
         row.put("http_response_body", (String) attributes.get("http_response_body"));

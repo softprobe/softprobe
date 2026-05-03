@@ -8,20 +8,16 @@ spring:
       port: ${REDIS_PORT:6379}
       timeout: 30s
   cloud:
-    gcp:
-      storage:
-        bucket: ${GCS_BUCKET:softprobe-otel-data}
-        project-id: ${GCP_PROJECT_ID:}
-        credentials:
-          location: ${GCP_CREDENTIALS_PATH:}
     aws:
       region:
         static: ${AWS_REGION:us-east-1}
       s3:
-        bucket: ${S3_BUCKET:softprobe-otel-data}
+        endpoint: ${S3_ENDPOINT:http://minio:9000}
+        bucket: ${S3_BUCKET:otel-data}
+        path-style-access: true
       credentials:
-        access-key: ${AWS_ACCESS_KEY_ID:}
-        secret-key: ${AWS_SECRET_ACCESS_KEY:}
+        access-key: ${AWS_ACCESS_KEY_ID:minioadmin}
+        secret-key: ${AWS_SECRET_ACCESS_KEY:minioadmin}
 
 # ClickHouse configuration
 clickhouse:
@@ -39,8 +35,8 @@ clickhouse:
 
 # Multi-cloud storage configuration
 storage:
-  provider: ${STORAGE_PROVIDER:s3}  # "gcs" for Google Cloud Storage, "s3" for AWS S3
-  bucket-name: ${STORAGE_BUCKET:softprobe-otel-data}
+  provider: ${STORAGE_PROVIDER:s3}  # "s3" for S3-compatible storage (MinIO)
+  bucket-name: ${STORAGE_BUCKET:otel-data}
 
 # Injection cache configuration
 injection:

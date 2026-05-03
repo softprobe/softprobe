@@ -83,5 +83,77 @@ echo "⏳ Waiting for configuration processing..."
 sleep 10
 echo "✅ OpenTelemetry auto-instrumentation configuration applied"
 
+# 7. Deploy MinIO
+echo "📦 Deploying MinIO..."
+kubectl apply -f deploy/quickstart/minio.yaml
+echo "⏳ Waiting for MinIO to be ready..."
+kubectl wait --for=condition=ready pod -l app=minio -n otel-backend --timeout=120s
+echo "⏳ Waiting for MinIO bucket setup..."
+kubectl wait --for=condition=complete job/minio-setup -n otel-backend --timeout=60s 2>/dev/null || echo "⚠️  MinIO setup job may still be running"
+echo "✅ MinIO deployed"
+
+# 8. Deploy ClickHouse
+echo "📦 Deploying ClickHouse..."
+kubectl apply -f deploy/quickstart/clickhouse.yaml
+echo "⏳ Waiting for ClickHouse to be ready..."
+# Wait for StatefulSet to be ready, or fallback to pod wait
+if kubectl wait --for=condition=ready statefulset/clickhouse -n otel-backend --timeout=120s 2>/dev/null; then
+    echo "✅ ClickHouse StatefulSet ready"
+elif kubectl wait --for=condition=ready pod -l app=clickhouse -n otel-backend --timeout=120s 2>/dev/null; then
+    echo "✅ ClickHouse pod ready"
+else
+    echo "⚠️  ClickHouse wait timeout, but continuing..."
+    sleep 5
+fi
+echo "✅ ClickHouse deployed"
+
+# 9. Build and load backend image
+echo "🔨 Building backend image..."
+cd backend
+if ! docker build -t otel-backend:latest .; then
+    echo "❌ Backend build failed"
+    exit 1
+fi
+kind load docker-image otel-backend:latest --name $CLUSTER_NAME
+cd ..
+echo "✅ Backend image built and loaded"
+
+# 10. Deploy backend
+echo "🚀 Deploying backend..."
+kubectl apply -f deploy/quickstart/backend.yaml
+echo "⏳ Waiting for backend to be ready..."
+kubectl wait --for=condition=available --timeout=180s deployment/otel-backend -n otel-backend
+echo "✅ Backend deployed"
+
+# 11. Build and load context-viewer image
+echo "🔨 Building context-viewer image..."
+cd context-viewer
+if ! docker build -t context-viewer:latest .; then
+    echo "❌ Context-viewer build failed"
+    exit 1
+fi
+kind load docker-image context-viewer:latest --name $CLUSTER_NAME
+cd ..
+echo "✅ Context-viewer image built and loaded"
+
+# 12. Deploy context-viewer
+echo "🚀 Deploying context-viewer..."
+kubectl apply -f deploy/quickstart/context-viewer.yaml
+echo "⏳ Waiting for context-viewer to be ready..."
+kubectl wait --for=condition=available --timeout=180s deployment/context-viewer -n otel-backend
+echo "✅ Context-viewer deployed"
+
+# 13. Deploy WASM plugin pointing to local backend
+echo "🔌 Deploying WASM plugin..."
+kubectl apply -f deploy/quickstart/wasm-plugin.yaml
+echo "✅ WASM plugin deployed"
+
 echo ""
-echo "🎉 Basic environment setup completed!"
+echo "🎉 Full stack environment setup completed!"
+echo ""
+echo "Next steps:"
+echo "1. Deploy demo app: kubectl apply -f examples/travel/apps.yaml"
+echo "2. Port forward services:"
+echo "   - Backend: kubectl port-forward -n otel-backend svc/otel-backend 8080:8080"
+echo "   - Context-viewer: kubectl port-forward -n otel-backend svc/context-viewer 3000:3000"
+echo "   - Demo app: kubectl port-forward -n istio-system svc/istio-ingressgateway 8081:80"

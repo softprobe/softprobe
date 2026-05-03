@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.Objects;
 
 @Slf4j
 @Service
@@ -254,7 +255,7 @@ public class TraceViewService {
 
                                 Integer statusCode = rs.getObject("http_status_code", Integer.class);
                                 if (statusCode != null) {
-                                    builder.httpStatusCode(String.valueOf(statusCode));
+                                    builder.httpStatusCode(statusCode);
                                 }
 
                                 return builder.build();
@@ -344,11 +345,25 @@ public class TraceViewService {
                     if (!filteredSpans.isEmpty()) {
                         List<SessionTraceResponse.SpanInfo> hierarchicalSpans = buildSpanHierarchy(filteredSpans);
                         long traceDuration = calculateTraceDuration(hierarchicalSpans);
+                        
+                        // Calculate trace start and end times
+                        Instant traceStartTime = hierarchicalSpans.stream()
+                                .map(SessionTraceResponse.SpanInfo::getStartTime)
+                                .filter(Objects::nonNull)
+                                .min(Instant::compareTo)
+                                .orElse(Instant.now());
+                        Instant traceEndTime = hierarchicalSpans.stream()
+                                .map(SessionTraceResponse.SpanInfo::getEndTime)
+                                .filter(Objects::nonNull)
+                                .max(Instant::compareTo)
+                                .orElse(Instant.now());
 
                         SessionTraceResponse.TraceInfo traceInfo = SessionTraceResponse.TraceInfo.builder()
                                 .traceId(traceId)
                                 .spans(hierarchicalSpans)
                                 .totalDuration(traceDuration)
+                                .startTime(traceStartTime)
+                                .endTime(traceEndTime)
                                 .build();
 
                         traces.add(traceInfo);

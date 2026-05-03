@@ -5,9 +5,8 @@ This directory contains deployment manifests for running the full stack locally 
 ## Components
 
 1. **ClickHouse** - Database for storing spans
-2. **Redis** - Cache for request/response data
-3. **Otel Backend** - Spring Boot backend service
-4. **Context Viewer** - Next.js frontend for visualizing traces
+2. **Otel Backend** - Spring Boot backend service
+3. **Context Viewer** - Next.js frontend for visualizing traces
 
 ## Prerequisites
 
@@ -22,9 +21,8 @@ These steps integrate with the existing quick start flow:
 # 1. Set up Kind cluster, Istio, and OpenTelemetry Operator
 curl -L https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/scripts/cluster-setup.sh | sh
 
-# 2. Deploy backend infrastructure (ClickHouse, Redis)
+# 2. Deploy backend infrastructure (ClickHouse)
 kubectl apply -f deploy/quickstart/clickhouse.yaml
-kubectl apply -f deploy/quickstart/redis.yaml
 
 # 3. Build backend image and load into Kind
 cd backend
@@ -78,7 +76,6 @@ kubectl port-forward -n istio-system svc/istio-ingressgateway 8081:80
 
 Edit `backend.yaml` ConfigMap to customize:
 - ClickHouse connection settings
-- Redis connection settings
 - Storage provider (S3/GCS)
 - Cache TTL
 

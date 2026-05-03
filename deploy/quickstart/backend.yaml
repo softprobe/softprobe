@@ -9,11 +9,17 @@ data:
     server:
       port: 8080
     spring:
-      data:
-        redis:
-          host: redis
-          port: 6379
-          timeout: 30s
+      cloud:
+        aws:
+          region:
+            static: us-east-1
+          s3:
+            endpoint: http://minio:9000
+            bucket: otel-data
+            path-style-access: true
+          credentials:
+            access-key: minioadmin
+            secret-key: minioadmin
     clickhouse:
       url: jdbc:clickhouse://clickhouse:8123/default
       database: otel
@@ -55,10 +61,6 @@ spec:
           value: "jdbc:clickhouse://clickhouse:8123/default"
         - name: CLICKHOUSE_DATABASE
           value: "otel"
-        - name: REDIS_HOST
-          value: "redis"
-        - name: REDIS_PORT
-          value: "6379"
         volumeMounts:
         - name: config
           mountPath: /app/config

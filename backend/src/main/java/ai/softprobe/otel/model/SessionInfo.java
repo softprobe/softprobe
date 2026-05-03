@@ -35,7 +35,7 @@ public class SessionInfo {
     /**
      * HTTP status code for the session
      */
-    private String httpStatusCode;
+    private Integer httpStatusCode;
 
     private List<String> spanIds;
 }
