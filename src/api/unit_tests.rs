@@ -285,6 +285,8 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     let compiled = compile_details_sql(&target, None, 100).expect("compile details");
 
     assert!(compiled.spans.contains("FROM union_spans"));
+    assert!(compiled.spans.contains("http_request_body"));
+    assert!(compiled.spans.contains("http_response_body"));
     assert!(compiled.logs.contains("FROM union_logs"));
     assert!(compiled.metrics.contains("FROM union_metrics"));
     assert!(compiled.spans.contains("session_id = 'sess_abc'"));

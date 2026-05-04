@@ -12,7 +12,7 @@ use crate::inject::{
 use axum::{
     body::Bytes,
     extract::{Extension, Path, Query, Request, State},
-    http::{header, StatusCode},
+    http::{header, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -33,7 +33,7 @@ pub async fn hosted_auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
-    if !path.starts_with("/v1/") {
+    if !requires_hosted_auth(req.method(), path) {
         return Ok(next.run(req).await);
     }
 
@@ -58,6 +58,10 @@ pub async fn hosted_auth_middleware(
 
     req.extensions_mut().insert(info);
     Ok(next.run(req).await)
+}
+
+fn requires_hosted_auth(method: &Method, path: &str) -> bool {
+    path.starts_with("/v1/") && method != Method::OPTIONS
 }
 
 pub(crate) fn parse_bearer(h: &str) -> Option<String> {
@@ -708,7 +712,8 @@ async fn v1_get_capture(
 
 #[cfg(test)]
 mod bearer_tests {
-    use super::parse_bearer;
+    use super::{parse_bearer, requires_hosted_auth};
+    use axum::http::Method;
 
     #[test]
     fn parses_valid_bearer_token() {
@@ -727,5 +732,11 @@ mod bearer_tests {
         assert!(parse_bearer("Bearer ").is_none());
         assert!(parse_bearer("").is_none());
         assert!(parse_bearer("Basic x").is_none());
+    }
+
+    #[test]
+    fn skips_auth_for_v1_options_preflight() {
+        assert!(!requires_hosted_auth(&Method::OPTIONS, "/v1/telemetry/search"));
+        assert!(requires_hosted_auth(&Method::POST, "/v1/telemetry/search"));
     }
 }

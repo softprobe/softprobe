@@ -280,7 +280,10 @@ impl Span {
     }
 
     /// Extract HTTP data from span events
-    /// Looks for 'http.request' and 'http.response' events and extracts their attributes
+    /// Looks for `http.request` / `http.response` events and span-attribute fallbacks.
+    /// Request/response bodies accept the proxy/SDK keys (`http.request.body`, `http.response.body`)
+    /// and the OBI eBPF convention (`http.request.body.content`, `http.response.body.content`);
+    /// when both are present, the shorter legacy keys win.
     fn extract_http_data_from_events(&mut self) {
         // Find http.request event
         if let Some(request_event) = self.events.iter().find(|e| e.name == "http.request") {
@@ -288,7 +291,11 @@ impl Span {
                 .attributes
                 .get("http.request.headers")
                 .cloned();
-            self.http_request_body = request_event.attributes.get("http.request.body").cloned();
+            self.http_request_body = request_event
+                .attributes
+                .get("http.request.body")
+                .or_else(|| request_event.attributes.get("http.request.body.content"))
+                .cloned();
         }
 
         // Find http.response event
@@ -297,7 +304,11 @@ impl Span {
                 .attributes
                 .get("http.response.headers")
                 .cloned();
-            self.http_response_body = response_event.attributes.get("http.response.body").cloned();
+            self.http_response_body = response_event
+                .attributes
+                .get("http.response.body")
+                .or_else(|| response_event.attributes.get("http.response.body.content"))
+                .cloned();
         }
 
         // Fall back to span attributes when events do not carry HTTP payload fields.
@@ -305,13 +316,21 @@ impl Span {
             self.http_request_headers = self.attributes.get("http.request.headers").cloned();
         }
         if self.http_request_body.is_none() {
-            self.http_request_body = self.attributes.get("http.request.body").cloned();
+            self.http_request_body = self
+                .attributes
+                .get("http.request.body")
+                .or_else(|| self.attributes.get("http.request.body.content"))
+                .cloned();
         }
         if self.http_response_headers.is_none() {
             self.http_response_headers = self.attributes.get("http.response.headers").cloned();
         }
         if self.http_response_body.is_none() {
-            self.http_response_body = self.attributes.get("http.response.body").cloned();
+            self.http_response_body = self
+                .attributes
+                .get("http.response.body")
+                .or_else(|| self.attributes.get("http.response.body.content"))
+                .cloned();
         }
 
         // Extract standard HTTP attributes from span attributes
@@ -428,5 +447,117 @@ mod tests {
 
         assert_eq!(span.http_request_body.as_deref(), Some("from-event"));
         assert_eq!(span.http_response_body.as_deref(), Some("from-event"));
+    }
+
+    #[test]
+    fn extract_http_data_accepts_obi_body_content_on_span_attributes() {
+        let mut span = base_span();
+        span.attributes.insert(
+            "http.request.body.content".to_string(),
+            "{\"obi-req\":true}".to_string(),
+        );
+        span.attributes.insert(
+            "http.response.body.content".to_string(),
+            "{\"obi-res\":1}".to_string(),
+        );
+
+        span.extract_http_data_from_events();
+
+        assert_eq!(
+            span.http_request_body.as_deref(),
+            Some("{\"obi-req\":true}")
+        );
+        assert_eq!(span.http_response_body.as_deref(), Some("{\"obi-res\":1}"));
+    }
+
+    #[test]
+    fn extract_http_data_accepts_obi_body_content_on_http_events() {
+        let mut span = base_span();
+        let mut request_attrs = HashMap::new();
+        request_attrs.insert(
+            "http.request.body.content".to_string(),
+            "{\"from-obi-req\":true}".to_string(),
+        );
+        let mut response_attrs = HashMap::new();
+        response_attrs.insert(
+            "http.response.body.content".to_string(),
+            "{\"from-obi-res\":2}".to_string(),
+        );
+        span.events = vec![
+            SpanEvent {
+                name: "http.request".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: request_attrs,
+            },
+            SpanEvent {
+                name: "http.response".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: response_attrs,
+            },
+        ];
+
+        span.extract_http_data_from_events();
+
+        assert_eq!(
+            span.http_request_body.as_deref(),
+            Some("{\"from-obi-req\":true}")
+        );
+        assert_eq!(
+            span.http_response_body.as_deref(),
+            Some("{\"from-obi-res\":2}")
+        );
+    }
+
+    #[test]
+    fn extract_http_data_prefers_legacy_body_keys_when_both_conventions_present() {
+        let mut span = base_span();
+        span.attributes.insert(
+            "http.request.body".to_string(),
+            "legacy-req".to_string(),
+        );
+        span
+            .attributes
+            .insert("http.request.body.content".to_string(), "obi-req".to_string());
+        span.attributes.insert(
+            "http.response.body".to_string(),
+            "legacy-res".to_string(),
+        );
+        span.attributes.insert(
+            "http.response.body.content".to_string(),
+            "obi-res".to_string(),
+        );
+
+        span.extract_http_data_from_events();
+
+        assert_eq!(span.http_request_body.as_deref(), Some("legacy-req"));
+        assert_eq!(span.http_response_body.as_deref(), Some("legacy-res"));
+
+        let mut span2 = base_span();
+        let mut request_attrs = HashMap::new();
+        request_attrs.insert("http.request.body".to_string(), "legacy-req-ev".to_string());
+        request_attrs.insert("http.request.body.content".to_string(), "obi-req-ev".to_string());
+        let mut response_attrs = HashMap::new();
+        response_attrs.insert("http.response.body".to_string(), "legacy-res-ev".to_string());
+        response_attrs.insert(
+            "http.response.body.content".to_string(),
+            "obi-res-ev".to_string(),
+        );
+        span2.events = vec![
+            SpanEvent {
+                name: "http.request".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: request_attrs,
+            },
+            SpanEvent {
+                name: "http.response".to_string(),
+                timestamp: chrono::Utc::now(),
+                attributes: response_attrs,
+            },
+        ];
+
+        span2.extract_http_data_from_events();
+
+        assert_eq!(span2.http_request_body.as_deref(), Some("legacy-req-ev"));
+        assert_eq!(span2.http_response_body.as_deref(), Some("legacy-res-ev"));
     }
 }

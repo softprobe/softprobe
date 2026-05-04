@@ -288,7 +288,7 @@ pub fn compile_details_sql(
     Ok(CompiledDetailsSql {
         spans: detail_sql(
             "union_spans",
-            "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_response_status_code, attributes",
+            "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes",
             &span_filter,
             time_filter.as_deref(),
             limit,
