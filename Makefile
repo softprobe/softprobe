@@ -30,10 +30,10 @@ INTEGRATION_PERF_TESTS = \
 	performance::perf_view_recreate_stability \
 	performance::view_recreate_stability_local_stub
 
-# Some DuckDB-heavy integration tests can trigger process-level instability when run
-# in the full test binary. Run them in isolated cargo invocations.
-INTEGRATION_ISOLATED_TESTS = \
-	integration::iceberg::test_duckdb_union_read_realtime_performance
+# Some DuckDB-heavy integration::iceberg tests can trigger process-level instability
+# when executed together in one test binary process. Run every iceberg test in an
+# isolated cargo invocation.
+INTEGRATION_ISOLATED_TEST_PREFIX = integration::iceberg::
 
 # Ensure libduckdb is fetched when not present on host.
 # Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
@@ -189,8 +189,7 @@ test-local: check-local
 	@echo "📝 Configuration: tests/config/test.yaml"
 	@echo "🗄️  Backend: MinIO :9000 (DuckLake test data); metadata is per-run temp files"
 	@echo ""
-	SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --test-threads=1 --nocapture --skip integration::iceberg::test_duckdb_union_read_realtime_performance
-	@for test_name in $(INTEGRATION_ISOLATED_TESTS); do \
+	@for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
 		echo "🧪 Running integration $$test_name in an isolated process..."; \
 		SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) $$test_name -- --test-threads=1 --nocapture || exit $$?; \
 	done

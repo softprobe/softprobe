@@ -160,10 +160,13 @@ services:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
+      - DUCKLAKE_PG_URI=postgres://ducklake:ducklake@ducklake-postgres:5432/ducklake
+      - DUCKLAKE_METADATA_SCHEMA=softprobe
+      - GCS_HMAC_ACCESS_KEY_ID=minioadmin
+      - GCS_HMAC_SECRET=minioadmin
       - SOFTPROBE_AUTH_URL=http://auth-mock:8080/validate
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - GCS_BUCKET=warehouse
       - OTEL_GRPC_PORT=4317
       - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
     volumes:

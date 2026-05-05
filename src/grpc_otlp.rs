@@ -1,6 +1,6 @@
 //! OTLP/gRPC trace ingest (`TraceService/Export`) — mirrors HTTP `/v1/traces` behavior.
 //!
-//! When [`AppState::control_plane`] is set, requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
+//! Requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
 //! Listens on `OTEL_GRPC_PORT` (default **4317**) unless the process sets `SOFTPROBE_GRPC_DISABLE=1`.
 
 use crate::api::AppState;
@@ -37,7 +37,7 @@ impl TraceService for GrpcTraceService {
             .state
             .control_plane
             .as_ref()
-            .ok_or_else(|| Status::failed_precondition("control-plane mode not configured"))?;
+            .ok_or_else(|| Status::internal("gRPC ingest requires control-plane runtime"))?;
         let tenant = control_plane
             .resolver
             .resolve(&token)
@@ -55,6 +55,9 @@ pub async fn run_trace_grpc_server(
     addr: std::net::SocketAddr,
     state: AppState,
 ) -> anyhow::Result<()> {
+    if state.control_plane.is_none() {
+        anyhow::bail!("gRPC ingest requires control-plane runtime");
+    }
     let svc = GrpcTraceService { state };
     Server::builder()
         .add_service(TraceServiceServer::new(svc))
@@ -68,7 +71,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn grpc_export_empty_trace_without_control_plane_fails_precondition() {
+    async fn grpc_export_empty_trace_without_auth_is_unauthenticated() {
+        let (_r, state, _t) = crate::test_support::local_router_and_state()
+            .await
+            .expect("state");
+        assert!(state.control_plane.is_none());
+        let svc = GrpcTraceService { state };
+        let req = Request::new(ExportTraceServiceRequest::default());
+        let got = TraceService::export(&svc, req).await;
+        let err = got.expect_err("gRPC export should fail without auth");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(
+            err.message()
+                .contains("missing or invalid authorization metadata"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_export_with_auth_without_control_plane_is_internal_error() {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
@@ -78,10 +99,10 @@ mod tests {
         req.metadata_mut()
             .insert("authorization", "Bearer test-token".parse().unwrap());
         let got = TraceService::export(&svc, req).await;
-        let err = got.expect_err("without control-plane gRPC should fail");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        let err = got.expect_err("gRPC export should fail without control-plane runtime");
+        assert_eq!(err.code(), tonic::Code::Internal);
         assert!(
-            err.message().contains("control-plane mode not configured"),
+            err.message().contains("requires control-plane runtime"),
             "{err}"
         );
     }

@@ -1,4 +1,4 @@
-//! Local (without control-plane) router + config helpers for `#[cfg(test)]` modules (`cargo test --lib` / `llvm-cov --lib`).
+//! Local router + config helpers for `#[cfg(test)]` modules (`cargo test --lib` / `llvm-cov --lib`).
 //! Mirrors `tests/util/config.rs` so unit tests do not depend on the integration-test crate.
 
 use crate::api::ingestion::traces::ingest_traces;
@@ -52,7 +52,7 @@ pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempD
     Ok((router, state, temp))
 }
 
-/// Builds the local (without control-plane) router (same as `AppPipeline::into_router()`).
+/// Builds the local test router (same as `AppPipeline::into_router()`).
 pub async fn local_router() -> anyhow::Result<(Router, TempDir)> {
     let (router, _, temp) = local_router_and_state().await?;
     Ok((router, temp))

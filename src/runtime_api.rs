@@ -4,6 +4,7 @@ use crate::api::ingestion::traces::process_traces;
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::capture_export::{build_capture_json, capture_query_sql};
+use crate::config::Config;
 use crate::inject::{
     build_error_response, build_mock_response, case_embedded_rules, encode_inject_response_proto,
     is_strict_external_http_policy, normalize_otlp_body, parse_inject_lookup,
@@ -37,10 +38,6 @@ pub async fn runtime_auth_middleware(
         return Ok(next.run(req).await);
     }
 
-    if state.control_plane.is_none() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-
     let auth = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -49,7 +46,10 @@ pub async fn runtime_auth_middleware(
 
     let token = parse_bearer(auth).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let control_plane = state.control_plane.as_ref().unwrap();
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime auth middleware requires control-plane state");
     let info = control_plane
         .resolver
         .resolve(&token)
@@ -71,6 +71,7 @@ struct DuckLakeConnectionMaterial {
     tenant_id: String,
     ducklake_pg_uri: String,
     ducklake_metadata_schema: String,
+    ducklake_data_path: String,
     gcs_bucket: String,
     gcs_hmac_access_key_id: String,
     gcs_hmac_secret: String,
@@ -78,11 +79,35 @@ struct DuckLakeConnectionMaterial {
 }
 
 fn ducklake_connection_material(tenant: &TenantInfo) -> Result<DuckLakeConnectionMaterial, String> {
-    let ducklake_pg_uri = required_env("DUCKLAKE_PG_URI")?;
-    let gcs_hmac_access_key_id = required_env("GCS_HMAC_ACCESS_KEY_ID")?;
-    let gcs_hmac_secret = required_env("GCS_HMAC_SECRET")?;
-    let ducklake_metadata_schema =
-        std::env::var("DUCKLAKE_METADATA_SCHEMA").unwrap_or_else(|_| "softprobe".to_string());
+    let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
+    let ducklake = config.ducklake_or_default();
+    let ducklake_pg_uri = postgres_ducklake_metadata_path(&ducklake);
+    let ducklake_data_path = ducklake.data_path.clone();
+    let ducklake_metadata_schema = ducklake.metadata_schema.clone();
+    let gcs_hmac_access_key_id = config.s3.access_key_id.clone();
+    let gcs_hmac_secret = config.s3.secret_access_key.clone();
+
+    if ducklake.catalog_type != "postgres" {
+        return Err(format!(
+            "ducklake.catalog_type must be postgres for agent setup, got {}",
+            ducklake.catalog_type
+        ));
+    }
+    if ducklake_pg_uri.trim().is_empty() {
+        return Err("DuckLake Postgres metadata path is required".to_string());
+    }
+    if ducklake_data_path.trim().is_empty() {
+        return Err("DuckLake data path is required".to_string());
+    }
+    if path_requires_hmac(&ducklake_data_path)
+        && (gcs_hmac_access_key_id.as_deref().unwrap_or("").trim().is_empty()
+            || gcs_hmac_secret.as_deref().unwrap_or("").trim().is_empty())
+    {
+        return Err(
+            "GCS/S3 DuckLake data path requires config.s3.access_key_id and config.s3.secret_access_key"
+                .to_string(),
+        );
+    }
     if tenant.bucket_name.trim().is_empty() {
         return Err("tenant is missing bucket_name".to_string());
     }
@@ -92,20 +117,26 @@ fn ducklake_connection_material(tenant: &TenantInfo) -> Result<DuckLakeConnectio
         tenant_id: tenant.tenant_id.clone(),
         ducklake_pg_uri,
         ducklake_metadata_schema,
+        ducklake_data_path,
         gcs_bucket: tenant.bucket_name.clone(),
-        gcs_hmac_access_key_id,
-        gcs_hmac_secret,
+        gcs_hmac_access_key_id: gcs_hmac_access_key_id.unwrap_or_default(),
+        gcs_hmac_secret: gcs_hmac_secret.unwrap_or_default(),
         schema_version: "1".to_string(),
     })
 }
 
-fn required_env(name: &str) -> Result<String, String> {
-    let value = std::env::var(name).map_err(|_| format!("{name} is required"))?;
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return Err(format!("{name} is required"));
+fn postgres_ducklake_metadata_path(ducklake: &crate::config::DuckLakeConfig) -> String {
+    let metadata_path = ducklake.metadata_path.trim();
+    if metadata_path.starts_with("postgres:") {
+        metadata_path.trim_start_matches("postgres:").to_string()
+    } else {
+        metadata_path.to_string()
     }
-    Ok(value)
+}
+
+fn path_requires_hmac(data_path: &str) -> bool {
+    let p = data_path.trim();
+    p.starts_with("gs://") || p.starts_with("s3://")
 }
 
 #[cfg(test)]
@@ -119,12 +150,28 @@ mod data_connection_tests {
     }
 
     #[test]
-    fn ducklake_connection_material_uses_env_and_tenant_scope() {
+    fn ducklake_connection_material_uses_runtime_config_and_tenant_scope() {
         let _guard = env_lock();
-        std::env::set_var("DUCKLAKE_PG_URI", "postgres://reader@pg/ducklake");
-        std::env::set_var("DUCKLAKE_METADATA_SCHEMA", "tenant_meta");
-        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "access-id");
-        std::env::set_var("GCS_HMAC_SECRET", "secret-value");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("runtime.yaml");
+        let mut config = Config::default();
+        let mut ducklake = config.ducklake_or_default();
+        ducklake.catalog_type = "postgres".to_string();
+        ducklake.metadata_path =
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
+        ducklake.data_path = "./warehouse/ducklake/data/".to_string();
+        ducklake.metadata_schema = "tenant_meta".to_string();
+        config.ducklake = Some(ducklake);
+        config.s3.access_key_id = None;
+        config.s3.secret_access_key = None;
+        std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
+            .expect("write config");
+        std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
+        std::env::remove_var("DUCKLAKE_PG_URI");
+        std::env::remove_var("DUCKLAKE_DATA_PATH");
+        std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
+        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCS_HMAC_SECRET");
 
         let tenant = TenantInfo {
             tenant_id: "tenant-123".to_string(),
@@ -135,23 +182,41 @@ mod data_connection_tests {
         let material = ducklake_connection_material(&tenant).expect("connection material");
         assert_eq!(material.version, 1);
         assert_eq!(material.tenant_id, "tenant-123");
-        assert_eq!(material.ducklake_pg_uri, "postgres://reader@pg/ducklake");
+        assert_eq!(
+            material.ducklake_pg_uri,
+            "host=pg port=5432 dbname=ducklake user=reader password=secret"
+        );
         assert_eq!(material.ducklake_metadata_schema, "tenant_meta");
+        assert_eq!(material.ducklake_data_path, "./warehouse/ducklake/data/");
         assert_eq!(material.gcs_bucket, "softprobe-tenant-bucket");
-        assert_eq!(material.gcs_hmac_access_key_id, "access-id");
-        assert_eq!(material.gcs_hmac_secret, "secret-value");
+        assert_eq!(material.gcs_hmac_access_key_id, "");
+        assert_eq!(material.gcs_hmac_secret, "");
         assert_eq!(material.schema_version, "1");
 
-        std::env::remove_var("DUCKLAKE_PG_URI");
-        std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
-        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
-        std::env::remove_var("GCS_HMAC_SECRET");
+        std::env::remove_var("CONFIG_FILE");
     }
 
     #[test]
-    fn ducklake_connection_material_requires_pg_uri() {
+    fn ducklake_connection_material_ignores_env_overrides_and_uses_config() {
         let _guard = env_lock();
-        std::env::remove_var("DUCKLAKE_PG_URI");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("runtime.yaml");
+        let mut config = Config::default();
+        let mut ducklake = config.ducklake_or_default();
+        ducklake.catalog_type = "postgres".to_string();
+        ducklake.metadata_path =
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
+        ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
+        ducklake.metadata_schema = "config_schema".to_string();
+        config.ducklake = Some(ducklake);
+        config.s3.access_key_id = Some("config-access-id".to_string());
+        config.s3.secret_access_key = Some("config-secret".to_string());
+        std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
+            .expect("write config");
+        std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
+        std::env::set_var("DUCKLAKE_PG_URI", "host=override port=5432 dbname=ducklake");
+        std::env::set_var("DUCKLAKE_METADATA_SCHEMA", "override_schema");
+        std::env::set_var("DUCKLAKE_DATA_PATH", "gs://override/ducklake/data/");
         std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "access-id");
         std::env::set_var("GCS_HMAC_SECRET", "secret-value");
 
@@ -161,11 +226,57 @@ mod data_connection_tests {
             dataset_id: "ignored".to_string(),
         };
 
-        let err = ducklake_connection_material(&tenant).expect_err("missing pg uri should fail");
-        assert!(err.contains("DUCKLAKE_PG_URI"));
+        let material = ducklake_connection_material(&tenant).expect("connection material");
+        assert_eq!(
+            material.ducklake_pg_uri,
+            "host=pg port=5432 dbname=ducklake user=reader password=secret"
+        );
+        assert_eq!(material.ducklake_metadata_schema, "config_schema");
+        assert_eq!(material.ducklake_data_path, "gs://bucket/ducklake/data/");
+        assert_eq!(material.gcs_hmac_access_key_id, "config-access-id");
+        assert_eq!(material.gcs_hmac_secret, "config-secret");
 
+        std::env::remove_var("CONFIG_FILE");
+        std::env::remove_var("DUCKLAKE_PG_URI");
+        std::env::remove_var("DUCKLAKE_DATA_PATH");
+        std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
         std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
         std::env::remove_var("GCS_HMAC_SECRET");
+    }
+
+    #[test]
+    fn ducklake_connection_material_requires_hmac_for_gcs_path() {
+        let _guard = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("runtime.yaml");
+        let mut config = Config::default();
+        let mut ducklake = config.ducklake_or_default();
+        ducklake.catalog_type = "postgres".to_string();
+        ducklake.metadata_path =
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
+        ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
+        config.ducklake = Some(ducklake);
+        config.s3.access_key_id = None;
+        config.s3.secret_access_key = None;
+        std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
+            .expect("write config");
+        std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
+        std::env::remove_var("DUCKLAKE_PG_URI");
+        std::env::remove_var("DUCKLAKE_DATA_PATH");
+        std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
+        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCS_HMAC_SECRET");
+
+        let tenant = TenantInfo {
+            tenant_id: "tenant-123".to_string(),
+            bucket_name: "softprobe-tenant-bucket".to_string(),
+            dataset_id: "ignored".to_string(),
+        };
+
+        let err = ducklake_connection_material(&tenant).expect_err("missing hmac should fail");
+        assert!(err.contains("config.s3.access_key_id"));
+
+        std::env::remove_var("CONFIG_FILE");
     }
 }
 
@@ -322,7 +433,7 @@ async fn v1_list_sessions(
     let control_plane = state
         .control_plane
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .expect("runtime control routes require control-plane state");
     let mut store = control_plane.session_store.lock().await;
     let list = store.list().await;
     let sessions: Vec<_> = list
