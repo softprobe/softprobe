@@ -1,13 +1,14 @@
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::api::{self, HostedRuntime};
+use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
-use softprobe_runtime::hosted::{hosted_auth_middleware, hosted_post_v1_traces, hosted_routes};
 use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::runtime_api::{
+    runtime_auth_middleware, runtime_control_routes, runtime_post_v1_traces,
+};
 use softprobe_runtime::session_redis::RedisStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,13 +49,8 @@ async fn main() -> anyhow::Result<()> {
         info!("Maintenance scheduler started");
     }
 
-    let hosted = hosted_runtime_from_env().await?;
-
-    let traces = if hosted.is_some() {
-        post(hosted_post_v1_traces)
-    } else {
-        post(ingest_traces)
-    };
+    let control_plane = control_plane_runtime_from_env().await?;
+    let traces = post(runtime_post_v1_traces);
 
     let (mut app, state) = api::create_router(
         storage.clone(),
@@ -63,14 +59,11 @@ async fn main() -> anyhow::Result<()> {
         Some(pipeline.storage.log_buffer.clone()),
         Some(pipeline.storage.metric_buffer.clone()),
         traces,
-        hosted.clone(),
+        Some(control_plane.clone()),
         dropdown_catalog,
     )
     .await?;
-
-    if hosted.is_some() {
-        app = app.merge(hosted_routes().with_state(state.clone()));
-    }
+    app = app.merge(runtime_control_routes().with_state(state.clone()));
 
     let app = app
         .layer(
@@ -81,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 .layer(DefaultBodyLimit::max(config.server.max_body_size))
                 .into_inner(),
         )
-        .layer(from_fn_with_state(state.clone(), hosted_auth_middleware));
+        .layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
 
     // OTLP/gRPC (4317). Set `SOFTPROBE_GRPC_DISABLE=1` to skip (e.g. port conflicts in tests).
     if !std::env::var("SOFTPROBE_GRPC_DISABLE")
@@ -113,15 +106,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn hosted_runtime_from_env() -> anyhow::Result<Option<HostedRuntime>> {
-    let auth = match std::env::var("SOFTPROBE_AUTH_URL") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(None),
-    };
-    let redis_host = match std::env::var("REDIS_HOST") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(None),
-    };
+async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime> {
+    let auth = required_env("SOFTPROBE_AUTH_URL")?;
+    let redis_host = required_env("REDIS_HOST")?;
+    let _gcs_bucket = required_env("GCS_BUCKET")?;
     let port: u16 = std::env::var("REDIS_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -138,8 +126,17 @@ async fn hosted_runtime_from_env() -> anyhow::Result<Option<HostedRuntime>> {
     )
     .await?;
     let resolver = Resolver::new(auth, Duration::from_secs(60));
-    Ok(Some(HostedRuntime {
+    Ok(ControlPlaneRuntime {
         resolver,
         session_store: Arc::new(tokio::sync::Mutex::new(store)),
-    }))
+    })
+}
+
+fn required_env(name: &str) -> anyhow::Result<String> {
+    let value = std::env::var(name).unwrap_or_default();
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        anyhow::bail!("{name} is required in control-plane-only runtime mode");
+    }
+    Ok(value)
 }

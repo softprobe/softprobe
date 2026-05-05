@@ -11,14 +11,16 @@ use crate::query::{self as query_engine, QueryEngine};
 use crate::session_redis::RedisStore;
 use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
 use axum::{
+    response::Html,
     routing::{get, post, MethodRouter},
-    Router,
+    Json, Router,
 };
+use serde_json::json;
 use std::sync::Arc;
 
-/// Hosted control-plane dependencies (sessions, inject). Present when `SOFTPROBE_AUTH_URL` + Redis are configured.
+/// Control-plane dependencies (sessions, inject).
 #[derive(Clone)]
-pub struct HostedRuntime {
+pub struct ControlPlaneRuntime {
     pub resolver: authn::Resolver,
     pub session_store: Arc<tokio::sync::Mutex<RedisStore>>,
 }
@@ -31,8 +33,8 @@ pub struct AppState {
     pub span_buffer: Option<Arc<SpanBuffer>>,
     pub log_buffer: Option<Arc<LogBuffer>>,
     pub metric_buffer: Option<Arc<MetricBuffer>>,
-    /// When set, `/v1/sessions`, `/v1/inject`, and hosted trace ingest are enabled.
-    pub hosted: Option<HostedRuntime>,
+    /// When set, `/v1/sessions`, `/v1/inject`, and control-plane trace ingest are enabled.
+    pub control_plane: Option<ControlPlaneRuntime>,
     /// UI dropdown metadata (Postgres EAV); requires `dropdown_catalog.enabled` and DuckLake+Postgres.
     pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
@@ -83,7 +85,7 @@ pub async fn create_router(
     log_buffer: Option<LogBuffer>,
     metric_buffer: Option<MetricBuffer>,
     traces: MethodRouter<AppState>,
-    hosted: Option<HostedRuntime>,
+    control_plane: Option<ControlPlaneRuntime>,
     dropdown_catalog: Option<Arc<DropdownCatalog>>,
 ) -> anyhow::Result<(Router, AppState)> {
     let state = AppState {
@@ -92,7 +94,7 @@ pub async fn create_router(
         span_buffer: span_buffer.map(Arc::new),
         log_buffer: log_buffer.map(Arc::new),
         metric_buffer: metric_buffer.map(Arc::new),
-        hosted,
+        control_plane,
         dropdown_catalog,
     };
 
@@ -100,6 +102,8 @@ pub async fn create_router(
     let router = Router::new()
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
+        .route("/openapi.json", get(openapi_spec))
+        .route("/swagger", get(swagger_ui))
         .route("/v1/traces", traces)
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
@@ -122,6 +126,49 @@ pub async fn create_router(
         .with_state(state.clone());
 
     Ok((router, state))
+}
+
+async fn openapi_spec() -> Json<serde_json::Value> {
+    Json(json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Softprobe Runtime API",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "paths": {
+            "/health": { "get": { "summary": "Health check" } },
+            "/ready": { "get": { "summary": "Readiness check" } },
+            "/v1/traces": { "post": { "summary": "Ingest traces" } },
+            "/v1/logs": { "post": { "summary": "Ingest logs" } },
+            "/v1/metrics": { "post": { "summary": "Ingest metrics" } },
+            "/v1/query/sql": { "post": { "summary": "Execute SQL query" } },
+            "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
+            "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
+            "/v1/data/ducklake-connection": { "get": { "summary": "DuckLake setup material" } },
+            "/v1/sessions": { "post": { "summary": "Create session" }, "get": { "summary": "List sessions" } }
+        }
+    }))
+}
+
+async fn swagger_ui() -> Html<&'static str> {
+    Html(
+        r##"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Softprobe Runtime API</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({ url: "/openapi.json", dom_id: "#swagger-ui" });
+    </script>
+  </body>
+</html>"#,
+ </html>"##,
+    )
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ pub struct Config {
     pub dropdown_catalog: DropdownCatalogConfig,
 }
 
-/// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for hosted UI filter dropdowns.
+/// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for control-plane UI filter dropdowns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropdownCatalogConfig {
     #[serde(default = "default_dropdown_catalog_enabled")]

@@ -1,11 +1,10 @@
 //! OTLP/gRPC trace ingest (`TraceService/Export`) — mirrors HTTP `/v1/traces` behavior.
 //!
-//! When [`AppState::hosted`] is set, requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
+//! When [`AppState::control_plane`] is set, requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
 //! Listens on `OTEL_GRPC_PORT` (default **4317**) unless the process sets `SOFTPROBE_GRPC_DISABLE=1`.
 
-use crate::api::ingestion::traces::process_traces;
 use crate::api::AppState;
-use crate::hosted::{hosted_export_trace_request, parse_bearer};
+use crate::runtime_api::{parse_bearer, runtime_export_trace_request};
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
     TraceService, TraceServiceServer,
 };
@@ -30,28 +29,22 @@ impl TraceService for GrpcTraceService {
         let inner = request.into_inner();
         let body_size = inner.encoded_len();
 
-        if self.state.hosted.is_some() {
-            let auth_val = metadata.get("authorization").and_then(|v| v.to_str().ok());
-            let token = auth_val.and_then(parse_bearer).ok_or_else(|| {
-                Status::unauthenticated("missing or invalid authorization metadata")
-            })?;
-            let hosted = self
-                .state
-                .hosted
-                .as_ref()
-                .ok_or_else(|| Status::failed_precondition("hosted mode not configured"))?;
-            let tenant = hosted
-                .resolver
-                .resolve(&token)
-                .await
-                .map_err(|_| Status::permission_denied("tenant resolution failed"))?;
-            hosted_export_trace_request(self.state.clone(), &tenant, inner)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-            return Ok(Response::new(ExportTraceServiceResponse::default()));
-        }
-
-        process_traces(self.state.clone(), inner, body_size)
+        let auth_val = metadata.get("authorization").and_then(|v| v.to_str().ok());
+        let token = auth_val
+            .and_then(parse_bearer)
+            .ok_or_else(|| Status::unauthenticated("missing or invalid authorization metadata"))?;
+        let control_plane = self
+            .state
+            .control_plane
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("control-plane mode not configured"))?;
+        let tenant = control_plane
+            .resolver
+            .resolve(&token)
+            .await
+            .map_err(|_| Status::permission_denied("tenant resolution failed"))?;
+        let _ = body_size;
+        runtime_export_trace_request(self.state.clone(), &tenant, inner)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
@@ -75,14 +68,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn grpc_export_empty_trace_non_hosted_ok() {
+    async fn grpc_export_empty_trace_without_control_plane_fails_precondition() {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
-        assert!(state.hosted.is_none());
+        assert!(state.control_plane.is_none());
         let svc = GrpcTraceService { state };
-        let got =
-            TraceService::export(&svc, Request::new(ExportTraceServiceRequest::default())).await;
-        assert!(got.is_ok(), "{:?}", got);
+        let mut req = Request::new(ExportTraceServiceRequest::default());
+        req.metadata_mut()
+            .insert("authorization", "Bearer test-token".parse().unwrap());
+        let got = TraceService::export(&svc, req).await;
+        let err = got.expect_err("without control-plane gRPC should fail");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("control-plane mode not configured"),
+            "{err}"
+        );
     }
 }

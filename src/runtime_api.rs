@@ -1,4 +1,4 @@
-//! Hosted control API + tenant-scoped OTLP trace ingest.
+//! Runtime control API + tenant-scoped OTLP trace ingest.
 
 use crate::api::ingestion::traces::process_traces;
 use crate::api::AppState;
@@ -22,22 +22,22 @@ use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::Span;
 use prost::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
 /// Require `Authorization: Bearer` for `/v1/*`, resolve tenant, store [`TenantInfo`] in extensions.
-pub async fn hosted_auth_middleware(
+pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
-    if !requires_hosted_auth(req.method(), path) {
+    if !requires_runtime_auth(req.method(), path) {
         return Ok(next.run(req).await);
     }
 
-    if state.hosted.is_none() {
+    if state.control_plane.is_none() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -49,8 +49,8 @@ pub async fn hosted_auth_middleware(
 
     let token = parse_bearer(auth).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let hosted = state.hosted.as_ref().unwrap();
-    let info = hosted
+    let control_plane = state.control_plane.as_ref().unwrap();
+    let info = control_plane
         .resolver
         .resolve(&token)
         .await
@@ -60,8 +60,113 @@ pub async fn hosted_auth_middleware(
     Ok(next.run(req).await)
 }
 
-fn requires_hosted_auth(method: &Method, path: &str) -> bool {
+fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     path.starts_with("/v1/") && method != Method::OPTIONS
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DuckLakeConnectionMaterial {
+    version: u8,
+    tenant_id: String,
+    ducklake_pg_uri: String,
+    ducklake_metadata_schema: String,
+    gcs_bucket: String,
+    gcs_hmac_access_key_id: String,
+    gcs_hmac_secret: String,
+    schema_version: String,
+}
+
+fn ducklake_connection_material(tenant: &TenantInfo) -> Result<DuckLakeConnectionMaterial, String> {
+    let ducklake_pg_uri = required_env("DUCKLAKE_PG_URI")?;
+    let gcs_hmac_access_key_id = required_env("GCS_HMAC_ACCESS_KEY_ID")?;
+    let gcs_hmac_secret = required_env("GCS_HMAC_SECRET")?;
+    let ducklake_metadata_schema =
+        std::env::var("DUCKLAKE_METADATA_SCHEMA").unwrap_or_else(|_| "softprobe".to_string());
+    if tenant.bucket_name.trim().is_empty() {
+        return Err("tenant is missing bucket_name".to_string());
+    }
+
+    Ok(DuckLakeConnectionMaterial {
+        version: 1,
+        tenant_id: tenant.tenant_id.clone(),
+        ducklake_pg_uri,
+        ducklake_metadata_schema,
+        gcs_bucket: tenant.bucket_name.clone(),
+        gcs_hmac_access_key_id,
+        gcs_hmac_secret,
+        schema_version: "1".to_string(),
+    })
+}
+
+fn required_env(name: &str) -> Result<String, String> {
+    let value = std::env::var(name).map_err(|_| format!("{name} is required"))?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(format!("{name} is required"));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod data_connection_tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn ducklake_connection_material_uses_env_and_tenant_scope() {
+        let _guard = env_lock();
+        std::env::set_var("DUCKLAKE_PG_URI", "postgres://reader@pg/ducklake");
+        std::env::set_var("DUCKLAKE_METADATA_SCHEMA", "tenant_meta");
+        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "access-id");
+        std::env::set_var("GCS_HMAC_SECRET", "secret-value");
+
+        let tenant = TenantInfo {
+            tenant_id: "tenant-123".to_string(),
+            bucket_name: "softprobe-tenant-bucket".to_string(),
+            dataset_id: "ignored".to_string(),
+        };
+
+        let material = ducklake_connection_material(&tenant).expect("connection material");
+        assert_eq!(material.version, 1);
+        assert_eq!(material.tenant_id, "tenant-123");
+        assert_eq!(material.ducklake_pg_uri, "postgres://reader@pg/ducklake");
+        assert_eq!(material.ducklake_metadata_schema, "tenant_meta");
+        assert_eq!(material.gcs_bucket, "softprobe-tenant-bucket");
+        assert_eq!(material.gcs_hmac_access_key_id, "access-id");
+        assert_eq!(material.gcs_hmac_secret, "secret-value");
+        assert_eq!(material.schema_version, "1");
+
+        std::env::remove_var("DUCKLAKE_PG_URI");
+        std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
+        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCS_HMAC_SECRET");
+    }
+
+    #[test]
+    fn ducklake_connection_material_requires_pg_uri() {
+        let _guard = env_lock();
+        std::env::remove_var("DUCKLAKE_PG_URI");
+        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "access-id");
+        std::env::set_var("GCS_HMAC_SECRET", "secret-value");
+
+        let tenant = TenantInfo {
+            tenant_id: "tenant-123".to_string(),
+            bucket_name: "softprobe-tenant-bucket".to_string(),
+            dataset_id: "ignored".to_string(),
+        };
+
+        let err = ducklake_connection_material(&tenant).expect_err("missing pg uri should fail");
+        assert!(err.contains("DUCKLAKE_PG_URI"));
+
+        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCS_HMAC_SECRET");
+    }
 }
 
 pub(crate) fn parse_bearer(h: &str) -> Option<String> {
@@ -82,7 +187,7 @@ async fn v1_meta() -> impl IntoResponse {
     }))
 }
 
-pub fn hosted_routes() -> axum::Router<AppState> {
+pub fn runtime_control_routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/v1/meta", get(v1_meta))
@@ -98,9 +203,27 @@ pub fn hosted_routes() -> axum::Router<AppState> {
         .route("/v1/sessions/{id}/stats", get(v1_session_stats))
         .route("/v1/sessions/{id}/state", get(v1_session_state))
         .route("/v1/inject", post(v1_inject))
+        .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
         .route("/v1/captures/{capture_id}", get(v1_get_capture))
         .route("/v1/catalog/entity-types", get(v1_catalog_entity_types))
         .route("/v1/catalog/values", get(v1_catalog_values))
+}
+
+async fn v1_ducklake_connection(
+    Extension(tenant): Extension<TenantInfo>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    match ducklake_connection_material(&tenant) {
+        Ok(material) => Ok(Json(material)),
+        Err(err) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "ducklake_connection_unavailable",
+                    "message": err
+                }
+            })),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,11 +303,11 @@ async fn v1_create_session(
             Json(json!({"error": "invalid create session request"})),
         )
     })?;
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let s = store.create(mode).await;
     Ok(Json(json!({
         "sessionId": s.id,
@@ -196,11 +319,11 @@ async fn v1_list_sessions(
     State(state): State<AppState>,
     Extension(_tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let hosted = state
-        .hosted
+    let control_plane = state
+        .control_plane
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let mut store = hosted.session_store.lock().await;
+    let mut store = control_plane.session_store.lock().await;
     let list = store.list().await;
     let sessions: Vec<_> = list
         .into_iter()
@@ -219,12 +342,12 @@ async fn v1_close_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
     let session = {
-        let mut store = hosted.session_store.lock().await;
+        let mut store = control_plane.session_store.lock().await;
         store.get(&id).await
     };
     let Some(session) = session else {
@@ -244,7 +367,7 @@ async fn v1_close_session(
         }
     }
     let closed = {
-        let mut store = hosted.session_store.lock().await;
+        let mut store = control_plane.session_store.lock().await;
         store.close(&id).await
     };
     if !closed {
@@ -281,11 +404,11 @@ async fn v1_load_case(
             Json(json!({"error": "invalid load-case request"})),
         ));
     }
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.load_case(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -320,11 +443,11 @@ async fn v1_apply_rules(
             })),
         ));
     }
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.apply_rules(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -348,11 +471,11 @@ async fn v1_apply_policy(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.apply_policy(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -376,11 +499,11 @@ async fn v1_fixtures_auth(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.apply_fixtures_auth(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -397,11 +520,11 @@ async fn v1_session_stats(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.get(&id).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -424,11 +547,11 @@ async fn v1_session_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hosted = state.hosted.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error":"no hosted"})),
-    ))?;
-    let mut store = hosted.session_store.lock().await;
+    let control_plane = state
+        .control_plane
+        .as_ref()
+        .expect("runtime control routes require control-plane state");
+    let mut store = control_plane.session_store.lock().await;
     let Some(s) = store.get(&id).await else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -449,9 +572,9 @@ async fn v1_session_state(
     Ok(Json(out))
 }
 
-/// POST /v1/traces (hosted): annotate tenant + capture id, then ingest.
-/// Hosted OTLP trace export (gRPC): same processing as [`hosted_post_v1_traces`].
-pub async fn hosted_export_trace_request(
+/// POST /v1/traces (runtime control): annotate tenant + capture id, then ingest.
+/// Runtime OTLP trace export (gRPC): same processing as [`runtime_post_v1_traces`].
+pub async fn runtime_export_trace_request(
     state: AppState,
     tenant: &TenantInfo,
     req: ExportTraceServiceRequest,
@@ -468,7 +591,7 @@ pub async fn hosted_export_trace_request(
     Ok(())
 }
 
-pub async fn hosted_post_v1_traces(
+pub async fn runtime_post_v1_traces(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
     body: Bytes,
@@ -604,10 +727,10 @@ async fn v1_inject(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
-    let hosted = state
-        .hosted
+    let control_plane = state
+        .control_plane
         .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "no hosted".into()))?;
+        .expect("runtime control routes require control-plane state");
     let payload =
         normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let lookup =
@@ -615,7 +738,7 @@ async fn v1_inject(
     if lookup.session_id.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing session id".into()));
     }
-    let mut store = hosted.session_store.lock().await;
+    let mut store = control_plane.session_store.lock().await;
     let Some(sess) = store.get(&lookup.session_id).await else {
         return Err((StatusCode::NOT_FOUND, "unknown session".into()));
     };
@@ -712,7 +835,7 @@ async fn v1_get_capture(
 
 #[cfg(test)]
 mod bearer_tests {
-    use super::{parse_bearer, requires_hosted_auth};
+    use super::{parse_bearer, requires_runtime_auth};
     use axum::http::Method;
 
     #[test]
@@ -736,7 +859,10 @@ mod bearer_tests {
 
     #[test]
     fn skips_auth_for_v1_options_preflight() {
-        assert!(!requires_hosted_auth(&Method::OPTIONS, "/v1/telemetry/search"));
-        assert!(requires_hosted_auth(&Method::POST, "/v1/telemetry/search"));
+        assert!(!requires_runtime_auth(
+            &Method::OPTIONS,
+            "/v1/telemetry/search"
+        ));
+        assert!(requires_runtime_auth(&Method::POST, "/v1/telemetry/search"));
     }
 }

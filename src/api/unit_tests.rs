@@ -100,6 +100,37 @@ async fn unit_health_ready_traces_logs_metrics_query() {
 }
 
 #[tokio::test]
+async fn unit_openapi_and_swagger_endpoints_are_served() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+
+    let req = Request::builder()
+        .uri("/openapi.json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+
+    let req = Request::builder()
+        .uri("/swagger")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+}
+
+#[tokio::test]
 async fn unit_ingest_traces_json_and_protobuf_handlers() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
 

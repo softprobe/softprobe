@@ -1,4 +1,4 @@
-//! Redis-backed session store (hosted mode), matching Go `RedisStore` key layout.
+//! Redis-backed session store (control-plane mode), matching Go `RedisStore` key layout.
 
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
