@@ -109,7 +109,6 @@ async fn main() -> anyhow::Result<()> {
 async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime> {
     let auth = required_env("SOFTPROBE_AUTH_URL")?;
     let redis_host = required_env("REDIS_HOST")?;
-    let _gcs_bucket = required_env("GCS_BUCKET")?;
     let port: u16 = std::env::var("REDIS_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
