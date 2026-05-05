@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/validate"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "success": true,
+      "data": {
+        "tenantId": "local-dev-tenant",
+        "resources": [
+          {
+            "resourceType": "BIGQUERY_STORAGE",
+            "configJson": "{\"dataset_id\":\"local\",\"bucket_name\":\"warehouse\"}"
+          }
+        ]
+      }
+    }
+  }
+}

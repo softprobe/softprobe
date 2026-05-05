@@ -219,6 +219,40 @@ async fn ready_returns_ready() {
 }
 
 #[tokio::test]
+async fn openapi_and_swagger_endpoints_are_served() {
+    let (router, _t) = build_router().await;
+
+    let req = Request::builder()
+        .uri("/openapi.json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+
+    let req = Request::builder()
+        .uri("/swagger")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let html = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(html.contains("SwaggerUIBundle"));
+    assert!(html.contains("/openapi.json"));
+}
+
+#[tokio::test]
 async fn traces_json_empty_batch_succeeds() {
     let (router, _t) = build_router().await;
     let body = json!({ "resourceSpans": [] }).to_string();

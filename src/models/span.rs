@@ -511,17 +511,14 @@ mod tests {
     #[test]
     fn extract_http_data_prefers_legacy_body_keys_when_both_conventions_present() {
         let mut span = base_span();
+        span.attributes
+            .insert("http.request.body".to_string(), "legacy-req".to_string());
         span.attributes.insert(
-            "http.request.body".to_string(),
-            "legacy-req".to_string(),
+            "http.request.body.content".to_string(),
+            "obi-req".to_string(),
         );
-        span
-            .attributes
-            .insert("http.request.body.content".to_string(), "obi-req".to_string());
-        span.attributes.insert(
-            "http.response.body".to_string(),
-            "legacy-res".to_string(),
-        );
+        span.attributes
+            .insert("http.response.body".to_string(), "legacy-res".to_string());
         span.attributes.insert(
             "http.response.body.content".to_string(),
             "obi-res".to_string(),
@@ -535,9 +532,15 @@ mod tests {
         let mut span2 = base_span();
         let mut request_attrs = HashMap::new();
         request_attrs.insert("http.request.body".to_string(), "legacy-req-ev".to_string());
-        request_attrs.insert("http.request.body.content".to_string(), "obi-req-ev".to_string());
+        request_attrs.insert(
+            "http.request.body.content".to_string(),
+            "obi-req-ev".to_string(),
+        );
         let mut response_attrs = HashMap::new();
-        response_attrs.insert("http.response.body".to_string(), "legacy-res-ev".to_string());
+        response_attrs.insert(
+            "http.response.body".to_string(),
+            "legacy-res-ev".to_string(),
+        );
         response_attrs.insert(
             "http.response.body.content".to_string(),
             "obi-res-ev".to_string(),

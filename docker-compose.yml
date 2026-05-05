@@ -46,6 +46,35 @@ services:
         aliases:
           - warehouse.minio
 
+  redis:
+    image: redis:7-alpine
+    container_name: runtime-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend_net
+
+  auth-mock:
+    image: wiremock/wiremock:3.9.2
+    container_name: auth-mock
+    command: ["--port", "8080", "--global-response-templating"]
+    volumes:
+      - ./tests/mocks/auth:/home/wiremock
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend_net
+
 
   db:
     image: postgres:17
@@ -122,17 +151,28 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-mock:
+        condition: service_healthy
     environment:
       - RUST_LOG=info
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
+      - SOFTPROBE_AUTH_URL=http://auth-mock:8080/validate
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GCS_BUCKET=warehouse
+      - OTEL_GRPC_PORT=4317
+      - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
     volumes:
       - ./tests/config/test-docker.yaml:/app/config.yaml:ro
     networks:
       - backend_net
     ports:
       - "4317:4317"  # OTLP gRPC
+      - "8090:8090"  # Runtime HTTP API
 
 
   grafana:
