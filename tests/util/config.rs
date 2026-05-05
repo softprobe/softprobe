@@ -3,8 +3,8 @@
 use softprobe_runtime::config::Config;
 use tempfile::TempDir;
 
-/// Minimal OSS-style config: file-backed DuckLake under `temp`, maintenance/compaction off for quiet tests.
-pub fn file_backed_oss_config(temp: &TempDir) -> Config {
+/// Minimal file-backed DuckLake config under `temp`, maintenance/compaction off for quiet tests.
+pub fn file_backed_test_config(temp: &TempDir) -> Config {
     let mut config = Config::default();
     config.compaction.enabled = false;
     config.compaction.metadata_maintenance_enabled = false;

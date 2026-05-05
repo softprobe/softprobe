@@ -100,7 +100,7 @@ OTLP Data → Kafka → Retriever (Custom Columnar Store)
 **Trade-offs**:
 - ⚠️ Query performance depends on data volume and column cardinality
 - ⚠️ Works best for OLAP-style aggregations, not needle-in-haystack searches
-- ⚠️ Custom database (not OSS/standard)
+- ⚠️ Custom database (not a conventional off-the-shelf product)
 
 ---
 
@@ -741,7 +741,7 @@ WHERE attribute_key = 'user_id'
 | **Open Spec** | ✅ Fully open | ⚠️ Databricks influence | **Iceberg** |
 
 **Business Rationale**:
-1. **Vendor neutrality critical** for "open-source first" positioning
+1. **Vendor neutrality critical** for portable lakehouse positioning
 2. **Multi-engine support** enables future Snowflake/Trino/Databricks integrations
 3. **Rust support** matches our technology stack
 4. **Performance tax acceptable** - 1.7x slower in OLAP doesn't hurt our session-based queries

@@ -76,7 +76,7 @@ mod tests {
 
     #[tokio::test]
     async fn grpc_export_empty_trace_non_hosted_ok() {
-        let (_r, state, _t) = crate::test_support::oss_router_and_state()
+        let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
         assert!(state.hosted.is_none());

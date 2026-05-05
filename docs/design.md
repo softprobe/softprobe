@@ -13,7 +13,7 @@
 
 ### Overview
 
-This is a standalone OpenTelemetry-compatible collector that **extends OTLP to capture and store full HTTP request/response bodies** in an efficient, open-source data lake. Unlike traditional observability backends, this system treats telemetry data as a comprehensive data warehouse that serves two critical purposes:
+This is a standalone OpenTelemetry-compatible collector that **extends OTLP to capture and store full HTTP request/response bodies** in an efficient, vendor-neutral data lake. Unlike traditional observability backends, this system treats telemetry data as a comprehensive data warehouse that serves two critical purposes:
 
 1. **Business Case Troubleshooting**: AI agents and engineers can access complete session context (full HTTP payloads) to debug complex business logic failures
 2. **ETL Pipeline Source**: Full payloads serve as the source of truth for data analytics, business intelligence, and ad-hoc data exploration
@@ -23,12 +23,12 @@ The system provides:
 - **Extended OTLP Protocol**: Captures full HTTP request/response bodies alongside standard telemetry
 - **Separated Storage Architecture**: Metadata (spans, attributes) and bodies stored separately for efficient access patterns
 - **Business Attribute Indexing**: Search sessions by business identifiers (user ID, order ID, confirmation code) without scanning payloads
-- **Iceberg Data Lake**: Open-source, vendor-neutral storage enabling SQL queries and analytics
+- **Iceberg Data Lake**: Vendor-neutral storage enabling SQL queries and analytics
 - **Session Management**: Session-aware buffering for traces and logs (NOT metrics)
 
 ### Primary Goal
 
-**THE SINGLE MOST IMPORTANT GOAL**: Store complete HTTP request/response bodies in an efficient, open-source data lake that can be:
+**THE SINGLE MOST IMPORTANT GOAL**: Store complete HTTP request/response bodies in an efficient, vendor-neutral data lake that can be:
 - Queried for troubleshooting via business metadata (user ID, order ID, etc.) WITHOUT reading bodies
 - Accessed by AI agents to analyze full session context when troubleshooting hard business cases
 - Used as the source for ETL pipelines and ad-hoc data analytics
@@ -40,7 +40,7 @@ Bodies are stored separately from metadata to avoid expensive read/write operati
 1. **Complete Data Capture**: Store full HTTP payloads, not just metadata
 2. **Separated Storage**: Metadata and bodies stored separately for efficient access
 3. **Business-Centric Search**: Index by business attributes (order ID, user ID) for fast session lookup
-4. **Open Source & Vendor Neutral**: Iceberg-based data lake, no proprietary storage
+4. **Vendor-neutral formats**: Iceberg-based data lake, no proprietary storage
 5. **OTLP Extension**: Build on OpenTelemetry standards, add body capture
 6. **Dual Purpose**: Troubleshooting tool AND analytics data warehouse
 

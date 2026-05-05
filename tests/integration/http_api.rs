@@ -1,4 +1,4 @@
-//! Integration tests for the OTLP HTTP surface (`AppPipeline` router — same handlers as OSS without `main` middleware layers).
+//! Integration tests for the OTLP HTTP surface (`AppPipeline` router — same handlers as production without `main` middleware layers).
 
 use axum::body::Body;
 use axum::http::{header, Request, Response, StatusCode};
@@ -19,11 +19,11 @@ use serde_json::{json, Value};
 use softprobe_runtime::api::{AppPipeline, AppState};
 use tower::ServiceExt;
 
-use crate::util::config::file_backed_oss_config;
+use crate::util::config::file_backed_test_config;
 
 async fn build_router() -> (Router, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let config = file_backed_oss_config(&temp);
+    let config = file_backed_test_config(&temp);
     let app = AppPipeline::new(&config).await.expect("app pipeline");
     let router = app.into_router().await.expect("router");
     (router, temp)
@@ -31,7 +31,7 @@ async fn build_router() -> (Router, tempfile::TempDir) {
 
 async fn build_router_and_state() -> (Router, AppState, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let config = file_backed_oss_config(&temp);
+    let config = file_backed_test_config(&temp);
     let app = AppPipeline::new(&config).await.expect("app pipeline");
     let (router, state) = softprobe_runtime::api::create_router(
         app.storage,

@@ -17,11 +17,11 @@ use crate::api::telemetry::{
     TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
     TelemetrySortDirection, TelemetryTimeRange,
 };
-use crate::test_support::oss_router_and_state;
+use crate::test_support::local_router_and_state;
 
 #[tokio::test]
 async fn unit_health_ready_traces_logs_metrics_query() {
-    let (router, _state, _t) = oss_router_and_state().await.expect("router");
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
 
     let req = Request::builder()
         .uri("/health")
@@ -101,7 +101,7 @@ async fn unit_health_ready_traces_logs_metrics_query() {
 
 #[tokio::test]
 async fn unit_ingest_traces_json_and_protobuf_handlers() {
-    let (_router, state, _t) = oss_router_and_state().await.expect("router");
+    let (_router, state, _t) = local_router_and_state().await.expect("router");
 
     let body = json!({ "resourceSpans": [] }).to_string();
     let res = ingest_traces_json(State(state.clone()), body.into()).await;
@@ -128,7 +128,7 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
 
 #[tokio::test]
 async fn unit_logs_metrics_protobuf_decode_paths() {
-    let (router, _t) = crate::test_support::oss_router().await.expect("router");
+    let (router, _t) = crate::test_support::local_router().await.expect("router");
 
     let mut buf = Vec::new();
     ExportLogsServiceRequest::default()
@@ -159,7 +159,7 @@ async fn unit_logs_metrics_protobuf_decode_paths() {
 
 #[tokio::test]
 async fn unit_metrics_invalid_json_returns_400() {
-    let (router, _t) = crate::test_support::oss_router().await.expect("router");
+    let (router, _t) = crate::test_support::local_router().await.expect("router");
     let req = Request::builder()
         .method("POST")
         .uri("/v1/metrics")
@@ -172,7 +172,7 @@ async fn unit_metrics_invalid_json_returns_400() {
 
 #[tokio::test]
 async fn unit_query_sql_empty_returns_400() {
-    let (router, _t) = crate::test_support::oss_router().await.expect("router");
+    let (router, _t) = crate::test_support::local_router().await.expect("router");
     let req = Request::builder()
         .method("POST")
         .uri("/v1/query/sql")
@@ -185,7 +185,7 @@ async fn unit_query_sql_empty_returns_400() {
 
 #[tokio::test]
 async fn unit_query_sql_invalid_returns_500() {
-    let (router, _t) = crate::test_support::oss_router().await.expect("router");
+    let (router, _t) = crate::test_support::local_router().await.expect("router");
     let req = Request::builder()
         .method("POST")
         .uri("/v1/query/sql")

@@ -22,7 +22,7 @@ Softprobe's ambition is to create the richest, most comprehensive dataset that e
 
 Our initial product captures the complete digital behavior of applications:
 
-- **Full HTTP request/response bodies** stored in an efficient, open-source data lake
+- **Full HTTP request/response bodies** stored in an efficient, vendor-neutral data lake
 - **Session-based organization** enabling AI agents to understand complete user journeys
 - **Business context extraction** from JSON payloads (user IDs, order IDs, transactions)
 - **Real-time troubleshooting** by giving AI agents access to every HTTP interaction
@@ -81,12 +81,12 @@ The AI agent can:
 
 ### vs. Traditional Observability Platforms
 
-| Platform | Data Scope | AI-Ready | Open Source | Analytics Use Case |
+| Platform | Data Scope | AI-Ready | Portable lakehouse | Analytics Use Case |
 |----------|------------|----------|-------------|-------------------|
 | **Datadog** | Observability only | ❌ No raw data access | ❌ Proprietary | ❌ Limited |
 | **New Relic** | Observability only | ❌ No raw data access | ❌ Proprietary | ❌ Limited |
 | **Observe Inc** | Observability + some integrations | ⚠️ Partial (Snowflake) | ⚠️ Uses Snowflake | ✅ Yes |
-| **Softprobe** | **ALL business data** | ✅ Full raw data access | ✅ Iceberg (OSS) | ✅ Primary use case |
+| **Softprobe** | **ALL business data** | ✅ Full raw data access | ✅ Apache Iceberg | ✅ Primary use case |
 
 ### vs. Data Warehouses (Snowflake, BigQuery)
 
@@ -97,7 +97,7 @@ The AI agent can:
 | **Observability** | ❌ Requires separate tools | ✅ Built-in |
 | **Business data integration** | ✅ Via ETL | ✅ Via Fivetran/Airbyte |
 | **AI agent context** | ⚠️ Static tables only | ✅ Live session + historical |
-| **Cost** | 💰💰💰 Expensive | 💰 OSS-based, lower cost |
+| **Cost** | 💰💰💰 Expensive | 💰 Object storage + Iceberg, lower cost |
 
 ### vs. Data Lakes (Databricks)
 
@@ -162,14 +162,14 @@ Our data lake provides AI agents with:
 2. **Compute (Query/ETL)** - Per-query or compute-hour pricing
 3. **Integrations** - Premium connectors (Fivetran/Airbyte licenses)
 4. **AI Agent Platform** - Query API for LLM-based agents
-5. **Managed Service** - Hosted version vs. self-hosted OSS
+5. **Managed Service** - Hosted version vs. self-managed
 
 ### Competitive Moats
 
 1. **Session Graph Expertise** - Unique capability to capture full HTTP context
 2. **Unified Schema** - Pre-built knowledge graph connecting all data sources
 3. **AI-Native Design** - Built for LLM consumption from day one
-4. **Open Source Foundation** - Iceberg, DuckDB, OSS-first approach reduces lock-in fear
+4. **Standard-format foundation** - Iceberg, DuckDB, portable lakehouse stack reduces lock-in fear
 5. **Cost Structure** - Object storage + columnar compression = 10x cheaper than Datadog
 
 ---
@@ -254,7 +254,7 @@ Our data lake provides AI agents with:
 
 1. **First-Mover Advantage**: No one else combines observability + business data for AI
 2. **Technical Excellence**: Iceberg + Parquet + DuckDB = best-in-class performance/cost
-3. **Open Source Strategy**: Lower lock-in risk = faster enterprise adoption
+3. **Vendor-neutral strategy**: Lower lock-in risk = faster enterprise adoption
 4. **AI Timing**: LLM capabilities are mature enough NOW to consume structured data
 5. **Product Focus**: Start narrow (HTTP bodies) and expand methodically
 
@@ -273,7 +273,7 @@ Our competitive advantage comes from:
 1. **Completeness** - Store everything, not just metrics
 2. **Accessibility** - SQL-queryable, open standards
 3. **Context** - Session graphs + business data integration
-4. **Cost** - OSS-based, 10x cheaper than SaaS alternatives
+4. **Cost** - Object storage + columnar formats, 10x cheaper than typical SaaS alternatives
 
 This is not just an observability platform. This is the **data foundation for AI-powered business intelligence**.
 

@@ -82,7 +82,7 @@ The core insight is that **ecosystem value >> marginal performance difference**.
 **Cons**:
 - Databricks-centric ecosystem (vendor lock-in risk)
 - Limited Rust support
-- Would conflict with "open-source first" positioning
+- Would conflict with vendor-neutral positioning
 - Harder to integrate with Snowflake, Trino in future
 
 **Why Rejected**: Ecosystem lock-in outweighs 1.7x performance advantage
@@ -224,7 +224,7 @@ storage:
 
 **Cons**:
 - High egress costs ($0.09/GB) hurt customer economics
-- Vendor lock-in conflicts with open-source positioning
+- Vendor lock-in conflicts with vendor-neutral positioning
 - No flexibility for GCP/Azure customers
 
 **Why Rejected**: Conflicts with cloud-neutral strategy
@@ -260,7 +260,7 @@ storage:
 - ✅ Self-hosted option for compliance/sovereignty
 - ✅ No vendor lock-in concerns
 - ✅ Cost-conscious customers can choose zero-egress providers
-- ✅ "Cloud-neutral" strengthens open-source positioning
+- ✅ "Cloud-neutral" strengthens vendor-neutral positioning
 
 **Negative**:
 - ⚠️ Must support/test multiple storage backends
