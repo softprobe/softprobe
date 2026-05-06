@@ -194,6 +194,41 @@ ON CONFLICT (spec_id) DO UPDATE SET
             .await?;
         Ok(spec_id)
     }
+
+    /// Record one successfully applied business table promotion manifest in tenant metadata.
+    ///
+    /// Business tables are tenant-local physical tables/views, so the active manifest is stored
+    /// beside the generated relations for agents and later ingest workers to resolve.
+    pub async fn record_active_business_promotion_spec(
+        &self,
+        scope: &TenantDuckLakeScope,
+        manifest_yaml: &str,
+        table_name: &str,
+    ) -> Result<String> {
+        let mut hasher = DefaultHasher::new();
+        manifest_yaml.hash(&mut hasher);
+        let manifest_hash = format!("{:016x}", hasher.finish());
+        let spec_id = format!("business_table_{}_{}", table_name, manifest_hash);
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                &format!(
+                    r#"INSERT INTO "{}".promotion_specs
+  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
+VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
+ON CONFLICT (spec_id) DO UPDATE SET
+  target_tables = EXCLUDED.target_tables,
+  manifest_json = EXCLUDED.manifest_json,
+  manifest_hash = EXCLUDED.manifest_hash,
+  status = 'active',
+  applied_at = NOW();"#,
+                    scope.metadata_schema.replace('"', "\"\"")
+                ),
+                &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
+            )
+            .await?;
+        Ok(spec_id)
+    }
 }
 
 fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str) -> Result<()> {

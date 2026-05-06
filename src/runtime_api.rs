@@ -11,7 +11,8 @@ use crate::inject::{
     parse_inject_rules_document, select_inject_rule,
 };
 use crate::promotion::{
-    parse_promotion_manifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
+    business_current_view_name, business_physical_table_name, parse_promotion_manifest,
+    BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
     TelemetryTable,
 };
 use crate::tenant_ducklake::TenantDuckLakeScope;
@@ -405,7 +406,7 @@ async fn v1_promotions_apply(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
     Json(req): Json<PromotionApplyRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let manifest = parse_promotion_manifest(&req.manifest_yaml).map_err(|err| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -417,18 +418,14 @@ async fn v1_promotions_apply(
             })),
         )
     })?;
-    let PromotionManifest::TelemetryColumns(spec) = manifest else {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "error": {
-                    "code": "unsupported_promotion_target",
-                    "message": "promotion apply currently supports telemetry_columns only"
-                }
-            })),
-        ));
-    };
-    apply_telemetry_promotion(state, tenant, req.manifest_yaml, spec).await
+    match manifest {
+        PromotionManifest::TelemetryColumns(spec) => {
+            apply_telemetry_promotion(state, tenant, req.manifest_yaml, spec).await
+        }
+        PromotionManifest::BusinessTable(spec) => {
+            apply_business_table_promotion(state, tenant, req.manifest_yaml, spec).await
+        }
+    }
 }
 
 async fn apply_telemetry_promotion(
@@ -436,7 +433,7 @@ async fn apply_telemetry_promotion(
     tenant: TenantInfo,
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let Some(tenant_ducklake) = state
         .control_plane
         .as_ref()
@@ -481,6 +478,53 @@ async fn apply_telemetry_promotion(
     })))
 }
 
+async fn apply_business_table_promotion(
+    state: AppState,
+    tenant: TenantInfo,
+    manifest_yaml: String,
+    spec: BusinessTableManifest,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(tenant_ducklake) = state
+        .control_plane
+        .as_ref()
+        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "ducklake_connection_unavailable",
+                    "message": "tenant DuckLake resolver is unavailable"
+                }
+            })),
+        ));
+    };
+    let scope = tenant_ducklake
+        .resolve_or_create(&tenant.tenant_id)
+        .await
+        .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    state
+        .storage
+        .writer
+        .apply_business_table_promotion(&scope, &spec)
+        .await
+        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
+    tenant_ducklake
+        .record_active_business_promotion_spec(&scope, &manifest_yaml, &spec.target.table)
+        .await
+        .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
+    Ok(Json(json!({
+        "specVersion": "softprobe.promotion.apply.v1",
+        "applied": true,
+        "target": {
+            "kind": "business_table",
+            "table": spec.target.table,
+            "version": spec.target.version
+        },
+        "schemaChanges": business_schema_changes(&spec)
+    })))
+}
+
 fn promotion_apply_error(
     code: &'static str,
     err: anyhow::Error,
@@ -522,6 +566,22 @@ fn telemetry_schema_changes(spec: &TelemetryColumnsManifest) -> Vec<serde_json::
         }
     }
     changes
+}
+
+fn business_schema_changes(spec: &BusinessTableManifest) -> Vec<serde_json::Value> {
+    let table = business_physical_table_name(spec);
+    let view = business_current_view_name(spec);
+    vec![
+        json!({
+            "action": "create_table",
+            "table": table
+        }),
+        json!({
+            "action": "create_or_replace_view",
+            "view": view,
+            "sourceTable": table
+        }),
+    ]
 }
 
 fn promotion_type_name(data_type: &PromotionDataType) -> &'static str {

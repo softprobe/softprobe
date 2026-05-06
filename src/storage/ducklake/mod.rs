@@ -1,8 +1,9 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
-    extract_telemetry_promoted_value, telemetry_column_add_ddls, PromotionColumn,
-    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
+    business_table_create_ddls, extract_telemetry_promoted_value, telemetry_column_add_ddls,
+    BusinessTableManifest, PromotionColumn, TelemetryColumnsManifest, TelemetryPromotionEvent,
+    TelemetryPromotionRow, TelemetryTable,
 };
 use crate::storage::iceberg::arrow;
 use crate::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
@@ -438,6 +439,38 @@ impl DuckLakeWriter {
         };
         let ddls = telemetry_column_add_ddls(&prefix, spec)
             .map_err(|err| anyhow!("telemetry promotion validation failed: {err}"))?;
+        for ddl in &ddls {
+            conn.execute_batch(ddl)?;
+        }
+        self.catalog_write_generation
+            .fetch_add(1, Ordering::Release);
+        Ok(ddls)
+    }
+
+    /// Apply generated business table DDL inside one tenant DuckLake scope.
+    ///
+    /// Business promotion manifests own the physical table and current view. The runtime executes
+    /// generated DDL in order so agents do not need to write tenant-specific `CREATE TABLE` SQL.
+    pub async fn apply_business_table_promotion(
+        &self,
+        scope: &TenantDuckLakeScope,
+        spec: &BusinessTableManifest,
+    ) -> Result<Vec<String>> {
+        let dk = self.effective_ducklake(scope);
+        let conn = self.open_connection()?;
+        self.attach_ducklake_for(&conn, &dk)?;
+        self.ensure_schema_for(&conn, &dk)?;
+        let prefix = if dk.metadata_schema == "main" {
+            dk.catalog_alias.clone()
+        } else {
+            format!(
+                "{}.{}",
+                quote_duckdb_ident(&dk.catalog_alias),
+                quote_duckdb_ident(&dk.metadata_schema)
+            )
+        };
+        let ddls = business_table_create_ddls(&prefix, spec)
+            .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
         for ddl in &ddls {
             conn.execute_batch(ddl)?;
         }

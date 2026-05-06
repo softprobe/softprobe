@@ -416,11 +416,11 @@ fn business_anchor_columns() -> &'static [(&'static str, &'static str, bool)] {
     ]
 }
 
-fn business_physical_table_name(spec: &BusinessTableManifest) -> String {
+pub fn business_physical_table_name(spec: &BusinessTableManifest) -> String {
     format!("{}_v{}", spec.target.table, spec.target.version)
 }
 
-fn business_current_view_name(spec: &BusinessTableManifest) -> String {
+pub fn business_current_view_name(spec: &BusinessTableManifest) -> String {
     format!("{}_current", spec.target.table)
 }
 
