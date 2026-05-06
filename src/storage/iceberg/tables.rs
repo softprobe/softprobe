@@ -1,8 +1,33 @@
+use crate::promotion::{PromotionColumn, PromotionDataType};
 use iceberg::spec::{
     ListType, MapType, NestedField, PartitionSpec, PrimitiveType, Schema as IcebergSchema,
     SortOrder, StructType, Type, UnboundPartitionField,
 };
 use std::collections::HashMap;
+
+fn promoted_column_fields(
+    columns: &[PromotionColumn],
+    start_field_id: i32,
+) -> Vec<std::sync::Arc<NestedField>> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(idx, column)| {
+            let field_type = match column.data_type {
+                PromotionDataType::String | PromotionDataType::Json => {
+                    Type::Primitive(PrimitiveType::String)
+                }
+                PromotionDataType::Bool => Type::Primitive(PrimitiveType::Boolean),
+                PromotionDataType::Int64 => Type::Primitive(PrimitiveType::Long),
+                PromotionDataType::Double | PromotionDataType::Decimal => {
+                    Type::Primitive(PrimitiveType::Double)
+                }
+                PromotionDataType::Timestamp => Type::Primitive(PrimitiveType::Timestamptz),
+            };
+            NestedField::optional(start_field_id + idx as i32, &column.name, field_type).into()
+        })
+        .collect()
+}
 
 /// Raw sessions table - stores OTLP spans
 pub struct TraceTable;
@@ -14,6 +39,10 @@ impl TraceTable {
 
     /// Canonical trace schema. Promoted columns are added via tenant-scoped promotion apply (DuckLake DDL), not process-global config.
     pub fn schema() -> IcebergSchema {
+        Self::schema_with_promoted_columns(&[])
+    }
+
+    pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> IcebergSchema {
         let base_fields: Vec<std::sync::Arc<NestedField>> = vec![
             // Primary Identifiers
             NestedField::required(1, "session_id", Type::Primitive(PrimitiveType::String)).into(),
@@ -147,9 +176,12 @@ impl TraceTable {
             NestedField::required(32, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
         ];
 
+        let mut fields = base_fields;
+        fields.extend(promoted_column_fields(columns, 33));
+
         IcebergSchema::builder()
             .with_schema_id(0)
-            .with_fields(base_fields)
+            .with_fields(fields)
             .build()
             .unwrap()
     }
@@ -237,6 +269,10 @@ impl OtlpLogsTable {
     }
 
     pub fn schema() -> IcebergSchema {
+        Self::schema_with_promoted_columns(&[])
+    }
+
+    pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> IcebergSchema {
         let base_fields: Vec<std::sync::Arc<NestedField>> = vec![
             // Session context
             NestedField::optional(1, "session_id", Type::Primitive(PrimitiveType::String)).into(),
@@ -284,9 +320,12 @@ impl OtlpLogsTable {
             NestedField::required(15, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
         ];
 
+        let mut fields = base_fields;
+        fields.extend(promoted_column_fields(columns, 16));
+
         IcebergSchema::builder()
             .with_schema_id(0)
-            .with_fields(base_fields)
+            .with_fields(fields)
             .build()
             .unwrap()
     }
@@ -368,6 +407,10 @@ impl OtlpMetricsTable {
     }
 
     pub fn schema() -> IcebergSchema {
+        Self::schema_with_promoted_columns(&[])
+    }
+
+    pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> IcebergSchema {
         let base_fields: Vec<std::sync::Arc<NestedField>> = vec![
             // Metric identity
             NestedField::required(1, "metric_name", Type::Primitive(PrimitiveType::String)).into(),
@@ -404,9 +447,12 @@ impl OtlpMetricsTable {
             NestedField::required(13, "record_date", Type::Primitive(PrimitiveType::Date)).into(),
         ];
 
+        let mut fields = base_fields;
+        fields.extend(promoted_column_fields(columns, 14));
+
         IcebergSchema::builder()
             .with_schema_id(0)
-            .with_fields(base_fields)
+            .with_fields(fields)
             .build()
             .unwrap()
     }

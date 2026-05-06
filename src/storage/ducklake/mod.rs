@@ -1,5 +1,9 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
+use crate::promotion::{
+    extract_telemetry_promoted_value, PromotionColumn, TelemetryColumnsManifest,
+    TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
+};
 use crate::storage::iceberg::arrow;
 use crate::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
 use crate::tenant_ducklake::{TenantDuckLakeResolver, TenantDuckLakeScope};
@@ -169,6 +173,88 @@ impl DuckLakeWriter {
         Ok(m)
     }
 
+    fn telemetry_columns_for_table(
+        manifests: &[TelemetryColumnsManifest],
+        table: TelemetryTable,
+    ) -> Vec<PromotionColumn> {
+        manifests
+            .iter()
+            .filter(|manifest| manifest.target.tables.contains(&table))
+            .flat_map(|manifest| manifest.columns.iter().cloned())
+            .collect()
+    }
+
+    fn apply_span_promotions(spans: &mut [Span], columns: &[PromotionColumn]) -> Result<()> {
+        for span in spans {
+            let events = span
+                .events
+                .iter()
+                .map(|event| TelemetryPromotionEvent {
+                    name: event.name.clone(),
+                    attributes: event.attributes.clone(),
+                })
+                .collect::<Vec<_>>();
+            let row = TelemetryPromotionRow {
+                resource_attributes: &span.resource_attributes,
+                attributes: &span.attributes,
+                events: &events,
+                http_request_body: span.http_request_body.as_deref(),
+                http_response_body: span.http_response_body.as_deref(),
+                metric_value: None,
+            };
+            let mut promoted = Vec::new();
+            for column in columns {
+                if let Some(value) = extract_telemetry_promoted_value(&row, column)? {
+                    promoted.push((column.name.clone(), value));
+                }
+            }
+            span.attributes.extend(promoted);
+        }
+        Ok(())
+    }
+
+    fn apply_log_promotions(logs: &mut [Log], columns: &[PromotionColumn]) -> Result<()> {
+        for log in logs {
+            let row = TelemetryPromotionRow {
+                resource_attributes: &log.resource_attributes,
+                attributes: &log.attributes,
+                events: &[],
+                http_request_body: None,
+                http_response_body: None,
+                metric_value: None,
+            };
+            let mut promoted = Vec::new();
+            for column in columns {
+                if let Some(value) = extract_telemetry_promoted_value(&row, column)? {
+                    promoted.push((column.name.clone(), value));
+                }
+            }
+            log.attributes.extend(promoted);
+        }
+        Ok(())
+    }
+
+    fn apply_metric_promotions(metrics: &mut [Metric], columns: &[PromotionColumn]) -> Result<()> {
+        for metric in metrics {
+            let row = TelemetryPromotionRow {
+                resource_attributes: &metric.resource_attributes,
+                attributes: &metric.attributes,
+                events: &[],
+                http_request_body: None,
+                http_response_body: None,
+                metric_value: Some(metric.value),
+            };
+            let mut promoted = Vec::new();
+            for column in columns {
+                if let Some(value) = extract_telemetry_promoted_value(&row, column)? {
+                    promoted.push((column.name.clone(), value));
+                }
+            }
+            metric.attributes.extend(promoted);
+        }
+        Ok(())
+    }
+
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
@@ -176,12 +262,16 @@ impl DuckLakeWriter {
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
             let grouped = Self::partition_spans_by_tenant(batches)?;
-            let schema = self.spans_schema().await?;
-            for (tenant_id, spans) in grouped {
+            for (tenant_id, mut spans) in grouped {
                 if spans.is_empty() {
                     continue;
                 }
-                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let (scope, manifests) = resolver
+                    .load_active_telemetry_columns_manifests(&tenant_id)
+                    .await?;
+                let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
+                Self::apply_span_promotions(&mut spans, &columns)?;
+                let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
                 let dk = self.effective_ducklake(&scope);
                 let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
@@ -208,12 +298,16 @@ impl DuckLakeWriter {
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
             let grouped = Self::partition_logs_by_tenant(batches)?;
-            let schema = self.logs_schema().await?;
-            for (tenant_id, logs) in grouped {
+            for (tenant_id, mut logs) in grouped {
                 if logs.is_empty() {
                     continue;
                 }
-                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let (scope, manifests) = resolver
+                    .load_active_telemetry_columns_manifests(&tenant_id)
+                    .await?;
+                let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Logs);
+                Self::apply_log_promotions(&mut logs, &columns)?;
+                let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
                 let dk = self.effective_ducklake(&scope);
                 let record_batches = vec![arrow::logs_to_record_batch(&logs, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
@@ -240,12 +334,17 @@ impl DuckLakeWriter {
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
             let grouped = Self::partition_metrics_by_tenant(batches)?;
-            let schema = self.metrics_schema().await?;
-            for (tenant_id, metrics) in grouped {
+            for (tenant_id, mut metrics) in grouped {
                 if metrics.is_empty() {
                     continue;
                 }
-                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let (scope, manifests) = resolver
+                    .load_active_telemetry_columns_manifests(&tenant_id)
+                    .await?;
+                let columns =
+                    Self::telemetry_columns_for_table(&manifests, TelemetryTable::Metrics);
+                Self::apply_metric_promotions(&mut metrics, &columns)?;
+                let schema = Arc::new(OtlpMetricsTable::schema_with_promoted_columns(&columns));
                 let dk = self.effective_ducklake(&scope);
                 let record_batches =
                     vec![arrow::metrics_to_record_batch(&metrics, schema.as_ref())?];

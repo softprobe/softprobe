@@ -1,7 +1,7 @@
 use crate::models::{Log, Metric, Span};
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, ListArray, MapArray,
+    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
     StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
@@ -39,6 +39,81 @@ const TRACES_BASE_FIELDS: &[&str] = &[
     "record_date",
 ];
 
+const LOGS_BASE_FIELDS: &[&str] = &[
+    "session_id",
+    "timestamp",
+    "observed_timestamp",
+    "severity_number",
+    "severity_text",
+    "body",
+    "attributes",
+    "resource_attributes",
+    "trace_id",
+    "span_id",
+    "record_date",
+];
+
+const METRICS_BASE_FIELDS: &[&str] = &[
+    "metric_name",
+    "description",
+    "unit",
+    "metric_type",
+    "timestamp",
+    "value",
+    "attributes",
+    "resource_attributes",
+    "record_date",
+];
+
+fn promoted_array_from_values(
+    field: &arrow::datatypes::Field,
+    values: Vec<Option<String>>,
+) -> ArrayRef {
+    match field.data_type() {
+        arrow::datatypes::DataType::Utf8 => Arc::new(StringArray::from(values)),
+        arrow::datatypes::DataType::Int32 => Arc::new(Int32Array::from(
+            values
+                .iter()
+                .map(|v| v.as_ref().and_then(|s| s.parse::<i32>().ok()))
+                .collect::<Vec<_>>(),
+        )),
+        arrow::datatypes::DataType::Int64 => Arc::new(Int64Array::from(
+            values
+                .iter()
+                .map(|v| v.as_ref().and_then(|s| s.parse::<i64>().ok()))
+                .collect::<Vec<_>>(),
+        )),
+        arrow::datatypes::DataType::Float64 => Arc::new(Float64Array::from(
+            values
+                .iter()
+                .map(|v| v.as_ref().and_then(|s| s.parse::<f64>().ok()))
+                .collect::<Vec<_>>(),
+        )),
+        arrow::datatypes::DataType::Boolean => Arc::new(BooleanArray::from(
+            values
+                .iter()
+                .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
+                .collect::<Vec<_>>(),
+        )),
+        arrow::datatypes::DataType::Timestamp(_, _) => Arc::new(
+            TimestampMicrosecondArray::from(
+                values
+                    .iter()
+                    .map(|v| {
+                        v.as_ref().and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(s)
+                                .ok()
+                                .map(|t| t.timestamp_micros())
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .with_timezone_utc(),
+        ),
+        _ => Arc::new(StringArray::from(values)),
+    }
+}
+
 /// Build arrays for extra Iceberg fields (e.g. tenant-applied promoted columns) in schema order.
 /// Attribute keys default to the Iceberg/Arrow column name.
 fn build_promoted_columns_for_spans(
@@ -59,37 +134,30 @@ fn build_promoted_columns_for_spans(
             .map(|span| span.attributes.get(field_name.as_str()).cloned())
             .collect();
 
-        // Build array based on field type
-        let array: ArrayRef = match field.data_type() {
-            arrow::datatypes::DataType::Utf8 => Arc::new(StringArray::from(values)),
-            arrow::datatypes::DataType::Int32 => Arc::new(Int32Array::from(
-                values
-                    .iter()
-                    .map(|v| v.as_ref().and_then(|s| s.parse::<i32>().ok()))
-                    .collect::<Vec<_>>(),
-            )),
-            arrow::datatypes::DataType::Float64 => Arc::new(Float64Array::from(
-                values
-                    .iter()
-                    .map(|v| v.as_ref().and_then(|s| s.parse::<f64>().ok()))
-                    .collect::<Vec<_>>(),
-            )),
-            arrow::datatypes::DataType::Boolean => Arc::new(BooleanArray::from(
-                values
-                    .iter()
-                    .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
-                    .collect::<Vec<_>>(),
-            )),
-            _ => {
-                // Default to String for unknown types
-                Arc::new(StringArray::from(values))
-            }
-        };
-
-        promoted_arrays.push(array);
+        promoted_arrays.push(promoted_array_from_values(field, values));
     }
 
     Ok(promoted_arrays)
+}
+
+fn build_promoted_columns_from_attribute_maps(
+    maps: &[&std::collections::HashMap<String, String>],
+    arrow_schema: &Schema,
+    base_fields: &[&str],
+) -> Vec<ArrayRef> {
+    let mut promoted_arrays = Vec::new();
+    for field in arrow_schema.fields() {
+        let field_name = field.name();
+        if base_fields.contains(&field_name.as_str()) {
+            continue;
+        }
+        let values = maps
+            .iter()
+            .map(|attrs| attrs.get(field_name.as_str()).cloned())
+            .collect::<Vec<_>>();
+        promoted_arrays.push(promoted_array_from_values(field, values));
+    }
+    promoted_arrays
 }
 
 /// Convert Span batch to Arrow RecordBatch using Iceberg table schema
@@ -603,23 +671,31 @@ pub fn logs_to_record_batch(logs: &[Log], iceberg_schema: &IcebergSchema) -> Res
     }
 
     let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
+    let promoted_arrays = build_promoted_columns_from_attribute_maps(
+        logs.iter()
+            .map(|l| &l.attributes)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &arrow_schema,
+        LOGS_BASE_FIELDS,
+    );
 
-    let record_batch = RecordBatch::try_new(
-        arrow_schema,
-        vec![
-            session_ids,
-            timestamps,
-            observed_timestamps,
-            severity_numbers,
-            severity_texts,
-            bodies,
-            attributes_array,
-            resource_attributes_array,
-            trace_ids,
-            span_ids,
-            record_dates,
-        ],
-    )?;
+    let mut arrays = vec![
+        session_ids,
+        timestamps,
+        observed_timestamps,
+        severity_numbers,
+        severity_texts,
+        bodies,
+        attributes_array,
+        resource_attributes_array,
+        trace_ids,
+        span_ids,
+        record_dates,
+    ];
+    arrays.extend(promoted_arrays);
+
+    let record_batch = RecordBatch::try_new(arrow_schema, arrays)?;
 
     debug!(
         "Created Arrow RecordBatch with {} rows for logs",
@@ -780,22 +856,30 @@ pub fn metrics_to_record_batch(
             })
             .collect::<Vec<_>>(),
     ));
+    let promoted_arrays = build_promoted_columns_from_attribute_maps(
+        metrics
+            .iter()
+            .map(|m| &m.attributes)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &arrow_schema,
+        METRICS_BASE_FIELDS,
+    );
 
     // Create RecordBatch with columns matching Iceberg schema order
-    let record_batch = RecordBatch::try_new(
-        arrow_schema.clone(),
-        vec![
-            metric_names,
-            descriptions,
-            units,
-            metric_types,
-            timestamps,
-            values,
-            attributes_array,
-            resource_attributes_array,
-            record_dates,
-        ],
-    )?;
+    let mut arrays = vec![
+        metric_names,
+        descriptions,
+        units,
+        metric_types,
+        timestamps,
+        values,
+        attributes_array,
+        resource_attributes_array,
+        record_dates,
+    ];
+    arrays.extend(promoted_arrays);
+    let record_batch = RecordBatch::try_new(arrow_schema.clone(), arrays)?;
 
     Ok(record_batch)
 }

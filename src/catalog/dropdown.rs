@@ -404,6 +404,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             end_timestamp: None,
             attributes: Default::default(),
+            resource_attributes: Default::default(),
             events: vec![],
             status_code: None,
             status_message: None,

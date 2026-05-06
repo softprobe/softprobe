@@ -5,6 +5,10 @@
 //! instead of requiring one YAML config block per tenant.
 
 use crate::config::{Config, DuckLakeConfig};
+use crate::promotion::{
+    ensure_promotion_metadata_tables, load_active_telemetry_columns_manifests,
+    PromotionSpecLoadError, TelemetryColumnsManifest,
+};
 use anyhow::{anyhow, Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use tokio_postgres::NoTls;
@@ -124,7 +128,28 @@ RETURNING ducklake_schema, ducklake_data_path;"#,
                 &[],
             )
             .await?;
+        // Promotion metadata is tenant-contained and should exist before ingest attempts to load
+        // active specs or write row-level promotion errors for this tenant.
+        ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
         Ok(scope)
+    }
+
+    /// Resolve the tenant scope and load its active telemetry column manifests from Postgres.
+    pub async fn load_active_telemetry_columns_manifests(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(TenantDuckLakeScope, Vec<TelemetryColumnsManifest>)> {
+        let scope = self.resolve_or_create(tenant_id).await?;
+        let client = self.pool.get().await?;
+        let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+            .await
+            .map_err(|err| match err {
+                PromotionSpecLoadError::Postgres(e) => anyhow!(e),
+                PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
+                    anyhow!("promotion spec {spec_id} is invalid: {source}")
+                }
+            })?;
+        Ok((scope, manifests))
     }
 }
 

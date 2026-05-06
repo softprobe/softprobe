@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub const PROMOTION_SPEC_VERSION: &str = "softprobe.promotion.v1";
@@ -77,6 +78,25 @@ pub enum PromotionSource {
     EventAttribute { event_name: String, key: String },
     HttpRequestBody { json_path: String },
     HttpResponseBody { json_path: String },
+}
+
+/// Minimal telemetry row view used by promotion extraction.
+///
+/// The ingest path adapts spans/logs/metrics into this shape so selector behavior stays in one
+/// place and tests do not depend on OTLP protobuf construction.
+pub struct TelemetryPromotionRow<'a> {
+    pub resource_attributes: &'a HashMap<String, String>,
+    pub attributes: &'a HashMap<String, String>,
+    pub events: &'a [TelemetryPromotionEvent],
+    pub http_request_body: Option<&'a str>,
+    pub http_response_body: Option<&'a str>,
+    pub metric_value: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryPromotionEvent {
+    pub name: String,
+    pub attributes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +399,106 @@ pub fn telemetry_column_add_ddls(
         }
     }
     Ok(ddls)
+}
+
+/// Extract and validate one promoted telemetry value.
+///
+/// Values are returned in storage-string form because the existing Arrow conversion layer already
+/// parses strings into the promoted column's physical Arrow type when building typed batches.
+pub fn extract_telemetry_promoted_value(
+    row: &TelemetryPromotionRow<'_>,
+    column: &PromotionColumn,
+) -> Result<Option<String>, PromotionValidationError> {
+    let raw = match &column.source {
+        PromotionSource::ResourceAttribute { key } => row.resource_attributes.get(key).cloned(),
+        PromotionSource::Attribute { key } => row.attributes.get(key).cloned(),
+        PromotionSource::EventAttribute { event_name, key } => row
+            .events
+            .iter()
+            .find(|event| event.name == *event_name)
+            .and_then(|event| event.attributes.get(key))
+            .cloned(),
+        PromotionSource::HttpRequestBody { json_path } => {
+            extract_json_path_string(row.http_request_body, json_path, &column.name)?
+        }
+        PromotionSource::HttpResponseBody { json_path } => {
+            extract_json_path_string(row.http_response_body, json_path, &column.name)?
+        }
+    };
+
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    validate_promoted_value_type(&column.name, &column.data_type, &value)?;
+    Ok(Some(value))
+}
+
+fn extract_json_path_string(
+    body: Option<&str>,
+    json_path: &str,
+    column_name: &str,
+) -> Result<Option<String>, PromotionValidationError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let doc: serde_json::Value = serde_json::from_str(body).map_err(|err| {
+        PromotionValidationError::new(
+            "promotion_value_invalid_json",
+            format!("columns.{column_name}"),
+            format!("HTTP body is not valid JSON: {err}"),
+        )
+    })?;
+    let Some(value) = select_simple_json_path(&doc, json_path) else {
+        return Ok(None);
+    };
+    Ok(Some(json_value_to_storage_string(value)))
+}
+
+fn select_simple_json_path<'a>(
+    value: &'a serde_json::Value,
+    json_path: &str,
+) -> Option<&'a serde_json::Value> {
+    if json_path == "$" {
+        return Some(value);
+    }
+    let mut current = value;
+    for segment in json_path.strip_prefix("$.")?.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn json_value_to_storage_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => value.to_string(),
+    }
+}
+
+fn validate_promoted_value_type(
+    column_name: &str,
+    data_type: &PromotionDataType,
+    value: &str,
+) -> Result<(), PromotionValidationError> {
+    let ok = match data_type {
+        PromotionDataType::String | PromotionDataType::Json => true,
+        PromotionDataType::Bool => value.parse::<bool>().is_ok(),
+        PromotionDataType::Int64 => value.parse::<i64>().is_ok(),
+        PromotionDataType::Double | PromotionDataType::Decimal => value.parse::<f64>().is_ok(),
+        PromotionDataType::Timestamp => chrono::DateTime::parse_from_rfc3339(value).is_ok(),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(PromotionValidationError::new(
+            "promotion_value_type_mismatch",
+            format!("columns.{column_name}"),
+            format!("value cannot be converted to {:?}", data_type),
+        ))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -862,5 +982,120 @@ columns:
 
         assert_eq!(err.code(), "column_already_exists");
         assert_eq!(err.path(), "columns[0].name");
+    }
+
+    #[test]
+    fn extracts_telemetry_promoted_values_from_supported_sources() {
+        let mut resource_attributes = std::collections::HashMap::new();
+        resource_attributes.insert("service.name".to_string(), "checkout-api".to_string());
+        let mut attributes = std::collections::HashMap::new();
+        attributes.insert("division.name".to_string(), "payments".to_string());
+        let mut event_attributes = std::collections::HashMap::new();
+        event_attributes.insert("order.total_cents".to_string(), "4200".to_string());
+        let events = vec![super::TelemetryPromotionEvent {
+            name: "checkout.completed".to_string(),
+            attributes: event_attributes,
+        }];
+        let row = super::TelemetryPromotionRow {
+            resource_attributes: &resource_attributes,
+            attributes: &attributes,
+            events: &events,
+            http_request_body: None,
+            http_response_body: Some(r#"{"payment":{"status":"paid"}}"#),
+            metric_value: None,
+        };
+
+        assert_eq!(
+            super::extract_telemetry_promoted_value(
+                &row,
+                &super::PromotionColumn {
+                    name: "service_name".to_string(),
+                    data_type: super::PromotionDataType::String,
+                    nullable: true,
+                    source: super::PromotionSource::ResourceAttribute {
+                        key: "service.name".to_string(),
+                    },
+                },
+            )
+            .expect("resource attr"),
+            Some("checkout-api".to_string())
+        );
+        assert_eq!(
+            super::extract_telemetry_promoted_value(
+                &row,
+                &super::PromotionColumn {
+                    name: "division_name".to_string(),
+                    data_type: super::PromotionDataType::String,
+                    nullable: true,
+                    source: super::PromotionSource::Attribute {
+                        key: "division.name".to_string(),
+                    },
+                },
+            )
+            .expect("attribute"),
+            Some("payments".to_string())
+        );
+        assert_eq!(
+            super::extract_telemetry_promoted_value(
+                &row,
+                &super::PromotionColumn {
+                    name: "order_total_cents".to_string(),
+                    data_type: super::PromotionDataType::Int64,
+                    nullable: true,
+                    source: super::PromotionSource::EventAttribute {
+                        event_name: "checkout.completed".to_string(),
+                        key: "order.total_cents".to_string(),
+                    },
+                },
+            )
+            .expect("event attribute"),
+            Some("4200".to_string())
+        );
+        assert_eq!(
+            super::extract_telemetry_promoted_value(
+                &row,
+                &super::PromotionColumn {
+                    name: "payment_status".to_string(),
+                    data_type: super::PromotionDataType::String,
+                    nullable: true,
+                    source: super::PromotionSource::HttpResponseBody {
+                        json_path: "$.payment.status".to_string(),
+                    },
+                },
+            )
+            .expect("http response json path"),
+            Some("paid".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_telemetry_promoted_value_type_mismatch() {
+        let mut attributes = std::collections::HashMap::new();
+        attributes.insert("checkout.latency_ms".to_string(), "slow".to_string());
+        let empty_resource_attributes = std::collections::HashMap::new();
+        let row = super::TelemetryPromotionRow {
+            resource_attributes: &empty_resource_attributes,
+            attributes: &attributes,
+            events: &[],
+            http_request_body: None,
+            http_response_body: None,
+            metric_value: None,
+        };
+
+        let err = super::extract_telemetry_promoted_value(
+            &row,
+            &super::PromotionColumn {
+                name: "checkout_latency_ms".to_string(),
+                data_type: super::PromotionDataType::Double,
+                nullable: true,
+                source: super::PromotionSource::Attribute {
+                    key: "checkout.latency_ms".to_string(),
+                },
+            },
+        )
+        .expect_err("double parse should fail");
+
+        assert_eq!(err.code(), "promotion_value_type_mismatch");
+        assert_eq!(err.path(), "columns.checkout_latency_ms");
     }
 }

@@ -950,6 +950,7 @@ fn sample_span(counter: u64) -> Span {
         timestamp,
         end_timestamp: Some(timestamp + chrono::Duration::milliseconds(duration_ms)),
         attributes,
+        resource_attributes: HashMap::new(),
         events: Vec::new(),
         status_code: Some(if is_error { "ERROR" } else { "OK" }.to_string()),
         status_message: Some(if is_error { "synthetic error" } else { "ok" }.to_string()),

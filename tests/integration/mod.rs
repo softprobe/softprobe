@@ -6,6 +6,8 @@ pub mod promotion_metadata;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]
+pub mod promotion_telemetry_ingest;
+#[cfg(feature = "integration-e2e")]
 pub mod tenant_promotion_specs;
 
 #[cfg(feature = "integration-e2e")]

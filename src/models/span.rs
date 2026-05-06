@@ -34,6 +34,10 @@ pub struct Span {
     // Includes user-provided sp.* business attributes for search
     pub attributes: HashMap<String, String>,
 
+    // Ingest-only resource attributes used for tenant-scoped promotion extraction.
+    // These are not a physical traces-table column; selected values become promoted columns.
+    pub resource_attributes: HashMap<String, String>,
+
     // Field 13: Events ARRAY<STRUCT<name, timestamp, attributes>>
     // Contains http.request and http.response events with full bodies
     pub events: Vec<SpanEvent>,
@@ -215,6 +219,7 @@ impl Span {
             timestamp,
             end_timestamp,
             attributes,
+            resource_attributes: resource_attributes.clone(),
             events,
             // HTTP fields will be populated by extract_http_data_from_events()
             http_request_method: None,
@@ -369,6 +374,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             end_timestamp: None,
             attributes: HashMap::new(),
+            resource_attributes: HashMap::new(),
             events: Vec::new(),
             status_code: None,
             status_message: None,
