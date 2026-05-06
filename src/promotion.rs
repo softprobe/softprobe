@@ -600,4 +600,75 @@ columns:
         assert!(ddl[2].contains(r#""tenant_alpha".promotion_errors"#));
         assert!(ddl[2].contains("raw_value_preview TEXT"));
     }
+
+    #[test]
+    fn telemetry_column_ddls_are_additive_and_tenant_scoped() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces, logs]
+columns:
+  - name: division_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: division.name
+  - name: checkout_latency_ms
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: checkout.latency_ms
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::TelemetryColumns(spec) = manifest else {
+            panic!("expected telemetry manifest");
+        };
+
+        let ddls = super::telemetry_column_add_ddls(r#""softprobe"."tenant_alpha""#, &spec)
+            .expect("ddl");
+
+        assert_eq!(ddls.len(), 4);
+        assert_eq!(
+            ddls[0],
+            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN division_name VARCHAR;"#
+        );
+        assert_eq!(
+            ddls[3],
+            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN checkout_latency_ms DOUBLE;"#
+        );
+    }
+
+    #[test]
+    fn telemetry_column_compatibility_rejects_existing_columns() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: session_id
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: session.id
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::TelemetryColumns(spec) = manifest else {
+            panic!("expected telemetry manifest");
+        };
+
+        let err = super::validate_telemetry_column_additive(&spec, &["session_id", "trace_id"])
+            .expect_err("existing columns are incompatible");
+
+        assert_eq!(err.code(), "column_already_exists");
+        assert_eq!(err.path(), "columns[0].name");
+    }
 }
