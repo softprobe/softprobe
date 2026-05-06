@@ -34,7 +34,7 @@ pub struct Span {
     // Includes user-provided sp.* business attributes for search
     pub attributes: HashMap<String, String>,
 
-    // Ingest-only resource attributes used for tenant-scoped promotion extraction.
+    // Ingest-only resource attributes used for promotion extraction (active specs in this runtime's DuckLake schema).
     // These are not a physical traces-table column; selected values become promoted columns.
     pub resource_attributes: HashMap<String, String>,
 

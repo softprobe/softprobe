@@ -192,7 +192,7 @@ pub fn parse_promotion_manifest(
     raw.validate()
 }
 
-/// Failed to read or parse tenant-scoped promotion specs from Postgres.
+/// Failed to read or parse promotion specs from Postgres for the configured DuckLake metadata schema.
 #[derive(Debug)]
 pub enum PromotionSpecLoadError {
     Postgres(tokio_postgres::Error),

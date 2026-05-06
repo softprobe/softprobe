@@ -37,7 +37,7 @@ impl TraceTable {
         "traces"
     }
 
-    /// Canonical trace schema. Promoted columns are added via tenant-scoped promotion apply (DuckLake DDL), not process-global config.
+    /// Canonical trace schema. Promoted columns are added via runtime-scoped promotion apply (DuckLake DDL), not process-global config.
     pub fn schema() -> IcebergSchema {
         Self::schema_with_promoted_columns(&[])
     }

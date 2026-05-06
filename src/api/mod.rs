@@ -24,7 +24,7 @@ use std::sync::Arc;
 pub struct ControlPlaneRuntime {
     pub resolver: authn::Resolver,
     pub session_store: Arc<tokio::sync::Mutex<RedisStore>>,
-    /// Resolves tenant-owned DuckLake SQL schemas from Postgres control metadata.
+    /// DuckLake Postgres pool + configured metadata schema for this process (runtime-owned scope).
     pub tenant_ducklake: Option<TenantDuckLakeResolver>,
 }
 
@@ -148,7 +148,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
             "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
             "/v1/data/ducklake-connection": { "get": { "summary": "DuckLake setup material" } },
-            "/v1/promotions/apply": { "post": { "summary": "Apply a tenant-scoped promotion manifest" } },
+            "/v1/promotions/apply": { "post": { "summary": "Apply a promotion manifest to this runtime's DuckLake scope" } },
             "/v1/sessions": { "post": { "summary": "Create session" }, "get": { "summary": "List sessions" } }
         }
     }))

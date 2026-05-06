@@ -1,4 +1,4 @@
-//! Runtime control API + tenant-scoped OTLP trace ingest.
+//! Runtime control API + OTLP trace ingest for the configured DuckLake scope.
 
 use crate::api::ingestion::traces::process_traces;
 use crate::api::AppState;
@@ -70,6 +70,26 @@ fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     path.starts_with("/v1/") && method != Method::OPTIONS
 }
 
+/// JSON body for HTTP 404 when a session id is missing from this process's session store
+/// ([`spec/schemas/session-error.response.schema.json`]).
+fn json_unknown_session(session_id: &str) -> serde_json::Value {
+    json!({
+        "error": {
+            "code": "unknown_session",
+            "message": format!(
+                "no session '{session_id}' in this runtime's session store; confirm SOFTPROBE_RUNTIME_URL points at the deployment that created the session, check session TTL or store reset, and create a new session if needed"
+            )
+        }
+    })
+}
+
+/// Plain-text body for `POST /v1/inject` when the session is missing (proxy contract uses HTTP 404 for misses).
+fn text_unknown_session_for_inject(session_id: &str) -> String {
+    format!(
+        "unknown session '{session_id}': not in this runtime's session store; confirm the proxy/SDK and session control use the same runtime base URL and that the session was created on this deployment (TTL or Redis flush also clears state)"
+    )
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DuckLakeConnectionMaterial {
@@ -91,8 +111,7 @@ fn ducklake_connection_material(
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
     let ducklake = config.ducklake_or_default();
     let ducklake_pg_uri = postgres_ducklake_metadata_path(&ducklake);
-    // Tenant DuckLake schema is control-plane state, not YAML config. The resolver owns the
-    // Postgres mapping from tenant_id to DuckLake schema and data path.
+    // DuckLake schema and data path come from runtime config for this process (`ducklake.*` in YAML).
     let ducklake_data_path = scope.data_path.clone();
     let ducklake_metadata_schema = scope.metadata_schema.clone();
     let gcs_hmac_access_key_id = config.s3.access_key_id.clone();
@@ -723,7 +742,7 @@ async fn v1_close_session(
     let Some(session) = session else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     // Capture export reads `committed_*` views; spans may still be in RAM until flush.
@@ -743,7 +762,7 @@ async fn v1_close_session(
     if !closed {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     }
     Ok(Json(json!({"sessionId": id, "closed": true})))
@@ -782,7 +801,7 @@ async fn v1_load_case(
     let Some(s) = store.load_case(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     Ok(Json(json!({
@@ -821,7 +840,7 @@ async fn v1_apply_rules(
     let Some(s) = store.apply_rules(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     Ok(Json(json!({
@@ -849,7 +868,7 @@ async fn v1_apply_policy(
     let Some(s) = store.apply_policy(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     Ok(Json(json!({
@@ -877,7 +896,7 @@ async fn v1_fixtures_auth(
     let Some(s) = store.apply_fixtures_auth(&id, body.to_vec()).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     Ok(Json(json!({
@@ -898,7 +917,7 @@ async fn v1_session_stats(
     let Some(s) = store.get(&id).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     Ok(Json(json!({
@@ -925,7 +944,7 @@ async fn v1_session_state(
     let Some(s) = store.get(&id).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": "unknown_session", "message": "unknown session"}})),
+            Json(json_unknown_session(&id)),
         ));
     };
     let out = json!({
@@ -1091,6 +1110,33 @@ fn kv_str(key: &str, val: &str) -> KeyValue {
 }
 
 #[cfg(test)]
+mod unknown_session_error_tests {
+    use super::{json_unknown_session, text_unknown_session_for_inject};
+
+    #[test]
+    fn json_unknown_session_includes_id_and_runtime_url_hint() {
+        let v = json_unknown_session("sess_it_123");
+        assert_eq!(v["error"]["code"], "unknown_session");
+        let m = v["error"]["message"].as_str().expect("message");
+        assert!(
+            m.contains("sess_it_123"),
+            "message should cite session id: {m}"
+        );
+        assert!(
+            m.contains("SOFTPROBE_RUNTIME_URL"),
+            "message should hint runtime URL: {m}"
+        );
+    }
+
+    #[test]
+    fn inject_miss_body_is_plain_text_with_session_id() {
+        let t = text_unknown_session_for_inject("sess_proxy_9");
+        assert!(t.contains("sess_proxy_9"), "{t}");
+        assert!(t.to_ascii_lowercase().contains("runtime"), "{t}");
+    }
+}
+
+#[cfg(test)]
 mod annotate_export_tests {
     use super::annotate_export_request;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -1166,7 +1212,10 @@ async fn v1_inject(
     }
     let mut store = control_plane.session_store.lock().await;
     let Some(sess) = store.get(&lookup.session_id).await else {
-        return Err((StatusCode::NOT_FOUND, "unknown session".into()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            text_unknown_session_for_inject(&lookup.session_id),
+        ));
     };
     // Rules are validated on `POST …/rules`. If this fails, the stored blob was
     // not written through that path, data was corrupted, or binary versions skewed.

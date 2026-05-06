@@ -15,13 +15,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tokio_postgres::NoTls;
 
-/// DuckLake storage scope assigned to one tenant.
+/// DuckLake storage scope for this runtime process (configured in `ducklake.*`, not derived from auth tenant id).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantDuckLakeScope {
     /// SQL schema inside the shared Postgres DuckLake metadata database.
     pub metadata_schema: String,
-    /// Data path assigned to this tenant. v1 uses the shared configured path; keeping it in the
-    /// mapping table lets us introduce tenant-specific paths later without changing the resolver API.
+    /// Object-store data path for this deployment (from config).
     pub data_path: String,
 }
 
@@ -103,9 +102,9 @@ impl TenantDuckLakeResolver {
 
     /// Record one successfully applied telemetry promotion manifest in the tenant metadata schema.
     ///
-    /// The manifest is stored in the tenant-contained `promotion_specs` table because ingest loads
-    /// active specs from this table on each tenant-scoped write. The deterministic id keeps repeated
-    /// `promotion apply` calls for the same manifest from creating duplicate active specs.
+    /// The manifest is stored in `promotion_specs` in the configured metadata schema because ingest
+    /// loads active specs on each write. The deterministic id keeps repeated `promotion apply` calls
+    /// for the same manifest from creating duplicate active specs.
     pub async fn record_active_telemetry_promotion_spec(
         &self,
         scope: &TenantDuckLakeScope,

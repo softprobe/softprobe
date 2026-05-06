@@ -30,6 +30,15 @@ Configuration can be provided via:
 - `S3_BUCKET`: S3 bucket name (default: softprobe-recordings)
 - `S3_REGION`: AWS region (default: us-east-1)
 - `CONFIG_FILE`: Path to config file (default: config.yaml)
+- `SOFTPROBE_MAX_HTTP_BODY_BYTES`: Optional override for `server.max_body_size` (Axum `DefaultBodyLimit`) without editing YAML.
+
+### Limits
+
+Tune via `config.yaml` (see comments there) or the env var above:
+
+- **HTTP request bodies:** OTLP and control JSON payloads larger than `max_body_size` are rejected (HTTP 413).
+- **Span / log / metric buffers:** `span_buffering.max_buffer_bytes` and `max_buffer_spans` cap RAM before flush to the ingest pipeline.
+- **DuckLake maintenance:** compaction and metadata retention settings bound catalog growth; see [`docs/design.md`](../docs/design.md) (runtime ingest and storage limits).
 
 ## Development
 

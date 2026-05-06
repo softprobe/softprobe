@@ -883,7 +883,7 @@ mod tests {
         let schema = writer.spans_schema().await.expect("schema");
         assert!(
             schema.field_by_name("division_name").is_none(),
-            "promoted telemetry columns come from tenant-scoped promotion apply, not process config"
+            "promoted telemetry columns come from runtime-scoped promotion apply, not process config"
         );
     }
 }

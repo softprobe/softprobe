@@ -260,9 +260,9 @@ Your instrumentation data is stored in the `traces` Iceberg table with this stru
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
 | `attributes` | All span attributes (MAP) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
-## Column promotion (tenant-scoped)
+## Column promotion (runtime-scoped)
 
-Telemetry column promotion is **not** configured via process-global `config.yaml`. Active promotion manifests are stored per tenant in Postgres (`promotion_specs` in each tenant DuckLake metadata schema) and applied through the promotion workflow (`softprobe promotion validate` / `apply` once implemented). See [`docs/column-promotion.md`](../../docs/column-promotion.md).
+Telemetry column promotion is **not** configured via process-global `config.yaml`. Active promotion manifests are stored in Postgres (`promotion_specs` in **this runtime’s** configured DuckLake metadata schema) and applied through the promotion workflow (`softprobe promotion validate` / `apply`). See [`docs/column-promotion.md`](../../docs/column-promotion.md).
 
 ## Querying Your Data
 

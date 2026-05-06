@@ -393,7 +393,13 @@ impl Config {
             }
         }
 
-        // Add more environment variable overrides as needed
+        if let Ok(raw) = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES") {
+            if let Ok(n) = raw.trim().parse::<usize>() {
+                if n > 0 {
+                    self.server.max_body_size = n;
+                }
+            }
+        }
     }
 }
 
@@ -438,10 +444,12 @@ mod tests {
         let prev_port = std::env::var("PORT").ok();
         let prev_region = std::env::var("S3_REGION").ok();
         let prev_ns = std::env::var("ICEBERG_NAMESPACE").ok();
+        let prev_body = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES").ok();
 
         std::env::set_var("PORT", "9191");
         std::env::set_var("S3_REGION", "eu-west-1");
         std::env::set_var("ICEBERG_NAMESPACE", "acctests");
+        std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES");
 
         let mut c = Config::default();
         c.apply_env_overrides();
@@ -458,9 +466,27 @@ mod tests {
             Some(p) => std::env::set_var("ICEBERG_NAMESPACE", p),
             None => std::env::remove_var("ICEBERG_NAMESPACE"),
         }
+        match prev_body {
+            Some(p) => std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", p),
+            None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
+        }
 
         assert_eq!(c.server.port, 9191);
         assert_eq!(c.storage.s3_region, "eu-west-1");
         assert_eq!(c.iceberg.namespace, "acctests");
+    }
+
+    #[test]
+    fn env_overrides_max_http_body_bytes() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let prev = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES").ok();
+        std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", "5242880");
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        match prev {
+            Some(p) => std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", p),
+            None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
+        }
+        assert_eq!(c.server.max_body_size, 5 * 1024 * 1024);
     }
 }

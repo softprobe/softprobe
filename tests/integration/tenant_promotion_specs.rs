@@ -1,4 +1,4 @@
-//! Tenant-scoped promotion spec loading: two tenants see different active telemetry manifests.
+//! Promotion spec loading is isolated per **Postgres metadata schema**: two schemas in one DB see different active telemetry manifests (runtime deploys use one configured schema per process).
 
 use softprobe_runtime::promotion::{
     ensure_promotion_metadata_tables, load_active_telemetry_columns_manifests,
