@@ -99,6 +99,49 @@ pub struct TelemetryPromotionEvent {
     pub attributes: HashMap<String, String>,
 }
 
+/// Minimal source row view for business table promotion extraction.
+///
+/// Ingest adapters will construct this from spans/logs/events so extraction can stay independent
+/// from OTLP protobuf structs and keep evidence anchors explicit.
+pub struct BusinessPromotionInput<'a> {
+    pub session_id: &'a str,
+    pub trace_id: &'a str,
+    pub span_id: &'a str,
+    pub event_name: Option<&'a str>,
+    pub event_timestamp: Option<&'a str>,
+    pub service_name: Option<&'a str>,
+    pub source_signal: &'a str,
+    pub source_timestamp: &'a str,
+    pub attributes: &'a HashMap<String, String>,
+    pub events: &'a [TelemetryPromotionEvent],
+    pub http_request_body: Option<&'a str>,
+    pub http_response_body: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusinessPromotedRow {
+    pub session_id: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub event_name: Option<String>,
+    pub event_timestamp: Option<String>,
+    pub service_name: Option<String>,
+    pub source_signal: String,
+    pub source_timestamp: String,
+    pub promotion_spec_version: String,
+    pub values: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusinessPromotionError {
+    pub target_column: String,
+    pub source_signal: String,
+    pub source_path: String,
+    pub error_code: String,
+    pub error_message: String,
+    pub raw_value_preview: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionValidationError {
     code: &'static str,
@@ -584,6 +627,130 @@ pub fn extract_telemetry_promoted_value(
     Ok(Some(value))
 }
 
+/// Extract one promoted business row, or `Ok(None)` when the row selector does not match.
+///
+/// Missing nullable values are omitted from `values`. Missing or invalid non-nullable values return
+/// structured errors so ingest can write `promotion_errors` without rejecting the source telemetry
+/// row.
+pub fn extract_business_promoted_row(
+    spec: &BusinessTableManifest,
+    input: &BusinessPromotionInput<'_>,
+) -> Result<Option<BusinessPromotedRow>, Vec<BusinessPromotionError>> {
+    if input
+        .attributes
+        .get(&spec.row_selector.attribute.key)
+        .map(String::as_str)
+        != Some(spec.row_selector.attribute.equals.as_str())
+    {
+        return Ok(None);
+    }
+    let mut values = HashMap::new();
+    let mut errors = Vec::new();
+    for column in &spec.columns {
+        match extract_business_column_value(column, input) {
+            Ok(Some(value)) => {
+                if let Err(err) =
+                    validate_promoted_value_type(&column.name, &column.data_type, &value)
+                {
+                    errors.push(business_error(
+                        column,
+                        input,
+                        "type_mismatch",
+                        err.message(),
+                        Some(value),
+                    ));
+                } else {
+                    values.insert(column.name.clone(), value);
+                }
+            }
+            Ok(None) if column.nullable => {}
+            Ok(None) => errors.push(business_error(
+                column,
+                input,
+                "missing_required_value",
+                "required business promotion value is missing",
+                None,
+            )),
+            Err(err) => errors.push(business_error(
+                column,
+                input,
+                err.code(),
+                err.message(),
+                None,
+            )),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(Some(BusinessPromotedRow {
+        session_id: input.session_id.to_string(),
+        trace_id: input.trace_id.to_string(),
+        span_id: input.span_id.to_string(),
+        event_name: input.event_name.map(str::to_string),
+        event_timestamp: input.event_timestamp.map(str::to_string),
+        service_name: input.service_name.map(str::to_string),
+        source_signal: input.source_signal.to_string(),
+        source_timestamp: input.source_timestamp.to_string(),
+        promotion_spec_version: PROMOTION_SPEC_VERSION.to_string(),
+        values,
+    }))
+}
+
+fn extract_business_column_value(
+    column: &PromotionColumn,
+    input: &BusinessPromotionInput<'_>,
+) -> Result<Option<String>, PromotionValidationError> {
+    match &column.source {
+        PromotionSource::ResourceAttribute { key } | PromotionSource::Attribute { key } => {
+            Ok(input.attributes.get(key).cloned())
+        }
+        PromotionSource::EventAttribute { event_name, key } => Ok(input
+            .events
+            .iter()
+            .find(|event| event.name == *event_name)
+            .and_then(|event| event.attributes.get(key))
+            .cloned()),
+        PromotionSource::HttpRequestBody { json_path } => {
+            extract_json_path_string(input.http_request_body, json_path, &column.name)
+        }
+        PromotionSource::HttpResponseBody { json_path } => {
+            extract_json_path_string(input.http_response_body, json_path, &column.name)
+        }
+    }
+}
+
+fn business_error(
+    column: &PromotionColumn,
+    input: &BusinessPromotionInput<'_>,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    raw_value_preview: Option<String>,
+) -> BusinessPromotionError {
+    BusinessPromotionError {
+        target_column: column.name.clone(),
+        source_signal: input.source_signal.to_string(),
+        source_path: promotion_source_path(&column.source),
+        error_code: code.into(),
+        error_message: message.into(),
+        raw_value_preview: raw_value_preview.map(|s| s.chars().take(128).collect()),
+    }
+}
+
+fn promotion_source_path(source: &PromotionSource) -> String {
+    match source {
+        PromotionSource::ResourceAttribute { key } => format!("resource_attribute:{key}"),
+        PromotionSource::Attribute { key } => format!("attribute:{key}"),
+        PromotionSource::EventAttribute { event_name, key } => {
+            format!("event_attribute:{event_name}:{key}")
+        }
+        PromotionSource::HttpRequestBody { json_path } => format!("http_request_body:{json_path}"),
+        PromotionSource::HttpResponseBody { json_path } => {
+            format!("http_response_body:{json_path}")
+        }
+    }
+}
+
 fn extract_json_path_string(
     body: Option<&str>,
     json_path: &str,
@@ -951,6 +1118,7 @@ fn validate_identifier(path: &str, value: &str) -> Result<(), PromotionValidatio
 #[cfg(test)]
 mod tests {
     use super::{parse_promotion_manifest, PromotionManifest};
+    use std::collections::HashMap;
 
     #[test]
     fn rejects_telemetry_non_nullable_columns() {
@@ -1363,5 +1531,185 @@ columns:
 
         assert_eq!(err.code(), "promotion_value_type_mismatch");
         assert_eq!(err.path(), "columns.checkout_latency_ms");
+    }
+
+    #[test]
+    fn extracts_business_row_with_evidence_anchors_from_http_body_and_attributes() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    source:
+      from: http_response_body
+      json_path: $.order.id
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+  - name: payment_status
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: payment.status
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::BusinessTable(spec) = manifest else {
+            panic!("expected business table manifest");
+        };
+        let attributes = HashMap::from([
+            ("sp.workflow".to_string(), "checkout".to_string()),
+            ("payment.status".to_string(), "paid".to_string()),
+        ]);
+        let input = super::BusinessPromotionInput {
+            session_id: "session-1",
+            trace_id: "trace-1",
+            span_id: "span-1",
+            event_name: None,
+            event_timestamp: None,
+            service_name: Some("checkout-api"),
+            source_signal: "trace",
+            source_timestamp: "2026-05-06T17:00:00Z",
+            attributes: &attributes,
+            events: &[],
+            http_request_body: None,
+            http_response_body: Some(r#"{"order":{"id":"ord_123","total_cents":4200}}"#),
+        };
+
+        let row = super::extract_business_promoted_row(&spec, &input)
+            .expect("extract row")
+            .expect("selector matches");
+
+        assert_eq!(row.session_id, "session-1");
+        assert_eq!(row.trace_id, "trace-1");
+        assert_eq!(row.span_id, "span-1");
+        assert_eq!(row.service_name.as_deref(), Some("checkout-api"));
+        assert_eq!(row.source_signal, "trace");
+        assert_eq!(row.source_timestamp, "2026-05-06T17:00:00Z");
+        assert_eq!(row.values["order_id"], "ord_123");
+        assert_eq!(row.values["total_cents"], "4200");
+        assert_eq!(row.values["payment_status"], "paid");
+    }
+
+    #[test]
+    fn business_row_extraction_returns_none_when_selector_does_not_match() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    source:
+      from: http_response_body
+      json_path: $.order.id
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::BusinessTable(spec) = manifest else {
+            panic!("expected business table manifest");
+        };
+        let attributes = HashMap::from([("sp.workflow".to_string(), "refund".to_string())]);
+        let input = super::BusinessPromotionInput {
+            session_id: "session-1",
+            trace_id: "trace-1",
+            span_id: "span-1",
+            event_name: None,
+            event_timestamp: None,
+            service_name: None,
+            source_signal: "trace",
+            source_timestamp: "2026-05-06T17:00:00Z",
+            attributes: &attributes,
+            events: &[],
+            http_request_body: None,
+            http_response_body: Some(r#"{"order":{"id":"ord_123"}}"#),
+        };
+
+        let row = super::extract_business_promoted_row(&spec, &input).expect("extract row");
+
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn business_row_extraction_reports_missing_required_and_reads_event_sources() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    source:
+      from: http_response_body
+      json_path: $.order.id
+  - name: risk_score
+    type: double
+    nullable: true
+    source:
+      from: event_attribute
+      event_name: risk.checked
+      key: risk.score
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::BusinessTable(spec) = manifest else {
+            panic!("expected business table manifest");
+        };
+        let attributes = HashMap::from([("sp.workflow".to_string(), "checkout".to_string())]);
+        let events = vec![super::TelemetryPromotionEvent {
+            name: "risk.checked".to_string(),
+            attributes: HashMap::from([("risk.score".to_string(), "0.87".to_string())]),
+        }];
+        let input = super::BusinessPromotionInput {
+            session_id: "session-1",
+            trace_id: "trace-1",
+            span_id: "span-1",
+            event_name: Some("risk.checked"),
+            event_timestamp: Some("2026-05-06T17:00:01Z"),
+            service_name: None,
+            source_signal: "event",
+            source_timestamp: "2026-05-06T17:00:01Z",
+            attributes: &attributes,
+            events: &events,
+            http_request_body: None,
+            http_response_body: Some(r#"{"order":{}}"#),
+        };
+
+        let errors = super::extract_business_promoted_row(&spec, &input)
+            .expect_err("required order id is missing");
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].target_column, "order_id");
+        assert_eq!(errors[0].error_code, "missing_required_value");
     }
 }
