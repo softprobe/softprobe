@@ -12,6 +12,7 @@ pub mod grpc_otlp;
 pub mod ingest_engine;
 pub mod inject;
 pub mod models;
+pub mod promotion;
 pub mod query;
 pub mod runtime_api;
 pub mod session_redis;
