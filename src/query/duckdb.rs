@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 pub struct DuckDBQueryEngine {
     _shared_connection: Arc<Mutex<Connection>>,
-    workers: Arc<Vec<WorkerHandle>>,
+    workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
 }
 
@@ -138,7 +138,8 @@ pub fn view_counters_snapshot() -> ViewCounterSnapshot {
 }
 
 struct WorkerHandle {
-    sender: mpsc::Sender<QueryRequest>,
+    sender: Option<mpsc::Sender<QueryRequest>>,
+    join: Option<std::thread::JoinHandle<()>>,
 }
 
 struct QueryRequest {
@@ -215,28 +216,34 @@ impl DuckDBQueryEngine {
         for _ in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
             let core = core.clone();
-            std::thread::spawn(move || {
-                // Each worker gets its own independent connection (not cloned)
-                let connection = match core.open_connection() {
-                    Ok(conn) => conn,
-                    Err(err) => {
-                        warn!("DuckDB worker failed to open connection: {}", err);
-                        return;
+            let join = std::thread::Builder::new()
+                .name("softprobe-duckdb-query-worker".to_string())
+                .spawn(move || {
+                    // Each worker gets its own independent connection (not cloned)
+                    let connection = match core.open_connection() {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            warn!("DuckDB worker failed to open connection: {}", err);
+                            return;
+                        }
+                    };
+                    let mut state = match core.init_connection_state_with(connection) {
+                        Ok(state) => state,
+                        Err(err) => {
+                            warn!("DuckDB worker failed to initialize: {}", err);
+                            return;
+                        }
+                    };
+                    while let Some(request) = rx.blocking_recv() {
+                        let result = core.execute_query_on_state(&mut state, &request.sql);
+                        let _ = request.respond_to.send(result);
                     }
-                };
-                let mut state = match core.init_connection_state_with(connection) {
-                    Ok(state) => state,
-                    Err(err) => {
-                        warn!("DuckDB worker failed to initialize: {}", err);
-                        return;
-                    }
-                };
-                while let Some(request) = rx.blocking_recv() {
-                    let result = core.execute_query_on_state(&mut state, &request.sql);
-                    let _ = request.respond_to.send(result);
-                }
+                })
+                .map_err(|err| anyhow!("DuckDB worker spawn failed: {}", err))?;
+            workers.push(WorkerHandle {
+                sender: Some(tx),
+                join: Some(join),
             });
-            workers.push(WorkerHandle { sender: tx });
         }
 
         // Keep a dummy connection for the _shared_connection field (for compatibility)
@@ -244,7 +251,7 @@ impl DuckDBQueryEngine {
 
         Ok(Self {
             _shared_connection: Arc::new(Mutex::new(dummy_conn)),
-            workers: Arc::new(workers),
+            workers,
             next_worker: AtomicUsize::new(0),
         })
     }
@@ -254,18 +261,39 @@ impl DuckDBQueryEngine {
     pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {
         let index = self.next_worker.fetch_add(1, Ordering::Relaxed);
         let worker = &self.workers[index % self.workers.len()];
+        let sender = worker
+            .sender
+            .as_ref()
+            .ok_or_else(|| anyhow!("DuckDB worker channel closed"))?;
         let (tx, rx) = oneshot::channel();
         let request = QueryRequest {
             sql: query.to_string(),
             respond_to: tx,
         };
-        worker
-            .sender
+        sender
             .send(request)
             .await
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
         rx.await
             .map_err(|_| anyhow!("DuckDB worker dropped response"))?
+    }
+}
+
+impl Drop for DuckDBQueryEngine {
+    fn drop(&mut self) {
+        // DuckDB/extension connections are not safe to leave on detached threads while the process
+        // or test binary is exiting. Close every worker channel first so all workers can break out
+        // of `blocking_recv`, then join them before this engine releases its final shared state.
+        for worker in &mut self.workers {
+            worker.sender.take();
+        }
+        for worker in &mut self.workers {
+            if let Some(join) = worker.join.take() {
+                if let Err(err) = join.join() {
+                    warn!("DuckDB query worker panicked during shutdown: {:?}", err);
+                }
+            }
+        }
     }
 }
 
