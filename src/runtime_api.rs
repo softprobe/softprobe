@@ -970,7 +970,29 @@ async fn v1_get_capture(
     Path(capture_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let sql = capture_query_sql(&tenant.tenant_id, &capture_id);
-    match state.query_engine.execute_query(&sql).await {
+    let result = if let Some(tenant_ducklake) = state
+        .control_plane
+        .as_ref()
+        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    {
+        let scope = tenant_ducklake
+            .resolve_or_create(&tenant.tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
+                )
+            })?;
+        state
+            .query_engine
+            .execute_query_in_ducklake_scope(&sql, &scope)
+            .await
+    } else {
+        state.query_engine.execute_query(&sql).await
+    };
+
+    match result {
         Ok(result) => {
             if result.row_count == 0 {
                 return Err((

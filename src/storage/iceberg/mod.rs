@@ -950,21 +950,21 @@ async fn ensure_table_exists(
     // Create table based on type
     let (schema, partition_spec, sort_order, properties) = match table_type {
         TableType::Spans => {
-            let schema = TraceTable::schema(None);
+            let schema = TraceTable::schema();
             let partition_spec = TraceTable::partition_spec(&schema)?;
             let sort_order = TraceTable::sort_order(&schema)?;
             let properties = TraceTable::table_properties();
             (schema, partition_spec, sort_order, properties)
         }
         TableType::Logs => {
-            let schema = OtlpLogsTable::schema(None);
+            let schema = OtlpLogsTable::schema();
             let partition_spec = OtlpLogsTable::partition_spec(&schema)?;
             let sort_order = OtlpLogsTable::sort_order(&schema)?;
             let properties = OtlpLogsTable::table_properties();
             (schema, partition_spec, sort_order, properties)
         }
         TableType::Metrics => {
-            let schema = OtlpMetricsTable::schema(None);
+            let schema = OtlpMetricsTable::schema();
             let partition_spec = OtlpMetricsTable::partition_spec(&schema)?;
             let sort_order = OtlpMetricsTable::sort_order(&schema)?;
             let properties = OtlpMetricsTable::table_properties();

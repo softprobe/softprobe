@@ -2,12 +2,14 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
 use crate::storage::iceberg::arrow;
 use crate::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
+use crate::tenant_ducklake::{TenantDuckLakeResolver, TenantDuckLakeScope};
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
 use duckdb::{Connection, ToSql};
 use iceberg::spec::Schema as IcebergSchema;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -57,6 +59,8 @@ pub struct DuckLakeWriter {
     ducklake: DuckLakeConfig,
     cache_dir: Option<PathBuf>,
     dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+    /// When set with `catalog_type = postgres`, commits route to per-tenant metadata schemas.
+    tenant_ducklake: Option<TenantDuckLakeResolver>,
     /// Bumped after each successful committed write so query-side DuckDB connections can reattach.
     catalog_write_generation: Arc<AtomicU64>,
 }
@@ -65,6 +69,7 @@ impl DuckLakeWriter {
     pub async fn new(
         config: &Config,
         dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+        tenant_ducklake: Option<TenantDuckLakeResolver>,
     ) -> Result<Self> {
         let ducklake = config.ducklake_or_default();
         let writer = Self {
@@ -72,6 +77,7 @@ impl DuckLakeWriter {
             ducklake,
             cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
             dropdown_catalog,
+            tenant_ducklake,
             catalog_write_generation: Arc::new(AtomicU64::new(0)),
         };
         writer.initialize_catalog().await?;
@@ -97,57 +103,197 @@ impl DuckLakeWriter {
         Ok(())
     }
 
+    fn use_tenant_scoped_ducklake(&self) -> bool {
+        self.tenant_ducklake.is_some() && self.ducklake.catalog_type == "postgres"
+    }
+
+    fn effective_ducklake(&self, scope: &TenantDuckLakeScope) -> DuckLakeConfig {
+        let mut dk = self.ducklake.clone();
+        dk.metadata_schema = scope.metadata_schema.clone();
+        dk.data_path = scope.data_path.clone();
+        dk
+    }
+
+    fn partition_spans_by_tenant(batches: Vec<Vec<Span>>) -> Result<BTreeMap<String, Vec<Span>>> {
+        let mut m: BTreeMap<String, Vec<Span>> = BTreeMap::new();
+        for batch in batches {
+            for span in batch {
+                let tid = span.tenant_id.clone().ok_or_else(|| {
+                    anyhow!(
+                        "Postgres DuckLake catalog requires span.tenant_id (sp.tenant.id) for tenant routing"
+                    )
+                })?;
+                m.entry(tid).or_default().push(span);
+            }
+        }
+        Ok(m)
+    }
+
+    fn partition_logs_by_tenant(batches: Vec<Vec<Log>>) -> Result<BTreeMap<String, Vec<Log>>> {
+        let mut m: BTreeMap<String, Vec<Log>> = BTreeMap::new();
+        for batch in batches {
+            for log in batch {
+                let tid = log
+                    .resource_attributes
+                    .get("sp.tenant.id")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Postgres DuckLake catalog requires sp.tenant.id on log resource attributes for tenant routing"
+                        )
+                    })?;
+                m.entry(tid).or_default().push(log);
+            }
+        }
+        Ok(m)
+    }
+
+    fn partition_metrics_by_tenant(
+        batches: Vec<Vec<Metric>>,
+    ) -> Result<BTreeMap<String, Vec<Metric>>> {
+        let mut m: BTreeMap<String, Vec<Metric>> = BTreeMap::new();
+        for batch in batches {
+            for metric in batch {
+                let tid = metric
+                    .resource_attributes
+                    .get("sp.tenant.id")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Postgres DuckLake catalog requires sp.tenant.id on metric resource attributes for tenant routing"
+                        )
+                    })?;
+                m.entry(tid).or_default().push(metric);
+            }
+        }
+        Ok(m)
+    }
+
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
-        let schema = self.spans_schema().await?;
-        let mut record_batches = Vec::new();
-        for batch in batches {
-            if !batch.is_empty() {
-                record_batches.push(Span::to_record_batch(&batch, schema.as_ref())?);
+        if self.use_tenant_scoped_ducklake() {
+            let resolver = self.tenant_ducklake.as_ref().unwrap();
+            let grouped = Self::partition_spans_by_tenant(batches)?;
+            let schema = self.spans_schema().await?;
+            for (tenant_id, spans) in grouped {
+                if spans.is_empty() {
+                    continue;
+                }
+                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let dk = self.effective_ducklake(&scope);
+                let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
+                self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
+                    .await?;
             }
+            Ok(())
+        } else {
+            let schema = self.spans_schema().await?;
+            let mut record_batches = Vec::new();
+            for batch in batches {
+                if !batch.is_empty() {
+                    record_batches.push(Span::to_record_batch(&batch, schema.as_ref())?);
+                }
+            }
+            self.write_record_batches_internal("traces", record_batches)
+                .await
         }
-        self.write_record_batches_internal("traces", record_batches)
-            .await
     }
 
     pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
-        let schema = self.logs_schema().await?;
-        let mut record_batches = Vec::new();
-        for batch in batches {
-            if !batch.is_empty() {
-                record_batches.push(arrow::logs_to_record_batch(&batch, schema.as_ref())?);
+        if self.use_tenant_scoped_ducklake() {
+            let resolver = self.tenant_ducklake.as_ref().unwrap();
+            let grouped = Self::partition_logs_by_tenant(batches)?;
+            let schema = self.logs_schema().await?;
+            for (tenant_id, logs) in grouped {
+                if logs.is_empty() {
+                    continue;
+                }
+                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let dk = self.effective_ducklake(&scope);
+                let record_batches = vec![arrow::logs_to_record_batch(&logs, schema.as_ref())?];
+                self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
+                    .await?;
             }
+            Ok(())
+        } else {
+            let schema = self.logs_schema().await?;
+            let mut record_batches = Vec::new();
+            for batch in batches {
+                if !batch.is_empty() {
+                    record_batches.push(arrow::logs_to_record_batch(&batch, schema.as_ref())?);
+                }
+            }
+            self.write_record_batches_internal("logs", record_batches)
+                .await
         }
-        self.write_record_batches_internal("logs", record_batches)
-            .await
     }
 
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
-        let schema = self.metrics_schema().await?;
-        let mut record_batches = Vec::new();
-        for batch in batches {
-            if !batch.is_empty() {
-                record_batches.push(arrow::metrics_to_record_batch(&batch, schema.as_ref())?);
+        if self.use_tenant_scoped_ducklake() {
+            let resolver = self.tenant_ducklake.as_ref().unwrap();
+            let grouped = Self::partition_metrics_by_tenant(batches)?;
+            let schema = self.metrics_schema().await?;
+            for (tenant_id, metrics) in grouped {
+                if metrics.is_empty() {
+                    continue;
+                }
+                let scope = resolver.resolve_or_create(&tenant_id).await?;
+                let dk = self.effective_ducklake(&scope);
+                let record_batches =
+                    vec![arrow::metrics_to_record_batch(&metrics, schema.as_ref())?];
+                self.write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
+                    .await?;
             }
+            Ok(())
+        } else {
+            let schema = self.metrics_schema().await?;
+            let mut record_batches = Vec::new();
+            for batch in batches {
+                if !batch.is_empty() {
+                    record_batches.push(arrow::metrics_to_record_batch(&batch, schema.as_ref())?);
+                }
+            }
+            self.write_record_batches_internal("metrics", record_batches)
+                .await
         }
-        self.write_record_batches_internal("metrics", record_batches)
-            .await
     }
 
     pub async fn write_span_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
-        self.write_record_batches_internal("traces", record_batches)
-            .await
+        if self.use_tenant_scoped_ducklake() {
+            let tid = crate::catalog::resolve_trace_tenant_id(&record_batches).ok_or_else(|| {
+                anyhow!(
+                    "Postgres DuckLake catalog requires a consistent tenant_id column on trace batches"
+                )
+            })?;
+            let scope = self
+                .tenant_ducklake
+                .as_ref()
+                .unwrap()
+                .resolve_or_create(&tid)
+                .await?;
+            let dk = self.effective_ducklake(&scope);
+            self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
+                .await
+        } else {
+            self.write_record_batches_internal("traces", record_batches)
+                .await
+        }
     }
 
     pub async fn write_log_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
+        if self.use_tenant_scoped_ducklake() {
+            anyhow::bail!(
+                "write_log_record_batches with Postgres tenant DuckLake requires batched domain models so sp.tenant.id can be read from resource attributes; use write_log_batches"
+            );
+        }
         self.write_record_batches_internal("logs", record_batches)
             .await
     }
@@ -156,24 +302,39 @@ impl DuckLakeWriter {
         &self,
         record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
+        if self.use_tenant_scoped_ducklake() {
+            anyhow::bail!(
+                "write_metric_record_batches with Postgres tenant DuckLake requires batched domain models so sp.tenant.id can be read from resource attributes; use write_metric_batches"
+            );
+        }
         self.write_record_batches_internal("metrics", record_batches)
             .await
     }
 
     pub async fn spans_schema(&self) -> Result<Arc<IcebergSchema>> {
-        Ok(Arc::new(TraceTable::schema(None)))
+        Ok(Arc::new(TraceTable::schema()))
     }
 
     pub async fn logs_schema(&self) -> Result<Arc<IcebergSchema>> {
-        Ok(Arc::new(OtlpLogsTable::schema(None)))
+        Ok(Arc::new(OtlpLogsTable::schema()))
     }
 
     pub async fn metrics_schema(&self) -> Result<Arc<IcebergSchema>> {
-        Ok(Arc::new(OtlpMetricsTable::schema(None)))
+        Ok(Arc::new(OtlpMetricsTable::schema()))
     }
 
     async fn write_record_batches_internal(
         &self,
+        table_name: &str,
+        record_batches: Vec<RecordBatch>,
+    ) -> Result<()> {
+        self.write_record_batches_internal_with_ducklake(&self.ducklake, table_name, record_batches)
+            .await
+    }
+
+    async fn write_record_batches_internal_with_ducklake(
+        &self,
+        dk: &DuckLakeConfig,
         table_name: &str,
         record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
@@ -196,11 +357,11 @@ impl DuckLakeWriter {
 
         let temp_path = self.write_temp_parquet(table_name, &record_batches)?;
         let conn = self.open_connection()?;
-        self.attach_ducklake(&conn)?;
-        self.ensure_schema(&conn)?;
+        self.attach_ducklake_for(&conn, dk)?;
+        self.ensure_schema_for(&conn, dk)?;
 
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-        let candidates = self.table_name_candidates(table_name);
+        let candidates = self.table_name_candidates_for(table_name, dk);
         let mut last_err: Option<anyhow::Error> = None;
         let mut wrote = false;
         for qualified_table in candidates {
@@ -240,7 +401,7 @@ impl DuckLakeWriter {
             let _ = std::fs::remove_file(&temp_path);
             return Err(last_err.unwrap_or_else(|| anyhow!("DuckLake write failed")));
         }
-        self.update_metadata_pointer(table_name)?;
+        self.update_metadata_pointer_for(table_name, dk)?;
         let _ = std::fs::remove_file(&temp_path);
         self.catalog_write_generation
             .fetch_add(1, Ordering::Release);
@@ -311,41 +472,42 @@ impl DuckLakeWriter {
     }
 
     fn attach_ducklake(&self, conn: &Connection) -> Result<()> {
-        let attach_target = match self.ducklake.catalog_type.as_str() {
+        self.attach_ducklake_for(conn, &self.ducklake)
+    }
+
+    fn attach_ducklake_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
+        let attach_target = match dk.catalog_type.as_str() {
             "postgres" => {
-                if self.ducklake.metadata_path.starts_with("postgres:") {
-                    self.ducklake.metadata_path.clone()
+                if dk.metadata_path.starts_with("postgres:") {
+                    dk.metadata_path.clone()
                 } else {
-                    format!("postgres:{}", self.ducklake.metadata_path)
+                    format!("postgres:{}", dk.metadata_path)
                 }
             }
             "sqlite" => {
-                if self.ducklake.metadata_path.starts_with("sqlite:") {
-                    self.ducklake.metadata_path.clone()
+                if dk.metadata_path.starts_with("sqlite:") {
+                    dk.metadata_path.clone()
                 } else {
-                    format!("sqlite:{}", self.ducklake.metadata_path)
+                    format!("sqlite:{}", dk.metadata_path)
                 }
             }
-            _ => self.ducklake.metadata_path.clone(),
+            _ => dk.metadata_path.clone(),
         };
-        self.prepare_local_ducklake_paths(&attach_target)?;
+        self.prepare_local_ducklake_paths_for(&attach_target, dk)?;
 
-        let mut options = vec![format!(
-            "DATA_PATH '{}'",
-            escape_sql_literal(&self.ducklake.data_path)
-        )];
-        if self.ducklake.catalog_type == "postgres" && self.ducklake.metadata_schema != "main" {
-            let schema = escape_sql_literal(&self.ducklake.metadata_schema);
+        let mut options = vec![format!("DATA_PATH '{}'", escape_sql_literal(&dk.data_path))];
+        if dk.catalog_type == "postgres" && dk.metadata_schema != "main" {
+            let schema = escape_sql_literal(&dk.metadata_schema);
             options.push(format!("METADATA_SCHEMA '{}'", schema));
             options.push(format!("META_SCHEMA '{}'", schema));
         }
-        if let Some(limit) = self.ducklake.data_inlining_row_limit {
+        if let Some(limit) = dk.data_inlining_row_limit {
             options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
         }
         let sql = format!(
             "ATTACH 'ducklake:{target}' AS {alias} ({opts});",
             target = escape_sql_literal(&attach_target),
-            alias = self.ducklake.catalog_alias,
+            alias = dk.catalog_alias,
             opts = options.join(", ")
         );
         match conn.execute_batch(&sql) {
@@ -360,8 +522,12 @@ impl DuckLakeWriter {
         }
     }
 
-    fn prepare_local_ducklake_paths(&self, attach_target: &str) -> Result<()> {
-        if self.ducklake.catalog_type == "duckdb" || self.ducklake.catalog_type == "sqlite" {
+    fn prepare_local_ducklake_paths_for(
+        &self,
+        attach_target: &str,
+        dk: &DuckLakeConfig,
+    ) -> Result<()> {
+        if dk.catalog_type == "duckdb" || dk.catalog_type == "sqlite" {
             let raw = attach_target
                 .strip_prefix("sqlite:")
                 .unwrap_or(attach_target)
@@ -371,39 +537,47 @@ impl DuckLakeWriter {
             if let Some(parent) = metadata_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            if !self.ducklake.data_path.contains("://") {
-                std::fs::create_dir_all(&self.ducklake.data_path)?;
+            if !dk.data_path.contains("://") {
+                std::fs::create_dir_all(&dk.data_path)?;
             }
         }
         Ok(())
     }
 
     fn ensure_schema(&self, conn: &Connection) -> Result<()> {
-        if self.ducklake.metadata_schema == "main" {
+        self.ensure_schema_for(conn, &self.ducklake)
+    }
+
+    fn ensure_schema_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
+        if dk.metadata_schema == "main" {
             return Ok(());
         }
         conn.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS {}.{};",
-            self.ducklake.catalog_alias, self.ducklake.metadata_schema
+            dk.catalog_alias, dk.metadata_schema
         ))?;
         Ok(())
     }
 
     fn qualified_table_name(&self, table_name: &str) -> String {
-        ducklake_qualified_table_name(&self.ducklake, table_name)
+        self.qualified_table_name_for(table_name, &self.ducklake)
     }
 
-    fn table_name_candidates(&self, table_name: &str) -> Vec<String> {
+    fn qualified_table_name_for(&self, table_name: &str, dk: &DuckLakeConfig) -> String {
+        ducklake_qualified_table_name(dk, table_name)
+    }
+
+    fn table_name_candidates_for(&self, table_name: &str, dk: &DuckLakeConfig) -> Vec<String> {
         // Prefer catalog.schema.table when metadata lives in a non-main schema; fall back to
         // catalog.table if the engine rejects the three-part name. set_option scope must match
         // whichever form succeeds (see apply_table_options).
         vec![
-            self.qualified_table_name(table_name),
-            format!("{}.{}", self.ducklake.catalog_alias, table_name),
+            self.qualified_table_name_for(table_name, dk),
+            format!("{}.{}", dk.catalog_alias, table_name),
         ]
     }
 
-    fn update_metadata_pointer(&self, table_name: &str) -> Result<()> {
+    fn update_metadata_pointer_for(&self, table_name: &str, dk: &DuckLakeConfig) -> Result<()> {
         let Some(cache_dir) = self.cache_dir.as_ref() else {
             return Ok(());
         };
@@ -419,9 +593,9 @@ impl DuckLakeWriter {
             }
         }
         let payload = serde_json::json!({
-            "table_location": self.ducklake.data_path,
+            "table_location": dk.data_path,
             "metadata_file": format!("{table_name}-ducklake-metadata.json"),
-            "metadata_location": format!("ducklake://{}/{}/{}", self.ducklake.catalog_alias, self.ducklake.metadata_schema, table_name),
+            "metadata_location": format!("ducklake://{}/{}/{}", dk.catalog_alias, dk.metadata_schema, table_name),
             "snapshot_id": next_snapshot,
             "data_files_path": serde_json::Value::Null,
         });
@@ -537,7 +711,6 @@ fn size_literal(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PromotedColumn, SchemaPromotionConfig, TablePromotionConfig};
 
     #[test]
     fn set_option_scope_matches_qualified_table_shape() {
@@ -552,20 +725,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_schemas_ignore_process_global_schema_promotion() {
-        let mut config = Config::default();
-        config.schema_promotion = Some(SchemaPromotionConfig {
-            traces: Some(TablePromotionConfig {
-                attributes: vec![PromotedColumn {
-                    attribute_key: "division.name".to_string(),
-                    column_name: Some("division_name".to_string()),
-                    data_type: None,
-                }],
-                resource_attributes: Vec::new(),
-            }),
-            logs: None,
-            metrics: None,
-        });
+    async fn spans_schema_has_no_process_global_promoted_columns() {
+        let config = Config::default();
         let writer = DuckLakeWriter {
             config,
             ducklake: DuckLakeConfig {
@@ -578,13 +739,14 @@ mod tests {
             },
             cache_dir: None,
             dropdown_catalog: None,
+            tenant_ducklake: None,
             catalog_write_generation: Arc::new(AtomicU64::new(0)),
         };
 
         let schema = writer.spans_schema().await.expect("schema");
         assert!(
             schema.field_by_name("division_name").is_none(),
-            "process-global schema_promotion must not alter tenant telemetry schemas"
+            "promoted telemetry columns come from tenant-scoped promotion apply, not process config"
         );
     }
 }

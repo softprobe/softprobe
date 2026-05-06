@@ -129,6 +129,70 @@ pub fn parse_promotion_manifest(
     raw.validate()
 }
 
+/// Failed to read or parse tenant-scoped promotion specs from Postgres.
+#[derive(Debug)]
+pub enum PromotionSpecLoadError {
+    Postgres(tokio_postgres::Error),
+    InvalidRowManifest {
+        spec_id: String,
+        source: PromotionValidationError,
+    },
+}
+
+impl std::fmt::Display for PromotionSpecLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Postgres(e) => write!(f, "postgres error loading promotion_specs: {e}"),
+            Self::InvalidRowManifest { spec_id, source } => {
+                write!(
+                    f,
+                    "promotion_specs row {spec_id} has invalid manifest: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PromotionSpecLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Postgres(e) => Some(e),
+            Self::InvalidRowManifest { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Load every **active** telemetry column manifest for one tenant DuckLake metadata schema.
+///
+/// Rows with `target_kind != telemetry_columns` are skipped. Business-table specs may live in the
+/// same table but are ignored here so ingest/query can resolve telemetry promotion per tenant.
+pub async fn load_active_telemetry_columns_manifests(
+    client: &tokio_postgres::Client,
+    tenant_schema: &str,
+) -> Result<Vec<TelemetryColumnsManifest>, PromotionSpecLoadError> {
+    let schema = quote_sql_ident(tenant_schema);
+    let sql = format!(
+        "SELECT spec_id, manifest_json FROM {schema}.promotion_specs WHERE status = 'active' AND target_kind = 'telemetry_columns';"
+    );
+    let rows = client
+        .query(&sql, &[])
+        .await
+        .map_err(PromotionSpecLoadError::Postgres)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let spec_id: String = row.get(0);
+        let manifest_json: String = row.get(1);
+        match parse_promotion_manifest(&manifest_json) {
+            Ok(PromotionManifest::TelemetryColumns(m)) => out.push(m),
+            Ok(PromotionManifest::BusinessTable(_)) => {}
+            Err(e) => {
+                return Err(PromotionSpecLoadError::InvalidRowManifest { spec_id, source: e });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Ensure the hardcoded promotion metadata tables exist inside one tenant schema.
 ///
 /// These are control/diagnostic tables for the promotion system itself. They live in the tenant's
@@ -186,6 +250,135 @@ pub fn promotion_metadata_table_ddls(tenant_schema: &str) -> Vec<String> {
 
 fn quote_sql_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
+}
+
+fn telemetry_table_bare_name(table: &TelemetryTable) -> &'static str {
+    match table {
+        TelemetryTable::Traces => "traces",
+        TelemetryTable::Logs => "logs",
+        TelemetryTable::Metrics => "metrics",
+    }
+}
+
+/// Canonical Iceberg / DuckLake column names that must not be re-declared via telemetry promotion.
+fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static str] {
+    match table {
+        TelemetryTable::Traces => &[
+            "session_id",
+            "trace_id",
+            "span_id",
+            "parent_span_id",
+            "app_id",
+            "organization_id",
+            "tenant_id",
+            "message_type",
+            "span_kind",
+            "timestamp",
+            "end_timestamp",
+            "attributes",
+            "events",
+            "status_code",
+            "status_message",
+            "http_request_method",
+            "http_request_path",
+            "http_request_headers",
+            "http_request_body",
+            "http_response_status_code",
+            "http_response_headers",
+            "http_response_body",
+            "record_date",
+        ],
+        TelemetryTable::Logs => &[
+            "session_id",
+            "timestamp",
+            "observed_timestamp",
+            "severity_number",
+            "severity_text",
+            "body",
+            "attributes",
+            "resource_attributes",
+            "trace_id",
+            "span_id",
+            "record_date",
+        ],
+        TelemetryTable::Metrics => &[
+            "metric_name",
+            "description",
+            "unit",
+            "metric_type",
+            "timestamp",
+            "value",
+            "attributes",
+            "resource_attributes",
+            "record_date",
+        ],
+    }
+}
+
+fn promotion_data_type_sql(t: &PromotionDataType) -> &'static str {
+    match t {
+        PromotionDataType::String => "VARCHAR",
+        PromotionDataType::Bool => "BOOLEAN",
+        PromotionDataType::Int64 => "BIGINT",
+        PromotionDataType::Double => "DOUBLE",
+        PromotionDataType::Decimal => "DOUBLE",
+        PromotionDataType::Timestamp => "TIMESTAMPTZ",
+        PromotionDataType::Json => "VARCHAR",
+    }
+}
+
+/// Reject telemetry promotion columns that collide with canonical table columns or break nullability rules.
+pub fn validate_telemetry_column_additive(
+    spec: &TelemetryColumnsManifest,
+) -> Result<(), PromotionValidationError> {
+    for (idx, col) in spec.columns.iter().enumerate() {
+        if !col.nullable {
+            return Err(PromotionValidationError::new(
+                "telemetry_column_not_nullable",
+                format!("columns[{idx}].nullable"),
+                "telemetry promoted columns must be nullable",
+            ));
+        }
+        let path = format!("columns[{idx}].name");
+        validate_identifier(&path, &col.name)?;
+        for table in &spec.target.tables {
+            if reserved_telemetry_column_names(table)
+                .iter()
+                .any(|&n| n == col.name.as_str())
+            {
+                return Err(PromotionValidationError::new(
+                    "column_already_exists",
+                    path.clone(),
+                    format!("column {} is already defined on {:?}", col.name, table),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Generate `ALTER TABLE ... ADD COLUMN` statements for additive nullable telemetry promotion.
+///
+/// `catalog_schema_prefix` must be a fully quoted DuckLake qualification for catalog + metadata schema,
+/// for example `"softprobe"."tenant_acme"` (no trailing dot).
+pub fn telemetry_column_add_ddls(
+    catalog_schema_prefix: &str,
+    spec: &TelemetryColumnsManifest,
+) -> Result<Vec<String>, PromotionValidationError> {
+    validate_telemetry_column_additive(spec)?;
+    let mut ddls = Vec::new();
+    for table in &spec.target.tables {
+        let bare = telemetry_table_bare_name(table);
+        for col in &spec.columns {
+            let typ = promotion_data_type_sql(&col.data_type);
+            let qcol = quote_sql_ident(&col.name);
+            ddls.push(format!(
+                "ALTER TABLE {}.{} ADD COLUMN {} {};",
+                catalog_schema_prefix, bare, qcol, typ
+            ));
+        }
+    }
+    Ok(ddls)
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,17 +822,17 @@ columns:
             panic!("expected telemetry manifest");
         };
 
-        let ddls = super::telemetry_column_add_ddls(r#""softprobe"."tenant_alpha""#, &spec)
-            .expect("ddl");
+        let ddls =
+            super::telemetry_column_add_ddls(r#""softprobe"."tenant_alpha""#, &spec).expect("ddl");
 
         assert_eq!(ddls.len(), 4);
         assert_eq!(
             ddls[0],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN division_name VARCHAR;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN "division_name" VARCHAR;"#
         );
         assert_eq!(
             ddls[3],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN checkout_latency_ms DOUBLE;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN "checkout_latency_ms" DOUBLE;"#
         );
     }
 
@@ -665,8 +858,7 @@ columns:
             panic!("expected telemetry manifest");
         };
 
-        let err = super::validate_telemetry_column_additive(&spec, &["session_id", "trace_id"])
-            .expect_err("existing columns are incompatible");
+        let err = super::validate_telemetry_column_additive(&spec).expect_err("reserved column");
 
         assert_eq!(err.code(), "column_already_exists");
         assert_eq!(err.path(), "columns[0].name");

@@ -1,4 +1,3 @@
-use crate::config::TablePromotionConfig;
 use crate::models::{Log, Metric, Span};
 use anyhow::Result;
 use arrow::array::{
@@ -40,50 +39,11 @@ const TRACES_BASE_FIELDS: &[&str] = &[
     "record_date",
 ];
 
-/// Extract promoted column values from attributes/resource_attributes
-fn extract_promoted_values(
-    column_name: &str,
-    attribute_key: &str,
-    spans: &[Span],
-    promotion_config: Option<&TablePromotionConfig>,
-) -> Vec<Option<String>> {
-    // Try to find the attribute key in the promotion config
-    let attr_key = if let Some(config) = promotion_config {
-        // Check if this column is in the promotion config
-        if let Some(col) = config
-            .attributes
-            .iter()
-            .find(|c| c.column_name.as_deref().unwrap_or(&c.attribute_key) == column_name)
-        {
-            &col.attribute_key
-        } else if let Some(_col) = config
-            .resource_attributes
-            .iter()
-            .find(|c| c.column_name.as_deref().unwrap_or(&c.attribute_key) == column_name)
-        {
-            // This is from resource_attributes - but spans don't have resource_attributes directly
-            // TODO: Support resource_attributes promotion for spans
-            return vec![None; spans.len()];
-        } else {
-            // Not in config, use column_name as attribute_key
-            attribute_key
-        }
-    } else {
-        // No config, assume column_name == attribute_key
-        attribute_key
-    };
-
-    spans
-        .iter()
-        .map(|span| span.attributes.get(attr_key).cloned())
-        .collect()
-}
-
-/// Build arrays for promoted columns in schema order
+/// Build arrays for extra Iceberg fields (e.g. tenant-applied promoted columns) in schema order.
+/// Attribute keys default to the Iceberg/Arrow column name.
 fn build_promoted_columns_for_spans(
     spans: &[Span],
     arrow_schema: &Schema,
-    promotion_config: Option<&TablePromotionConfig>,
 ) -> Result<Vec<ArrayRef>> {
     let mut promoted_arrays = Vec::new();
 
@@ -94,8 +54,10 @@ fn build_promoted_columns_for_spans(
             continue;
         }
 
-        // This is a promoted column - extract values
-        let values = extract_promoted_values(field_name, field_name, spans, promotion_config);
+        let values: Vec<Option<String>> = spans
+            .iter()
+            .map(|span| span.attributes.get(field_name.as_str()).cloned())
+            .collect();
 
         // Build array based on field type
         let array: ArrayRef = match field.data_type() {
@@ -134,15 +96,6 @@ fn build_promoted_columns_for_spans(
 pub fn spans_to_record_batch(
     spans: &[Span],
     iceberg_schema: &IcebergSchema,
-) -> Result<RecordBatch> {
-    spans_to_record_batch_with_promotion(spans, iceberg_schema, None)
-}
-
-/// Convert Span batch to Arrow RecordBatch with promotion config
-pub fn spans_to_record_batch_with_promotion(
-    spans: &[Span],
-    iceberg_schema: &IcebergSchema,
-    promotion_config: Option<&TablePromotionConfig>,
 ) -> Result<RecordBatch> {
     // Convert Iceberg schema to Arrow schema
     let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
@@ -345,7 +298,7 @@ pub fn spans_to_record_batch_with_promotion(
     let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
 
     // Build promoted columns (in schema order, after base fields)
-    let promoted_arrays = build_promoted_columns_for_spans(spans, &arrow_schema, promotion_config)?;
+    let promoted_arrays = build_promoted_columns_for_spans(spans, &arrow_schema)?;
 
     // Assemble all arrays in schema order
     let mut all_arrays: Vec<ArrayRef> = vec![

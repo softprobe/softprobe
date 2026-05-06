@@ -260,32 +260,9 @@ Your instrumentation data is stored in the `traces` Iceberg table with this stru
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
 | `attributes` | All span attributes (MAP) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
-## Schema Promotion (Optional)
+## Column promotion (tenant-scoped)
 
-To enable direct SQL queries without MAP lookups, you can promote frequently-used attributes to top-level columns. Configure this in your `config.yaml`:
-
-```yaml
-schema_promotion:
-  traces:
-    attributes:
-      - attribute_key: "sp.user.id"
-        column_name: "user_id"  # Optional: customize column name
-        data_type: String       # Optional: auto-detect if not specified
-      - attribute_key: "sp.order.id"
-        column_name: "order_id"
-```
-
-After configuring promotion and recreating tables, you can query directly:
-
-```sql
--- Using promoted column (simpler, potentially faster)
-SELECT session_id, trace_id
-FROM traces
-WHERE user_id = 'user-123'
-ORDER BY timestamp DESC;
-```
-
-See [Schema Promotion Configuration](../docs/design.md#53-schema-promotion) in the design documentation for full details.
+Telemetry column promotion is **not** configured via process-global `config.yaml`. Active promotion manifests are stored per tenant in Postgres (`promotion_specs` in each tenant DuckLake metadata schema) and applied through the promotion workflow (`softprobe promotion validate` / `apply` once implemented). See [`docs/column-promotion.md`](../../docs/column-promotion.md).
 
 ## Querying Your Data
 

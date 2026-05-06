@@ -3,7 +3,10 @@ pub mod http_api;
 pub mod promotion_manifest;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
-pub mod schema_promotion_unit;
+#[cfg(feature = "integration-e2e")]
+pub mod promotion_telemetry_columns;
+#[cfg(feature = "integration-e2e")]
+pub mod tenant_promotion_specs;
 
 #[cfg(feature = "integration-e2e")]
 pub mod iceberg;
@@ -11,5 +14,3 @@ pub mod iceberg;
 pub mod integration;
 #[cfg(feature = "integration-e2e")]
 pub mod metrics;
-#[cfg(feature = "integration-e2e")]
-pub mod schema_promotion;

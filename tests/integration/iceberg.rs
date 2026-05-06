@@ -1561,7 +1561,7 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
         TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
             .expect("table ident");
 
-    let schema = TraceTable::schema(None);
+    let schema = TraceTable::schema();
     let partition_spec = TraceTable::partition_spec(&schema).unwrap();
     let sort_order = TraceTable::sort_order(&schema).unwrap();
     let properties = TraceTable::table_properties();

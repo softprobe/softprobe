@@ -16,8 +16,6 @@ pub struct Config {
     #[serde(default)]
     pub ducklake: Option<DuckLakeConfig>,
     #[serde(default)]
-    pub schema_promotion: Option<SchemaPromotionConfig>,
-    #[serde(default)]
     pub dropdown_catalog: DropdownCatalogConfig,
 }
 
@@ -191,46 +189,6 @@ pub struct DuckLakeConfig {
     pub data_inlining_row_limit: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchemaPromotionConfig {
-    #[serde(default)]
-    pub traces: Option<TablePromotionConfig>,
-    #[serde(default)]
-    pub logs: Option<TablePromotionConfig>,
-    #[serde(default)]
-    pub metrics: Option<TablePromotionConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TablePromotionConfig {
-    /// Attributes to promote from the main attributes MAP
-    #[serde(default)]
-    pub attributes: Vec<PromotedColumn>,
-    /// Attributes to promote from resource_attributes MAP
-    #[serde(default)]
-    pub resource_attributes: Vec<PromotedColumn>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromotedColumn {
-    /// OTel attribute key (e.g., "user.id", "sp.user.id", "department")
-    pub attribute_key: String,
-    /// Column name in Iceberg table (defaults to attribute_key if not specified)
-    #[serde(default)]
-    pub column_name: Option<String>,
-    /// Data type (auto-detected from first value if not specified)
-    #[serde(default)]
-    pub data_type: Option<PromotedDataType>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PromotedDataType {
-    String,
-    Int,
-    Double,
-    Boolean,
-}
-
 fn default_warehouse() -> String {
     "s3://warehouse".to_string()
 }
@@ -377,7 +335,6 @@ impl Default for Config {
                 metadata_schema: default_ducklake_metadata_schema(),
                 data_inlining_row_limit: Some(0),
             }),
-            schema_promotion: None,
             dropdown_catalog: DropdownCatalogConfig::default(),
         }
     }

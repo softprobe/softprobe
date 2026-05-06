@@ -5,6 +5,7 @@ use crate::storage::buffer::{FlushCallback, FlushFuture, PreAddCallback, PreAddF
 use crate::storage::{
     create_log_buffer, create_metric_buffer, create_span_buffer, DuckLakeWriter, Storage,
 };
+use crate::tenant_ducklake::TenantDuckLakeResolver;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,7 +90,9 @@ impl IngestEngine {
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let dropdown_catalog = DropdownCatalog::connect(config).await?;
-        let writer = Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone()).await?);
+        let tenant_ducklake = TenantDuckLakeResolver::connect(config).await?;
+        let writer =
+            Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone(), tenant_ducklake).await?);
         let ingest_engine = Arc::new(IngestEngine::new(writer.clone()));
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
 

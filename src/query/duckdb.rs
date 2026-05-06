@@ -5,6 +5,7 @@ use crate::storage::iceberg::arrow::{
     logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
 };
 use crate::storage::TieredStorage;
+use crate::tenant_ducklake::TenantDuckLakeScope;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -25,6 +26,8 @@ pub struct DuckDBQueryEngine {
     _shared_connection: Arc<Mutex<Connection>>,
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
+    config: Config,
+    tiered_storage: Arc<dyn TieredStorage>,
 }
 
 const CATALOG_ALIAS: &str = "iceberg_catalog";
@@ -253,6 +256,8 @@ impl DuckDBQueryEngine {
             _shared_connection: Arc::new(Mutex::new(dummy_conn)),
             workers,
             next_worker: AtomicUsize::new(0),
+            config: config.clone(),
+            tiered_storage,
         })
     }
 
@@ -276,6 +281,33 @@ impl DuckDBQueryEngine {
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
         rx.await
             .map_err(|_| anyhow!("DuckDB worker dropped response"))?
+    }
+
+    /// Execute one query with a tenant-specific DuckLake metadata schema.
+    ///
+    /// Worker connections intentionally keep the process-level DuckLake attachment for general
+    /// agent SQL. Tenant-authenticated control endpoints use this one-shot path when they need to
+    /// query the exact DuckLake scope resolved from Postgres control metadata.
+    pub async fn execute_query_in_ducklake_scope(
+        &self,
+        query: &str,
+        scope: &TenantDuckLakeScope,
+    ) -> Result<QueryResult> {
+        let mut config = self.config.clone();
+        let mut ducklake = config.ducklake_or_default();
+        ducklake.metadata_schema = scope.metadata_schema.clone();
+        ducklake.data_path = scope.data_path.clone();
+        config.ducklake = Some(ducklake);
+
+        let core = DuckDBCore {
+            cache: CacheSettings::new(&config),
+            config,
+            tiered_storage: self.tiered_storage.clone(),
+            runtime_handle: tokio::runtime::Handle::current(),
+        };
+        let conn = core.open_connection()?;
+        let mut state = core.init_connection_state_with(conn)?;
+        core.execute_query_on_state(&mut state, query)
     }
 }
 

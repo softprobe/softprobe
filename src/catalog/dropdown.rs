@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn collect_pairs_skips_ids_and_collects_dimensions() {
-        let schema: IcebergSchema = TraceTable::schema(None);
+        let schema: IcebergSchema = TraceTable::schema();
         let spans = vec![sample_span(Some("ten-1"))];
         let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
         let cfg = DropdownCatalogConfig::default();
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn resolve_tenant_roundtrip() {
-        let schema: IcebergSchema = TraceTable::schema(None);
+        let schema: IcebergSchema = TraceTable::schema();
         let spans = vec![sample_span(Some("tid"))];
         let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
         assert_eq!(

@@ -777,7 +777,7 @@ async fn view_recreate_stability_local_stub() {
         trace_id: None,
         span_id: None,
     };
-    let schema = storage::iceberg::OtlpLogsTable::schema(None);
+    let schema = storage::iceberg::OtlpLogsTable::schema();
     let record_batch = logs_to_record_batch(&[log], &schema).expect("record batch");
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(&stub_path).expect("stub file");
