@@ -1,8 +1,8 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
-    extract_telemetry_promoted_value, PromotionColumn, TelemetryColumnsManifest,
-    TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
+    extract_telemetry_promoted_value, telemetry_column_add_ddls, PromotionColumn,
+    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
 use crate::storage::iceberg::arrow;
 use crate::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
@@ -410,6 +410,58 @@ impl DuckLakeWriter {
             .await
     }
 
+    /// Apply additive telemetry promotion DDL inside one tenant DuckLake scope.
+    ///
+    /// `promotion apply` owns schema changes for promoted telemetry columns. It first materializes
+    /// the hardcoded canonical telemetry tables if they do not exist, then runs the nullable
+    /// `ALTER TABLE ADD COLUMN` statements generated from the tenant manifest.
+    pub async fn apply_telemetry_column_promotion(
+        &self,
+        scope: &TenantDuckLakeScope,
+        spec: &TelemetryColumnsManifest,
+    ) -> Result<Vec<String>> {
+        let dk = self.effective_ducklake(scope);
+        for table in &spec.target.tables {
+            self.ensure_telemetry_table_for(&dk, table).await?;
+        }
+        let conn = self.open_connection()?;
+        self.attach_ducklake_for(&conn, &dk)?;
+        self.ensure_schema_for(&conn, &dk)?;
+        let prefix = if dk.metadata_schema == "main" {
+            dk.catalog_alias.clone()
+        } else {
+            format!(
+                "{}.{}",
+                quote_duckdb_ident(&dk.catalog_alias),
+                quote_duckdb_ident(&dk.metadata_schema)
+            )
+        };
+        let ddls = telemetry_column_add_ddls(&prefix, spec)
+            .map_err(|err| anyhow!("telemetry promotion validation failed: {err}"))?;
+        for ddl in &ddls {
+            conn.execute_batch(ddl)?;
+        }
+        self.catalog_write_generation
+            .fetch_add(1, Ordering::Release);
+        Ok(ddls)
+    }
+
+    async fn ensure_telemetry_table_for(
+        &self,
+        dk: &DuckLakeConfig,
+        table: &TelemetryTable,
+    ) -> Result<()> {
+        let (table_name, schema) = match table {
+            TelemetryTable::Traces => ("traces", TraceTable::schema()),
+            TelemetryTable::Logs => ("logs", OtlpLogsTable::schema()),
+            TelemetryTable::Metrics => ("metrics", OtlpMetricsTable::schema()),
+        };
+        let arrow_schema = Arc::new(::arrow::datatypes::Schema::try_from(&schema)?);
+        let batch = RecordBatch::new_empty(arrow_schema);
+        self.write_record_batches_internal_with_ducklake(dk, table_name, vec![batch])
+            .await
+    }
+
     pub async fn spans_schema(&self) -> Result<Arc<IcebergSchema>> {
         Ok(Arc::new(TraceTable::schema()))
     }
@@ -752,6 +804,10 @@ impl DuckLakeWriter {
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+fn quote_duckdb_ident(input: &str) -> String {
+    format!("\"{}\"", input.replace('"', "\"\""))
 }
 
 /// Fully qualified DuckLake table name used for CREATE / INSERT (`catalog.table` when

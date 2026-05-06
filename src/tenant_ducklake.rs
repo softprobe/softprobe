@@ -11,6 +11,8 @@ use crate::promotion::{
 };
 use anyhow::{anyhow, Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use tokio_postgres::NoTls;
 
 /// DuckLake storage scope assigned to one tenant.
@@ -150,6 +152,47 @@ RETURNING ducklake_schema, ducklake_data_path;"#,
                 }
             })?;
         Ok((scope, manifests))
+    }
+
+    /// Record one successfully applied telemetry promotion manifest in the tenant metadata schema.
+    ///
+    /// The manifest is stored in the tenant-contained `promotion_specs` table because ingest loads
+    /// active specs from this table on each tenant-scoped write. The deterministic id keeps repeated
+    /// `promotion apply` calls for the same manifest from creating duplicate active specs.
+    pub async fn record_active_telemetry_promotion_spec(
+        &self,
+        scope: &TenantDuckLakeScope,
+        manifest_yaml: &str,
+        target_tables: &[String],
+    ) -> Result<String> {
+        let mut hasher = DefaultHasher::new();
+        manifest_yaml.hash(&mut hasher);
+        let manifest_hash = format!("{:016x}", hasher.finish());
+        let spec_id = format!("telemetry_columns_{manifest_hash}");
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                &format!(
+                    r#"INSERT INTO "{}".promotion_specs
+  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
+VALUES ($1, 'softprobe.promotion.v1', 'telemetry_columns', $2, $3, $4, 'active')
+ON CONFLICT (spec_id) DO UPDATE SET
+  target_tables = EXCLUDED.target_tables,
+  manifest_json = EXCLUDED.manifest_json,
+  manifest_hash = EXCLUDED.manifest_hash,
+  status = 'active',
+  applied_at = NOW();"#,
+                    scope.metadata_schema.replace('"', "\"\"")
+                ),
+                &[
+                    &spec_id,
+                    &target_tables.join(","),
+                    &manifest_yaml,
+                    &manifest_hash,
+                ],
+            )
+            .await?;
+        Ok(spec_id)
     }
 }
 

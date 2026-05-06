@@ -10,6 +10,10 @@ use crate::inject::{
     is_strict_external_http_policy, normalize_otlp_body, parse_inject_lookup,
     parse_inject_rules_document, select_inject_rule,
 };
+use crate::promotion::{
+    parse_promotion_manifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
+    TelemetryTable,
+};
 use crate::tenant_ducklake::TenantDuckLakeScope;
 use axum::{
     body::Bytes,
@@ -338,6 +342,7 @@ pub fn runtime_control_routes() -> axum::Router<AppState> {
         .route("/v1/sessions/{id}/state", get(v1_session_state))
         .route("/v1/inject", post(v1_inject))
         .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
+        .route("/v1/promotions/apply", post(v1_promotions_apply))
         .route("/v1/captures/{capture_id}", get(v1_get_capture))
         .route("/v1/catalog/entity-types", get(v1_catalog_entity_types))
         .route("/v1/catalog/values", get(v1_catalog_values))
@@ -387,6 +392,147 @@ async fn v1_ducklake_connection(
                 }
             })),
         )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PromotionApplyRequest {
+    #[serde(rename = "manifestYaml")]
+    manifest_yaml: String,
+}
+
+async fn v1_promotions_apply(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
+    Json(req): Json<PromotionApplyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let manifest = parse_promotion_manifest(&req.manifest_yaml).map_err(|err| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": {
+                    "code": err.code(),
+                    "message": err.to_string()
+                }
+            })),
+        )
+    })?;
+    let PromotionManifest::TelemetryColumns(spec) = manifest else {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": {
+                    "code": "unsupported_promotion_target",
+                    "message": "promotion apply currently supports telemetry_columns only"
+                }
+            })),
+        ));
+    };
+    apply_telemetry_promotion(state, tenant, req.manifest_yaml, spec).await
+}
+
+async fn apply_telemetry_promotion(
+    state: AppState,
+    tenant: TenantInfo,
+    manifest_yaml: String,
+    spec: TelemetryColumnsManifest,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let Some(tenant_ducklake) = state
+        .control_plane
+        .as_ref()
+        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "ducklake_connection_unavailable",
+                    "message": "tenant DuckLake resolver is unavailable"
+                }
+            })),
+        ));
+    };
+    let scope = tenant_ducklake
+        .resolve_or_create(&tenant.tenant_id)
+        .await
+        .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    state
+        .storage
+        .writer
+        .apply_telemetry_column_promotion(&scope, &spec)
+        .await
+        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
+    tenant_ducklake
+        .record_active_telemetry_promotion_spec(
+            &scope,
+            &manifest_yaml,
+            &telemetry_table_names(&spec.target.tables),
+        )
+        .await
+        .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
+    Ok(Json(json!({
+        "specVersion": "softprobe.promotion.apply.v1",
+        "applied": true,
+        "target": {
+            "kind": "telemetry_columns",
+            "tables": telemetry_table_names(&spec.target.tables)
+        },
+        "schemaChanges": telemetry_schema_changes(&spec)
+    })))
+}
+
+fn promotion_apply_error(
+    code: &'static str,
+    err: anyhow::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": err.to_string()
+            }
+        })),
+    )
+}
+
+fn telemetry_table_names(tables: &[TelemetryTable]) -> Vec<String> {
+    tables
+        .iter()
+        .map(|table| match table {
+            TelemetryTable::Traces => "traces",
+            TelemetryTable::Logs => "logs",
+            TelemetryTable::Metrics => "metrics",
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn telemetry_schema_changes(spec: &TelemetryColumnsManifest) -> Vec<serde_json::Value> {
+    let mut changes = Vec::new();
+    for table in telemetry_table_names(&spec.target.tables) {
+        for col in &spec.columns {
+            changes.push(json!({
+                "table": table,
+                "action": "add_column",
+                "column": col.name,
+                "type": promotion_type_name(&col.data_type),
+                "nullable": col.nullable
+            }));
+        }
+    }
+    changes
+}
+
+fn promotion_type_name(data_type: &PromotionDataType) -> &'static str {
+    match data_type {
+        PromotionDataType::String => "string",
+        PromotionDataType::Bool => "bool",
+        PromotionDataType::Int64 => "int64",
+        PromotionDataType::Double => "double",
+        PromotionDataType::Decimal => "decimal",
+        PromotionDataType::Timestamp => "timestamp",
+        PromotionDataType::Json => "json",
     }
 }
 

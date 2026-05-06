@@ -148,6 +148,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
             "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
             "/v1/data/ducklake-connection": { "get": { "summary": "DuckLake setup material" } },
+            "/v1/promotions/apply": { "post": { "summary": "Apply a tenant-scoped promotion manifest" } },
             "/v1/sessions": { "post": { "summary": "Create session" }, "get": { "summary": "List sessions" } }
         }
     }))
