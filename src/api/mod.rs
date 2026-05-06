@@ -10,6 +10,7 @@ use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
 use crate::session_redis::RedisStore;
 use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
+use crate::tenant_ducklake::TenantDuckLakeResolver;
 use axum::{
     response::Html,
     routing::{get, post, MethodRouter},
@@ -23,6 +24,8 @@ use std::sync::Arc;
 pub struct ControlPlaneRuntime {
     pub resolver: authn::Resolver,
     pub session_store: Arc<tokio::sync::Mutex<RedisStore>>,
+    /// Resolves tenant-owned DuckLake SQL schemas from Postgres control metadata.
+    pub tenant_ducklake: Option<TenantDuckLakeResolver>,
 }
 
 // Unified application state for Axum router

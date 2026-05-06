@@ -161,30 +161,15 @@ impl DuckLakeWriter {
     }
 
     pub async fn spans_schema(&self) -> Result<Arc<IcebergSchema>> {
-        let promotion = self
-            .config
-            .schema_promotion
-            .as_ref()
-            .and_then(|sp| sp.traces.as_ref());
-        Ok(Arc::new(TraceTable::schema(promotion)))
+        Ok(Arc::new(TraceTable::schema(None)))
     }
 
     pub async fn logs_schema(&self) -> Result<Arc<IcebergSchema>> {
-        let promotion = self
-            .config
-            .schema_promotion
-            .as_ref()
-            .and_then(|sp| sp.logs.as_ref());
-        Ok(Arc::new(OtlpLogsTable::schema(promotion)))
+        Ok(Arc::new(OtlpLogsTable::schema(None)))
     }
 
     pub async fn metrics_schema(&self) -> Result<Arc<IcebergSchema>> {
-        let promotion = self
-            .config
-            .schema_promotion
-            .as_ref()
-            .and_then(|sp| sp.metrics.as_ref());
-        Ok(Arc::new(OtlpMetricsTable::schema(promotion)))
+        Ok(Arc::new(OtlpMetricsTable::schema(None)))
     }
 
     async fn write_record_batches_internal(
@@ -546,5 +531,60 @@ fn size_literal(bytes: usize) -> String {
             bytes
         );
         format!("{}B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{PromotedColumn, SchemaPromotionConfig, TablePromotionConfig};
+
+    #[test]
+    fn set_option_scope_matches_qualified_table_shape() {
+        assert_eq!(
+            ducklake_set_option_scope_for_qualified("softprobe.traces"),
+            "table_name => 'traces'"
+        );
+        assert_eq!(
+            ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
+            "schema => 'tenant_a', table_name => 'traces'"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_schemas_ignore_process_global_schema_promotion() {
+        let mut config = Config::default();
+        config.schema_promotion = Some(SchemaPromotionConfig {
+            traces: Some(TablePromotionConfig {
+                attributes: vec![PromotedColumn {
+                    attribute_key: "division.name".to_string(),
+                    column_name: Some("division_name".to_string()),
+                    data_type: None,
+                }],
+                resource_attributes: Vec::new(),
+            }),
+            logs: None,
+            metrics: None,
+        });
+        let writer = DuckLakeWriter {
+            config,
+            ducklake: DuckLakeConfig {
+                catalog_type: "duckdb".to_string(),
+                metadata_path: ":memory:".to_string(),
+                data_path: "/tmp/unused".to_string(),
+                catalog_alias: "softprobe".to_string(),
+                metadata_schema: "main".to_string(),
+                data_inlining_row_limit: None,
+            },
+            cache_dir: None,
+            dropdown_catalog: None,
+            catalog_write_generation: Arc::new(AtomicU64::new(0)),
+        };
+
+        let schema = writer.spans_schema().await.expect("schema");
+        assert!(
+            schema.field_by_name("division_name").is_none(),
+            "process-global schema_promotion must not alter tenant telemetry schemas"
+        );
     }
 }

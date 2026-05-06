@@ -10,6 +10,7 @@ use crate::inject::{
     is_strict_external_http_policy, normalize_otlp_body, parse_inject_lookup,
     parse_inject_rules_document, select_inject_rule,
 };
+use crate::tenant_ducklake::TenantDuckLakeScope;
 use axum::{
     body::Bytes,
     extract::{Extension, Path, Query, Request, State},
@@ -78,12 +79,17 @@ struct DuckLakeConnectionMaterial {
     schema_version: String,
 }
 
-fn ducklake_connection_material(tenant: &TenantInfo) -> Result<DuckLakeConnectionMaterial, String> {
+fn ducklake_connection_material(
+    tenant: &TenantInfo,
+    scope: &TenantDuckLakeScope,
+) -> Result<DuckLakeConnectionMaterial, String> {
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
     let ducklake = config.ducklake_or_default();
     let ducklake_pg_uri = postgres_ducklake_metadata_path(&ducklake);
-    let ducklake_data_path = ducklake.data_path.clone();
-    let ducklake_metadata_schema = ducklake.metadata_schema.clone();
+    // Tenant DuckLake schema is control-plane state, not YAML config. The resolver owns the
+    // Postgres mapping from tenant_id to DuckLake schema and data path.
+    let ducklake_data_path = scope.data_path.clone();
+    let ducklake_metadata_schema = scope.metadata_schema.clone();
     let gcs_hmac_access_key_id = config.s3.access_key_id.clone();
     let gcs_hmac_secret = config.s3.secret_access_key.clone();
 
@@ -100,7 +106,11 @@ fn ducklake_connection_material(tenant: &TenantInfo) -> Result<DuckLakeConnectio
         return Err("DuckLake data path is required".to_string());
     }
     if path_requires_hmac(&ducklake_data_path)
-        && (gcs_hmac_access_key_id.as_deref().unwrap_or("").trim().is_empty()
+        && (gcs_hmac_access_key_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
             || gcs_hmac_secret.as_deref().unwrap_or("").trim().is_empty())
     {
         return Err(
@@ -178,15 +188,19 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
+        let scope = TenantDuckLakeScope {
+            metadata_schema: "tenant_tenant_123".to_string(),
+            data_path: "./warehouse/ducklake/data/".to_string(),
+        };
 
-        let material = ducklake_connection_material(&tenant).expect("connection material");
+        let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
         assert_eq!(material.version, 1);
         assert_eq!(material.tenant_id, "tenant-123");
         assert_eq!(
             material.ducklake_pg_uri,
             "host=pg port=5432 dbname=ducklake user=reader password=secret"
         );
-        assert_eq!(material.ducklake_metadata_schema, "tenant_meta");
+        assert_eq!(material.ducklake_metadata_schema, "tenant_tenant_123");
         assert_eq!(material.ducklake_data_path, "./warehouse/ducklake/data/");
         assert_eq!(material.gcs_bucket, "softprobe-tenant-bucket");
         assert_eq!(material.gcs_hmac_access_key_id, "");
@@ -225,13 +239,17 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
+        let scope = TenantDuckLakeScope {
+            metadata_schema: "tenant_tenant_123".to_string(),
+            data_path: "gs://bucket/ducklake/data/".to_string(),
+        };
 
-        let material = ducklake_connection_material(&tenant).expect("connection material");
+        let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
         assert_eq!(
             material.ducklake_pg_uri,
             "host=pg port=5432 dbname=ducklake user=reader password=secret"
         );
-        assert_eq!(material.ducklake_metadata_schema, "config_schema");
+        assert_eq!(material.ducklake_metadata_schema, "tenant_tenant_123");
         assert_eq!(material.ducklake_data_path, "gs://bucket/ducklake/data/");
         assert_eq!(material.gcs_hmac_access_key_id, "config-access-id");
         assert_eq!(material.gcs_hmac_secret, "config-secret");
@@ -272,8 +290,13 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
+        let scope = TenantDuckLakeScope {
+            metadata_schema: "tenant_tenant_123".to_string(),
+            data_path: "gs://bucket/ducklake/data/".to_string(),
+        };
 
-        let err = ducklake_connection_material(&tenant).expect_err("missing hmac should fail");
+        let err =
+            ducklake_connection_material(&tenant, &scope).expect_err("missing hmac should fail");
         assert!(err.contains("config.s3.access_key_id"));
 
         std::env::remove_var("CONFIG_FILE");
@@ -321,9 +344,39 @@ pub fn runtime_control_routes() -> axum::Router<AppState> {
 }
 
 async fn v1_ducklake_connection(
+    State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    match ducklake_connection_material(&tenant) {
+    let Some(tenant_ducklake) = state
+        .control_plane
+        .as_ref()
+        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "ducklake_connection_unavailable",
+                    "message": "tenant DuckLake resolver is unavailable"
+                }
+            })),
+        ));
+    };
+    let scope = tenant_ducklake
+        .resolve_or_create(&tenant.tenant_id)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "code": "ducklake_connection_unavailable",
+                        "message": err.to_string()
+                    }
+                })),
+            )
+        })?;
+    match ducklake_connection_material(&tenant, &scope) {
         Ok(material) => Ok(Json(material)),
         Err(err) => Err((
             StatusCode::SERVICE_UNAVAILABLE,

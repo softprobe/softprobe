@@ -15,8 +15,9 @@ pub struct SqlQueryResponse {
     pub row_count: usize,
 }
 
-/// Execute a raw SQL query via DuckDB and return results as JSON
-/// This endpoint exposes DuckDB SQL as the primary query interface for external tools
+/// Execute a raw SQL query via DuckDB and return results as JSON.
+/// Internal/debug surface only; AI agents use local DuckDB setup material from
+/// `GET /v1/data/ducklake-connection` instead of this runtime SQL endpoint.
 pub async fn execute_sql(
     State(state): State<AppState>,
     Json(request): Json<SqlQueryRequest>,

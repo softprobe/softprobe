@@ -10,6 +10,7 @@ use softprobe_runtime::runtime_api::{
     runtime_auth_middleware, runtime_control_routes, runtime_post_v1_traces,
 };
 use softprobe_runtime::session_redis::RedisStore;
+use softprobe_runtime::tenant_ducklake::TenantDuckLakeResolver;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime> {
+    let config = Config::load()?;
     let auth = required_env("SOFTPROBE_AUTH_URL")?;
     let redis_host = required_env("REDIS_HOST")?;
     let port: u16 = std::env::var("REDIS_PORT")
@@ -125,9 +127,11 @@ async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime>
     )
     .await?;
     let resolver = Resolver::new(auth, Duration::from_secs(60));
+    let tenant_ducklake = TenantDuckLakeResolver::connect(&config).await?;
     Ok(ControlPlaneRuntime {
         resolver,
         session_store: Arc::new(tokio::sync::Mutex::new(store)),
+        tenant_ducklake,
     })
 }
 

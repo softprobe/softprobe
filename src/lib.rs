@@ -16,3 +16,4 @@ pub mod query;
 pub mod runtime_api;
 pub mod session_redis;
 pub mod storage;
+pub mod tenant_ducklake;

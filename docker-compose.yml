@@ -138,11 +138,6 @@ services:
       retries: 10
       start_period: 5s
 
-
-  # etl-worker: REMOVED - No longer using ClickHouse ETL
-  # Direct Iceberg queries via otlp-backend are sufficient
-  # See docs/design.md for architecture details
-
   otlp-backend:
     build: .
     container_name: otlp-backend
@@ -160,7 +155,6 @@ services:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
-      - DUCKLAKE_PG_URI=postgres://ducklake:ducklake@ducklake-postgres:5432/ducklake
       - DUCKLAKE_METADATA_SCHEMA=softprobe
       - GCS_HMAC_ACCESS_KEY_ID=minioadmin
       - GCS_HMAC_SECRET=minioadmin
