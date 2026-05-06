@@ -347,6 +347,157 @@ fn promotion_data_type_sql(t: &PromotionDataType) -> &'static str {
     }
 }
 
+fn business_promotion_data_type_sql(t: &PromotionDataType) -> &'static str {
+    match t {
+        PromotionDataType::String => "VARCHAR",
+        PromotionDataType::Bool => "BOOLEAN",
+        PromotionDataType::Int64 => "BIGINT",
+        PromotionDataType::Double => "DOUBLE",
+        PromotionDataType::Decimal => "DECIMAL(38, 9)",
+        PromotionDataType::Timestamp => "TIMESTAMPTZ",
+        PromotionDataType::Json => "VARCHAR",
+    }
+}
+
+fn business_anchor_columns() -> &'static [(&'static str, &'static str, bool)] {
+    &[
+        ("session_id", "VARCHAR", false),
+        ("trace_id", "VARCHAR", false),
+        ("span_id", "VARCHAR", false),
+        ("event_name", "VARCHAR", true),
+        ("event_timestamp", "TIMESTAMPTZ", true),
+        ("service_name", "VARCHAR", true),
+        ("source_signal", "VARCHAR", false),
+        ("source_timestamp", "TIMESTAMPTZ", false),
+        ("promotion_spec_version", "VARCHAR", false),
+    ]
+}
+
+fn business_physical_table_name(spec: &BusinessTableManifest) -> String {
+    format!("{}_v{}", spec.target.table, spec.target.version)
+}
+
+fn business_current_view_name(spec: &BusinessTableManifest) -> String {
+    format!("{}_current", spec.target.table)
+}
+
+/// Validate that a requested business table manifest can reuse an existing physical version.
+///
+/// Compatibility is intentionally schema-only here. Row extraction semantics are handled by later
+/// ingest tasks, but DDL must reject drops, type changes, and nullability tightening for an
+/// already-created `<table>_v<version>` table.
+pub fn validate_business_table_compatible(
+    current: &BusinessTableManifest,
+    requested: &BusinessTableManifest,
+) -> Result<(), PromotionValidationError> {
+    if current.target.table != requested.target.table {
+        return Err(PromotionValidationError::new(
+            "business_table_changed",
+            "target.table",
+            "requested manifest targets a different business table",
+        ));
+    }
+    if requested.target.version < current.target.version {
+        return Err(PromotionValidationError::new(
+            "business_version_regressed",
+            "target.version",
+            "requested version must not be lower than the applied version",
+        ));
+    }
+    if requested.target.version > current.target.version {
+        return Ok(());
+    }
+    let requested_by_name = requested
+        .columns
+        .iter()
+        .map(|col| (col.name.as_str(), col))
+        .collect::<HashMap<_, _>>();
+    for current_col in &current.columns {
+        let Some(requested_col) = requested_by_name.get(current_col.name.as_str()) else {
+            return Err(PromotionValidationError::new(
+                "business_column_dropped",
+                format!("columns.{}", current_col.name),
+                "existing business table columns cannot be dropped from the same version",
+            ));
+        };
+        if requested_col.data_type != current_col.data_type {
+            return Err(PromotionValidationError::new(
+                "business_column_type_changed",
+                format!("columns.{}.type", current_col.name),
+                "existing business table column type changed; create a new version",
+            ));
+        }
+        if requested_col.nullable != current_col.nullable {
+            return Err(PromotionValidationError::new(
+                "business_column_nullability_changed",
+                format!("columns.{}.nullable", current_col.name),
+                "existing business table column nullability changed; create a new version",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Generate DuckLake-compatible DDL for a business table manifest.
+///
+/// The physical table is versioned as `<target.table>_v<target.version>`. The current view is
+/// replaced only after the physical table DDL in the returned sequence, so callers can execute this
+/// list in order and keep `*_current` pointed at the latest successfully created version.
+pub fn business_table_create_ddls(
+    catalog_schema_prefix: &str,
+    spec: &BusinessTableManifest,
+) -> Result<Vec<String>, PromotionValidationError> {
+    validate_business_table_additive(spec)?;
+    let table = business_physical_table_name(spec);
+    let view = business_current_view_name(spec);
+    let qualified_table = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&table));
+    let qualified_view = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&view));
+    let mut columns = Vec::new();
+    for (name, sql_type, nullable) in business_anchor_columns() {
+        columns.push(format!(
+            "{} {}{}",
+            quote_sql_ident(name),
+            sql_type,
+            if *nullable { "" } else { " NOT NULL" }
+        ));
+    }
+    for col in &spec.columns {
+        columns.push(format!(
+            "{} {}{}",
+            quote_sql_ident(&col.name),
+            business_promotion_data_type_sql(&col.data_type),
+            if col.nullable { "" } else { " NOT NULL" }
+        ));
+    }
+    Ok(vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
+            columns.join(",\n  ")
+        ),
+        format!("CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"),
+    ])
+}
+
+fn validate_business_table_additive(
+    spec: &BusinessTableManifest,
+) -> Result<(), PromotionValidationError> {
+    let anchors = business_anchor_columns()
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<HashSet<_>>();
+    for (idx, col) in spec.columns.iter().enumerate() {
+        validate_identifier(&format!("columns[{idx}].name"), &col.name)?;
+        if anchors.contains(col.name.as_str()) {
+            return Err(PromotionValidationError::new(
+                "business_column_reserved",
+                format!("columns[{idx}].name"),
+                "business table columns must not redeclare evidence anchor columns",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Reject telemetry promotion columns that collide with canonical table columns or break nullability rules.
 pub fn validate_telemetry_column_additive(
     spec: &TelemetryColumnsManifest,
@@ -901,6 +1052,121 @@ columns:
         .expect("valid manifest");
 
         assert!(matches!(manifest, PromotionManifest::BusinessTable(_)));
+    }
+
+    #[test]
+    fn business_table_ddls_create_versioned_table_and_current_view() {
+        let manifest = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 2
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    source:
+      from: http_response_body
+      json_path: $.order.id
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+  - name: payment_status
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: payment.status
+"#,
+        )
+        .expect("valid manifest");
+        let PromotionManifest::BusinessTable(spec) = manifest else {
+            panic!("expected business table manifest");
+        };
+
+        let ddls =
+            super::business_table_create_ddls(r#""softprobe"."tenant_alpha""#, &spec).expect("ddl");
+
+        assert_eq!(ddls.len(), 2);
+        assert!(ddls[0].starts_with(
+            r#"CREATE TABLE IF NOT EXISTS "softprobe"."tenant_alpha"."checkout_orders_v2" ("#
+        ));
+        assert!(ddls[0].contains(r#""session_id" VARCHAR NOT NULL"#));
+        assert!(ddls[0].contains(r#""event_name" VARCHAR"#));
+        assert!(ddls[0].contains(r#""promotion_spec_version" VARCHAR NOT NULL"#));
+        assert!(ddls[0].contains(r#""order_id" VARCHAR NOT NULL"#));
+        assert!(ddls[0].contains(r#""total_cents" BIGINT"#));
+        assert_eq!(
+            ddls[1],
+            r#"CREATE OR REPLACE VIEW "softprobe"."tenant_alpha"."checkout_orders_current" AS SELECT * FROM "softprobe"."tenant_alpha"."checkout_orders_v2";"#
+        );
+    }
+
+    #[test]
+    fn business_table_compatibility_rejects_same_version_type_changes() {
+        let current = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#,
+        )
+        .expect("valid current manifest");
+        let requested = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: decimal
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#,
+        )
+        .expect("valid requested manifest");
+        let PromotionManifest::BusinessTable(current) = current else {
+            panic!("expected business table manifest");
+        };
+        let PromotionManifest::BusinessTable(requested) = requested else {
+            panic!("expected business table manifest");
+        };
+
+        let err = super::validate_business_table_compatible(&current, &requested)
+            .expect_err("type change must require new version");
+
+        assert_eq!(err.code(), "business_column_type_changed");
+        assert_eq!(err.path(), "columns.total_cents.type");
     }
 
     #[test]

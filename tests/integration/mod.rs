@@ -1,5 +1,7 @@
 pub mod authn_contract;
 pub mod http_api;
+#[cfg(feature = "integration-e2e")]
+pub mod promotion_business_table_ddl;
 pub mod promotion_manifest;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
