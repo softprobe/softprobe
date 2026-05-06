@@ -369,7 +369,7 @@ async fn v1_ducklake_connection(
         ));
     };
     let scope = tenant_ducklake
-        .resolve_or_create(&tenant.tenant_id)
+        .resolve_or_create("")
         .await
         .map_err(|err| {
             (
@@ -430,7 +430,7 @@ async fn v1_promotions_apply(
 
 async fn apply_telemetry_promotion(
     state: AppState,
-    tenant: TenantInfo,
+    _tenant: TenantInfo,
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -450,7 +450,7 @@ async fn apply_telemetry_promotion(
         ));
     };
     let scope = tenant_ducklake
-        .resolve_or_create(&tenant.tenant_id)
+        .resolve_or_create("")
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
     state
@@ -480,7 +480,7 @@ async fn apply_telemetry_promotion(
 
 async fn apply_business_table_promotion(
     state: AppState,
-    tenant: TenantInfo,
+    _tenant: TenantInfo,
     manifest_yaml: String,
     spec: BusinessTableManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -500,7 +500,7 @@ async fn apply_business_table_promotion(
         ));
     };
     let scope = tenant_ducklake
-        .resolve_or_create(&tenant.tenant_id)
+        .resolve_or_create("")
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
     state
@@ -610,7 +610,7 @@ fn default_catalog_limit() -> i64 {
 
 async fn v1_catalog_entity_types(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(_tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let Some(cat) = state.dropdown_catalog.as_ref() else {
         return Err((
@@ -619,7 +619,7 @@ async fn v1_catalog_entity_types(
         ));
     };
     let days = cat.active_values_days();
-    match cat.list_entity_types(&tenant.tenant_id, days).await {
+    match cat.list_entity_types(days).await {
         Ok(types) => Ok(Json(json!({ "entityTypes": types }))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -630,7 +630,7 @@ async fn v1_catalog_entity_types(
 
 async fn v1_catalog_values(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(_tenant): Extension<TenantInfo>,
     Query(q): Query<CatalogValuesQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     if q.entity_type.is_empty() {
@@ -648,7 +648,7 @@ async fn v1_catalog_values(
     let limit = q.limit.clamp(1, 10_000);
     let days = cat.active_values_days();
     match cat
-        .list_entity_values(&tenant.tenant_id, &q.entity_type, days, limit)
+        .list_entity_values(&q.entity_type, days, limit)
         .await
     {
         Ok(values) => Ok(Json(json!({
@@ -946,7 +946,7 @@ async fn v1_session_state(
 /// Runtime OTLP trace export (gRPC): same processing as [`runtime_post_v1_traces`].
 pub async fn runtime_export_trace_request(
     state: AppState,
-    tenant: &TenantInfo,
+    _tenant: &TenantInfo,
     req: ExportTraceServiceRequest,
 ) -> anyhow::Result<()> {
     let (capture_id, _) = parse_extract_meta(&req).map_err(|e| anyhow::anyhow!(e))?;
@@ -955,7 +955,7 @@ pub async fn runtime_export_trace_request(
     } else {
         capture_id
     };
-    let annotated = annotate_export_request(req, &capture_id, &tenant.tenant_id);
+    let annotated = annotate_export_request(req, &capture_id);
     let body_size = annotated.encoded_len();
     process_traces(state, annotated, body_size).await?;
     Ok(())
@@ -963,7 +963,7 @@ pub async fn runtime_export_trace_request(
 
 pub async fn runtime_post_v1_traces(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(_tenant): Extension<TenantInfo>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let req = normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -973,7 +973,7 @@ pub async fn runtime_post_v1_traces(
     } else {
         capture_id
     };
-    let annotated = annotate_export_request(req, &capture_id, &tenant.tenant_id);
+    let annotated = annotate_export_request(req, &capture_id);
     let body_size = annotated.encoded_len();
     process_traces(state.clone(), annotated, body_size)
         .await
@@ -1053,15 +1053,12 @@ fn resource_attr_str(res: &Resource, key: &str) -> String {
 fn annotate_export_request(
     mut req: ExportTraceServiceRequest,
     capture_id: &str,
-    tenant_id: &str,
 ) -> ExportTraceServiceRequest {
     for rs in &mut req.resource_spans {
         append_resource_kv(&mut rs.resource, "sp.capture.id", capture_id);
-        append_resource_kv(&mut rs.resource, "sp.tenant.id", tenant_id);
         for ss in &mut rs.scope_spans {
             for sp in &mut ss.spans {
                 append_span_kv(sp, "sp.capture.id", capture_id);
-                append_span_kv(sp, "sp.tenant.id", tenant_id);
             }
         }
     }
@@ -1090,6 +1087,65 @@ fn kv_str(key: &str, val: &str) -> KeyValue {
                 ),
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod annotate_export_tests {
+    use super::annotate_export_request;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+    #[test]
+    fn annotate_export_request_only_adds_capture_id() {
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![],
+                    dropped_attributes_count: 0,
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope::default()),
+                    spans: vec![Span::default()],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let out = annotate_export_request(req, "cap-123");
+        let resource_attrs = &out.resource_spans[0]
+            .resource
+            .as_ref()
+            .expect("resource")
+            .attributes;
+        let span_attrs = &out.resource_spans[0].scope_spans[0].spans[0].attributes;
+
+        assert!(contains_kv(resource_attrs, "sp.capture.id", "cap-123"));
+        assert!(contains_kv(span_attrs, "sp.capture.id", "cap-123"));
+        assert!(
+            !contains_key(resource_attrs, "sp.tenant.id") && !contains_key(span_attrs, "sp.tenant.id"),
+            "runtime annotation must not inject tenant routing attributes"
+        );
+    }
+
+    fn contains_key(attrs: &[KeyValue], key: &str) -> bool {
+        attrs.iter().any(|kv| kv.key == key)
+    }
+
+    fn contains_kv(attrs: &[KeyValue], key: &str, want: &str) -> bool {
+        attrs.iter().any(|kv| {
+            kv.key == key
+                && kv
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.value.as_ref())
+                    .map(|value| matches!(value, Value::StringValue(s) if s == want))
+                    .unwrap_or(false)
+        })
     }
 }
 
@@ -1172,17 +1228,17 @@ async fn v1_inject(
 
 async fn v1_get_capture(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(_tenant): Extension<TenantInfo>,
     Path(capture_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let sql = capture_query_sql(&tenant.tenant_id, &capture_id);
+    let sql = capture_query_sql(&capture_id);
     let result = if let Some(tenant_ducklake) = state
         .control_plane
         .as_ref()
         .and_then(|cp| cp.tenant_ducklake.as_ref())
     {
         let scope = tenant_ducklake
-            .resolve_or_create(&tenant.tenant_id)
+            .resolve_or_create("")
             .await
             .map_err(|e| {
                 (

@@ -1,8 +1,8 @@
-//! Tenant DuckLake scope resolution.
+//! Runtime-owned DuckLake scope resolution.
 //!
-//! Hosted Softprobe uses one Postgres metadata database, but each tenant owns a separate DuckLake
-//! SQL schema inside that database. This module resolves that tenant scope from control metadata
-//! instead of requiring one YAML config block per tenant.
+//! Hosted runtime instances are single-tenant from a storage-routing perspective: one runtime owns
+//! one configured DuckLake schema and data path. Auth metadata may still include `tenantId` for
+//! account context, but runtime ingest/query/promotion paths resolve a single storage scope.
 
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::{
@@ -28,9 +28,7 @@ pub struct TenantDuckLakeScope {
 #[derive(Clone)]
 pub struct TenantDuckLakeResolver {
     pool: Pool,
-    control_schema: String,
-    qualified_table: String,
-    default_data_path: String,
+    scope: TenantDuckLakeScope,
 }
 
 impl TenantDuckLakeResolver {
@@ -40,7 +38,7 @@ impl TenantDuckLakeResolver {
             return Ok(None);
         }
         let resolver = Self::build_pool(&dl)?;
-        resolver.ensure_table().await?;
+        resolver.ensure_scope().await?;
         Ok(Some(resolver))
     }
 
@@ -53,87 +51,35 @@ impl TenantDuckLakeResolver {
         };
         let mgr = Manager::from_config(pg, NoTls, mgr_config);
         let pool = Pool::builder(mgr).max_size(8).build()?;
-        let control_schema = control_schema_name(dl);
-        let qualified_table = format!("{}.tenant_ducklake_scopes", quote_pg_ident(&control_schema));
+        let scope = TenantDuckLakeScope {
+            metadata_schema: dl.metadata_schema.clone(),
+            data_path: dl.data_path.clone(),
+        };
         Ok(Self {
             pool,
-            control_schema,
-            qualified_table,
-            default_data_path: dl.data_path.clone(),
+            scope,
         })
     }
 
-    async fn ensure_table(&self) -> Result<()> {
+    async fn ensure_scope(&self) -> Result<()> {
         let client = self.pool.get().await?;
         client
             .execute(
                 &format!(
                     "CREATE SCHEMA IF NOT EXISTS {};",
-                    quote_pg_ident(&self.control_schema)
+                    quote_pg_ident(&self.scope.metadata_schema)
                 ),
                 &[],
             )
             .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE TABLE IF NOT EXISTS {} (
-  tenant_id TEXT PRIMARY KEY,
-  ducklake_schema TEXT NOT NULL UNIQUE,
-  ducklake_data_path TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);"#,
-                    self.qualified_table
-                ),
-                &[],
-            )
-            .await?;
+        ensure_promotion_metadata_tables(&client, &self.scope.metadata_schema).await?;
         Ok(())
     }
 
-    /// Resolve or create the DuckLake scope for a tenant.
-    ///
-    /// The deterministic schema name is only used when inserting the first mapping row. After that,
-    /// Postgres is the source of truth so future scope changes are explicit and auditable.
-    pub async fn resolve_or_create(&self, tenant_id: &str) -> Result<TenantDuckLakeScope> {
-        let tenant_id = tenant_id.trim();
-        if tenant_id.is_empty() {
-            return Err(anyhow!("tenant DuckLake scope requires tenant_id"));
-        }
-        let candidate_schema = tenant_ducklake_schema_name(tenant_id);
-        let client = self.pool.get().await?;
-        let row = client
-            .query_one(
-                &format!(
-                    r#"INSERT INTO {} (tenant_id, ducklake_schema, ducklake_data_path)
-VALUES ($1, $2, $3)
-ON CONFLICT (tenant_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id
-RETURNING ducklake_schema, ducklake_data_path;"#,
-                    self.qualified_table
-                ),
-                &[&tenant_id, &candidate_schema, &self.default_data_path],
-            )
-            .await?;
-        let scope = TenantDuckLakeScope {
-            metadata_schema: row.get(0),
-            data_path: row.get(1),
-        };
-        // Create the tenant metadata schema eagerly so data setup can hand agents a scope that is
-        // immediately ready for DuckLake table creation and future promotion DDL.
-        client
-            .execute(
-                &format!(
-                    "CREATE SCHEMA IF NOT EXISTS {};",
-                    quote_pg_ident(&scope.metadata_schema)
-                ),
-                &[],
-            )
-            .await?;
-        // Promotion metadata is tenant-contained and should exist before ingest attempts to load
-        // active specs or write row-level promotion errors for this tenant.
-        ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
-        Ok(scope)
+    /// Resolve the runtime-owned DuckLake scope.
+    pub async fn resolve_or_create(&self, _tenant_id: &str) -> Result<TenantDuckLakeScope> {
+        self.ensure_scope().await?;
+        Ok(self.scope.clone())
     }
 
     /// Resolve the tenant scope and load its active telemetry column manifests from Postgres.
@@ -141,6 +87,7 @@ RETURNING ducklake_schema, ducklake_data_path;"#,
         &self,
         tenant_id: &str,
     ) -> Result<(TenantDuckLakeScope, Vec<TelemetryColumnsManifest>)> {
+        let _ = tenant_id;
         let scope = self.resolve_or_create(tenant_id).await?;
         let client = self.pool.get().await?;
         let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
@@ -264,50 +211,17 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
     Ok(())
 }
 
-fn control_schema_name(dl: &DuckLakeConfig) -> String {
-    // Keep control metadata out of tenant DuckLake schemas. Operators configure the shared
-    // Postgres catalog connection in YAML, but the tenant mapping itself always lives here.
-    let _ = dl;
-    "softprobe_control".to_string()
-}
-
-/// Convert tenant ids into conservative unquoted SQL identifiers for DuckLake schemas.
-pub(crate) fn tenant_ducklake_schema_name(tenant_id: &str) -> String {
-    let mut out = String::from("tenant_");
-    let mut last_underscore = false;
-    for ch in tenant_id.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_underscore = false;
-        } else if !last_underscore {
-            out.push('_');
-            last_underscore = true;
-        }
-    }
-    while out.ends_with('_') {
-        out.pop();
-    }
-    if out == "tenant" {
-        out.push_str("_unknown");
-    }
-    out
-}
-
 fn quote_pg_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tenant_ducklake_schema_name;
+    use super::quote_pg_ident;
 
     #[test]
-    fn tenant_schema_name_is_stable_sql_identifier() {
-        assert_eq!(
-            tenant_ducklake_schema_name("tenant-123"),
-            "tenant_tenant_123"
-        );
-        assert_eq!(tenant_ducklake_schema_name("Acme Prod"), "tenant_acme_prod");
-        assert_eq!(tenant_ducklake_schema_name("a/b:c"), "tenant_a_b_c");
+    fn quote_pg_ident_escapes_double_quotes() {
+        assert_eq!(quote_pg_ident("abc"), "\"abc\"");
+        assert_eq!(quote_pg_ident("a\"b"), "\"a\"\"b\"");
     }
 }

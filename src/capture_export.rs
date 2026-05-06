@@ -5,11 +5,10 @@ use base64::Engine;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 
-pub fn capture_query_sql(tenant_id: &str, capture_id: &str) -> String {
-    let te = tenant_id.replace('\'', "''");
+pub fn capture_query_sql(capture_id: &str) -> String {
     let ce = capture_id.replace('\'', "''");
     format!(
-        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM committed_spans WHERE attributes['sp.capture.id'] = '{ce}' AND attributes['sp.tenant.id'] = '{te}' ORDER BY timestamp ASC"
+        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM committed_spans WHERE attributes['sp.capture.id'] = '{ce}' ORDER BY timestamp ASC"
     )
 }
 
@@ -175,15 +174,18 @@ mod tests {
 
     #[test]
     fn capture_query_reads_committed_spans_only() {
-        let sql = capture_query_sql("tenant-a", "cap-1");
+        let sql = capture_query_sql("cap-1");
         assert!(sql.contains("FROM committed_spans"));
         assert!(!sql.contains("FROM union_spans"));
+        assert!(
+            !sql.contains("sp.tenant.id"),
+            "capture query should not route by tenant attribute"
+        );
     }
 
     #[test]
     fn capture_query_sql_escapes_quotes() {
-        let sql = capture_query_sql("ten'ant", "cap'1");
-        assert!(sql.contains("ten''ant"));
+        let sql = capture_query_sql("cap'1");
         assert!(sql.contains("cap''1"));
     }
 

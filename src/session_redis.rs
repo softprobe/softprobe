@@ -22,7 +22,6 @@ pub struct SessionStats {
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
-    pub tenant_id: String,
     pub mode: String,
     pub revision: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -40,7 +39,6 @@ pub struct Session {
 #[derive(Clone)]
 pub struct RedisStore {
     r: redis::aio::ConnectionManager,
-    tenant_id: String,
     ttl: Duration,
 }
 
@@ -48,14 +46,12 @@ impl RedisStore {
     /// `redis_url` e.g. `redis://127.0.0.1:6379` or `redis://:pass@host:6379`
     pub async fn connect_url(
         redis_url: &str,
-        tenant_id: impl Into<String>,
         ttl: Duration,
     ) -> Result<Self> {
         let client = redis::Client::open(redis_url)?;
         let r = redis::aio::ConnectionManager::new(client).await?;
         Ok(Self {
             r,
-            tenant_id: tenant_id.into(),
             ttl,
         })
     }
@@ -64,29 +60,27 @@ impl RedisStore {
         host: &str,
         port: u16,
         password: Option<&str>,
-        tenant_id: impl Into<String>,
         ttl: Duration,
     ) -> Result<Self> {
         let url = match password {
             Some(pw) => format!("redis://:{pw}@{host}:{port}/"),
             None => format!("redis://{host}:{port}/"),
         };
-        Self::connect_url(&url, tenant_id, ttl).await
+        Self::connect_url(&url, ttl).await
     }
 
     fn session_key(&self, id: &str) -> String {
-        format!("session:{}:{}", self.tenant_id, id)
+        format!("session:{id}")
     }
 
     fn extracts_key(&self, id: &str) -> String {
-        format!("session:{}:{}:extracts", self.tenant_id, id)
+        format!("session:{id}:extracts")
     }
 
     pub async fn create(&mut self, mode: &str) -> Session {
         let id = new_session_id();
         let doc = Session {
             id: id.clone(),
-            tenant_id: self.tenant_id.clone(),
             mode: mode.to_string(),
             revision: 0,
             loaded_case: Vec::new(),
@@ -152,7 +146,7 @@ impl RedisStore {
     }
 
     pub async fn list(&mut self) -> Vec<Session> {
-        let pattern = format!("session:{}:*", self.tenant_id);
+        let pattern = "session:*".to_string();
         let keys: Vec<String> = self.r.keys(&pattern).await.unwrap_or_default();
         let mut out = Vec::new();
         for key in keys {
@@ -162,9 +156,7 @@ impl RedisStore {
             let data: Option<Vec<u8>> = self.r.get(&key).await.ok().flatten();
             if let Some(b) = data {
                 if let Ok(s) = serde_json::from_slice::<Session>(&b) {
-                    if s.tenant_id == self.tenant_id {
-                        out.push(s);
-                    }
+                    out.push(s);
                 }
             }
         }
@@ -218,7 +210,6 @@ mod tests {
     fn session_roundtrip_json() {
         let s = Session {
             id: "id1".into(),
-            tenant_id: "t1".into(),
             mode: "replay".into(),
             revision: 3,
             loaded_case: b"case".to_vec(),
@@ -232,6 +223,11 @@ mod tests {
             },
         };
         let v = serde_json::to_vec(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&v).unwrap();
+        assert!(
+            value.get("tenantId").is_none(),
+            "session payload should not carry tenantId in single-tenant runtime mode"
+        );
         let d: Session = serde_json::from_slice(&v).unwrap();
         assert_eq!(d.id, s.id);
         assert_eq!(d.stats.injected_spans, 2);

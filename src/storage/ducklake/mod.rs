@@ -14,7 +14,6 @@ use duckdb::{Connection, ToSql};
 use iceberg::spec::Schema as IcebergSchema;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -119,59 +118,16 @@ impl DuckLakeWriter {
         dk
     }
 
-    fn partition_spans_by_tenant(batches: Vec<Vec<Span>>) -> Result<BTreeMap<String, Vec<Span>>> {
-        let mut m: BTreeMap<String, Vec<Span>> = BTreeMap::new();
-        for batch in batches {
-            for span in batch {
-                let tid = span.tenant_id.clone().ok_or_else(|| {
-                    anyhow!(
-                        "Postgres DuckLake catalog requires span.tenant_id (sp.tenant.id) for tenant routing"
-                    )
-                })?;
-                m.entry(tid).or_default().push(span);
-            }
-        }
-        Ok(m)
+    fn flatten_spans(batches: Vec<Vec<Span>>) -> Vec<Span> {
+        batches.into_iter().flatten().collect()
     }
 
-    fn partition_logs_by_tenant(batches: Vec<Vec<Log>>) -> Result<BTreeMap<String, Vec<Log>>> {
-        let mut m: BTreeMap<String, Vec<Log>> = BTreeMap::new();
-        for batch in batches {
-            for log in batch {
-                let tid = log
-                    .resource_attributes
-                    .get("sp.tenant.id")
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Postgres DuckLake catalog requires sp.tenant.id on log resource attributes for tenant routing"
-                        )
-                    })?;
-                m.entry(tid).or_default().push(log);
-            }
-        }
-        Ok(m)
+    fn flatten_logs(batches: Vec<Vec<Log>>) -> Vec<Log> {
+        batches.into_iter().flatten().collect()
     }
 
-    fn partition_metrics_by_tenant(
-        batches: Vec<Vec<Metric>>,
-    ) -> Result<BTreeMap<String, Vec<Metric>>> {
-        let mut m: BTreeMap<String, Vec<Metric>> = BTreeMap::new();
-        for batch in batches {
-            for metric in batch {
-                let tid = metric
-                    .resource_attributes
-                    .get("sp.tenant.id")
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Postgres DuckLake catalog requires sp.tenant.id on metric resource attributes for tenant routing"
-                        )
-                    })?;
-                m.entry(tid).or_default().push(metric);
-            }
-        }
-        Ok(m)
+    fn flatten_metrics(batches: Vec<Vec<Metric>>) -> Vec<Metric> {
+        batches.into_iter().flatten().collect()
     }
 
     fn telemetry_columns_for_table(
@@ -262,22 +218,18 @@ impl DuckLakeWriter {
         }
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
-            let grouped = Self::partition_spans_by_tenant(batches)?;
-            for (tenant_id, mut spans) in grouped {
-                if spans.is_empty() {
-                    continue;
-                }
-                let (scope, manifests) = resolver
-                    .load_active_telemetry_columns_manifests(&tenant_id)
-                    .await?;
-                let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
-                Self::apply_span_promotions(&mut spans, &columns)?;
-                let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
-                let dk = self.effective_ducklake(&scope);
-                let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
-                self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
-                    .await?;
+            let (scope, manifests) = resolver.load_active_telemetry_columns_manifests("").await?;
+            let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
+            let mut spans = Self::flatten_spans(batches);
+            if spans.is_empty() {
+                return Ok(());
             }
+            Self::apply_span_promotions(&mut spans, &columns)?;
+            let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
+            let dk = self.effective_ducklake(&scope);
+            let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
+            self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
+                .await?;
             Ok(())
         } else {
             let schema = self.spans_schema().await?;
@@ -298,22 +250,18 @@ impl DuckLakeWriter {
         }
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
-            let grouped = Self::partition_logs_by_tenant(batches)?;
-            for (tenant_id, mut logs) in grouped {
-                if logs.is_empty() {
-                    continue;
-                }
-                let (scope, manifests) = resolver
-                    .load_active_telemetry_columns_manifests(&tenant_id)
-                    .await?;
-                let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Logs);
-                Self::apply_log_promotions(&mut logs, &columns)?;
-                let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
-                let dk = self.effective_ducklake(&scope);
-                let record_batches = vec![arrow::logs_to_record_batch(&logs, schema.as_ref())?];
-                self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
-                    .await?;
+            let (scope, manifests) = resolver.load_active_telemetry_columns_manifests("").await?;
+            let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Logs);
+            let mut logs = Self::flatten_logs(batches);
+            if logs.is_empty() {
+                return Ok(());
             }
+            Self::apply_log_promotions(&mut logs, &columns)?;
+            let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
+            let dk = self.effective_ducklake(&scope);
+            let record_batches = vec![arrow::logs_to_record_batch(&logs, schema.as_ref())?];
+            self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
+                .await?;
             Ok(())
         } else {
             let schema = self.logs_schema().await?;
@@ -334,24 +282,18 @@ impl DuckLakeWriter {
         }
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
-            let grouped = Self::partition_metrics_by_tenant(batches)?;
-            for (tenant_id, mut metrics) in grouped {
-                if metrics.is_empty() {
-                    continue;
-                }
-                let (scope, manifests) = resolver
-                    .load_active_telemetry_columns_manifests(&tenant_id)
-                    .await?;
-                let columns =
-                    Self::telemetry_columns_for_table(&manifests, TelemetryTable::Metrics);
-                Self::apply_metric_promotions(&mut metrics, &columns)?;
-                let schema = Arc::new(OtlpMetricsTable::schema_with_promoted_columns(&columns));
-                let dk = self.effective_ducklake(&scope);
-                let record_batches =
-                    vec![arrow::metrics_to_record_batch(&metrics, schema.as_ref())?];
-                self.write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
-                    .await?;
+            let (scope, manifests) = resolver.load_active_telemetry_columns_manifests("").await?;
+            let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Metrics);
+            let mut metrics = Self::flatten_metrics(batches);
+            if metrics.is_empty() {
+                return Ok(());
             }
+            Self::apply_metric_promotions(&mut metrics, &columns)?;
+            let schema = Arc::new(OtlpMetricsTable::schema_with_promoted_columns(&columns));
+            let dk = self.effective_ducklake(&scope);
+            let record_batches = vec![arrow::metrics_to_record_batch(&metrics, schema.as_ref())?];
+            self.write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
+                .await?;
             Ok(())
         } else {
             let schema = self.metrics_schema().await?;
@@ -368,16 +310,11 @@ impl DuckLakeWriter {
 
     pub async fn write_span_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
         if self.use_tenant_scoped_ducklake() {
-            let tid = crate::catalog::resolve_trace_tenant_id(&record_batches).ok_or_else(|| {
-                anyhow!(
-                    "Postgres DuckLake catalog requires a consistent tenant_id column on trace batches"
-                )
-            })?;
             let scope = self
                 .tenant_ducklake
                 .as_ref()
                 .unwrap()
-                .resolve_or_create(&tid)
+                .resolve_or_create("")
                 .await?;
             let dk = self.effective_ducklake(&scope);
             self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
@@ -390,9 +327,16 @@ impl DuckLakeWriter {
 
     pub async fn write_log_record_batches(&self, record_batches: Vec<RecordBatch>) -> Result<()> {
         if self.use_tenant_scoped_ducklake() {
-            anyhow::bail!(
-                "write_log_record_batches with Postgres tenant DuckLake requires batched domain models so sp.tenant.id can be read from resource attributes; use write_log_batches"
-            );
+            let scope = self
+                .tenant_ducklake
+                .as_ref()
+                .unwrap()
+                .resolve_or_create("")
+                .await?;
+            let dk = self.effective_ducklake(&scope);
+            return self
+                .write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
+                .await;
         }
         self.write_record_batches_internal("logs", record_batches)
             .await
@@ -403,9 +347,16 @@ impl DuckLakeWriter {
         record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
         if self.use_tenant_scoped_ducklake() {
-            anyhow::bail!(
-                "write_metric_record_batches with Postgres tenant DuckLake requires batched domain models so sp.tenant.id can be read from resource attributes; use write_metric_batches"
-            );
+            let scope = self
+                .tenant_ducklake
+                .as_ref()
+                .unwrap()
+                .resolve_or_create("")
+                .await?;
+            let dk = self.effective_ducklake(&scope);
+            return self
+                .write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
+                .await;
         }
         self.write_record_batches_internal("metrics", record_batches)
             .await
@@ -530,10 +481,8 @@ impl DuckLakeWriter {
         if table_name == "traces" {
             if let Some(ref cat) = self.dropdown_catalog {
                 if self.config.dropdown_catalog.enabled {
-                    if let Some(tenant) = crate::catalog::resolve_trace_tenant_id(&record_batches) {
-                        if let Err(e) = cat.upsert_trace_batches(&tenant, &record_batches).await {
-                            warn!("dropdown catalog upsert failed (non-fatal): {}", e);
-                        }
+                    if let Err(e) = cat.upsert_trace_batches(&record_batches).await {
+                        warn!("dropdown catalog upsert failed (non-fatal): {}", e);
                     }
                 }
             }

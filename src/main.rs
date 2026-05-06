@@ -122,7 +122,6 @@ async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime>
         &redis_host,
         port,
         pw.as_deref(),
-        "global",
         Duration::from_secs(86_400),
     )
     .await?;

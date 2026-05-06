@@ -2,4 +2,4 @@
 
 mod dropdown;
 
-pub use dropdown::{resolve_trace_tenant_id, DropdownCatalog};
+pub use dropdown::DropdownCatalog;

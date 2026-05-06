@@ -109,11 +109,10 @@ impl DropdownCatalog {
             .execute(
                 &format!(
                     r#"CREATE TABLE IF NOT EXISTS {} (
-  tenant_id TEXT NOT NULL,
   entity_type TEXT NOT NULL,
   entity_value TEXT NOT NULL,
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (tenant_id, entity_type, entity_value)
+  PRIMARY KEY (entity_type, entity_value)
 );"#,
                     self.qualified_table
                 ),
@@ -124,7 +123,7 @@ impl DropdownCatalog {
             .execute(
                 &format!(
                     r#"CREATE INDEX IF NOT EXISTS ui_dropdown_catalog_lookup_idx
-ON {} (tenant_id, entity_type, last_seen_at DESC);"#,
+ON {} (entity_type, last_seen_at DESC);"#,
                     self.qualified_table
                 ),
                 &[],
@@ -137,14 +136,13 @@ ON {} (tenant_id, entity_type, last_seen_at DESC);"#,
     /// Call **before** DuckLake INSERT so inlined rows are covered.
     pub async fn upsert_trace_batches(
         &self,
-        tenant_id: &str,
         batches: &[RecordBatch],
     ) -> Result<()> {
         let pairs = collect_trace_catalog_pairs(batches, &self.cfg)?;
-        self.upsert_pairs_sql(tenant_id, pairs).await
+        self.upsert_pairs_sql(pairs).await
     }
 
-    async fn upsert_pairs_sql(&self, tenant_id: &str, pairs: Vec<(String, String)>) -> Result<()> {
+    async fn upsert_pairs_sql(&self, pairs: Vec<(String, String)>) -> Result<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -153,14 +151,13 @@ ON {} (tenant_id, entity_type, last_seen_at DESC);"#,
         for chunk in pairs.chunks(batch) {
             let values_sql = catalog_multi_values_sql(chunk.len());
             let sql = format!(
-                r#"INSERT INTO {} (tenant_id, entity_type, entity_value, last_seen_at)
+                r#"INSERT INTO {} (entity_type, entity_value, last_seen_at)
 VALUES {}
-ON CONFLICT (tenant_id, entity_type, entity_value) DO UPDATE SET
+ON CONFLICT (entity_type, entity_value) DO UPDATE SET
 last_seen_at = GREATEST({}.last_seen_at, EXCLUDED.last_seen_at)"#,
                 self.qualified_table, values_sql, self.qualified_table
             );
-            let mut args: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(1 + 2 * chunk.len());
-            args.push(&tenant_id as &(dyn ToSql + Sync));
+            let mut args: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(2 * chunk.len());
             for (et, ev) in chunk {
                 args.push(et as &(dyn ToSql + Sync));
                 args.push(ev as &(dyn ToSql + Sync));
@@ -170,23 +167,18 @@ last_seen_at = GREATEST({}.last_seen_at, EXCLUDED.last_seen_at)"#,
         Ok(())
     }
 
-    /// List entity types seen recently for a tenant.
-    pub async fn list_entity_types(
-        &self,
-        tenant_id: &str,
-        active_within_days: u32,
-    ) -> Result<Vec<String>> {
+    /// List entity types seen recently.
+    pub async fn list_entity_types(&self, active_within_days: u32) -> Result<Vec<String>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
                     r#"SELECT DISTINCT entity_type FROM {}
-WHERE tenant_id = $1
-  AND last_seen_at > NOW() - ($2::integer * INTERVAL '1 day')
+WHERE last_seen_at > NOW() - ($1::integer * INTERVAL '1 day')
 ORDER BY entity_type"#,
                     self.qualified_table
                 ),
-                &[&tenant_id, &(active_within_days as i32)],
+                &[&(active_within_days as i32)],
             )
             .await?;
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
@@ -195,7 +187,6 @@ ORDER BY entity_type"#,
     /// List distinct values for one entity type (recent).
     pub async fn list_entity_values(
         &self,
-        tenant_id: &str,
         entity_type: &str,
         active_within_days: u32,
         limit: i64,
@@ -207,20 +198,15 @@ ORDER BY entity_type"#,
                     r#"SELECT entity_value FROM (
   SELECT entity_value, max(last_seen_at) AS mx
   FROM {}
-  WHERE tenant_id = $1 AND entity_type = $2
-    AND last_seen_at > NOW() - ($3::integer * INTERVAL '1 day')
+  WHERE entity_type = $1
+    AND last_seen_at > NOW() - ($2::integer * INTERVAL '1 day')
   GROUP BY entity_value
 ) t
 ORDER BY mx DESC
-LIMIT $4"#,
+LIMIT $3"#,
                     self.qualified_table
                 ),
-                &[
-                    &tenant_id,
-                    &entity_type,
-                    &(active_within_days as i32),
-                    &limit,
-                ],
+                &[&entity_type, &(active_within_days as i32), &limit],
             )
             .await?;
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
@@ -254,16 +240,16 @@ fn quote_pg_ident(id: &str) -> String {
     format!("\"{}\"", id.replace('"', "\"\""))
 }
 
-/// `INSERT` values clause: `($1, $2, $3, NOW()), ($1, $4, $5, NOW()), …` where `$1` is always `tenant_id`.
+/// `INSERT` values clause: `($1, $2, NOW()), ($3, $4, NOW()), …`.
 fn catalog_multi_values_sql(num_rows: usize) -> String {
     debug_assert!(num_rows > 0);
-    let mut p: i32 = 2;
+    let mut p: i32 = 1;
     let mut out = String::new();
     for i in 0..num_rows {
         if i > 0 {
             out.push_str(", ");
         }
-        let _ = write!(&mut out, "($1, ${}, ${}, NOW())", p, p + 1);
+        let _ = write!(&mut out, "(${}, ${}, NOW())", p, p + 1);
         p += 2;
     }
     out
@@ -356,33 +342,6 @@ fn collect_trace_catalog_pairs(
     Ok(uniq.into_keys().collect())
 }
 
-/// Returns Some(tenant id) when all non-null `tenant_id` cells agree; None when absent or inconsistent (catalog upsert skipped).
-pub fn resolve_trace_tenant_id(batches: &[RecordBatch]) -> Option<String> {
-    let mut out: Option<String> = None;
-    for batch in batches {
-        let Some((idx, _)) = batch.schema().column_with_name("tenant_id") else {
-            continue;
-        };
-        let col = batch.column(idx);
-        let Some(arr) = col.as_any().downcast_ref::<StringArray>() else {
-            continue;
-        };
-        for i in 0..arr.len() {
-            if arr.is_null(i) {
-                continue;
-            }
-            let v = arr.value(i).to_string();
-            if out.is_none() {
-                out = Some(v);
-            } else if out.as_ref() != Some(&v) {
-                warn!("dropdown catalog: mixed tenant_id in batch; skipping catalog upsert");
-                return None;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,25 +394,18 @@ mod tests {
 
     #[test]
     fn catalog_multi_values_sql_placeholders() {
-        assert_eq!(catalog_multi_values_sql(1), "($1, $2, $3, NOW())");
+        assert_eq!(catalog_multi_values_sql(1), "($1, $2, NOW())");
         assert_eq!(
             catalog_multi_values_sql(2),
-            "($1, $2, $3, NOW()), ($1, $4, $5, NOW())"
+            "($1, $2, NOW()), ($3, $4, NOW())"
         );
         assert_eq!(
             catalog_multi_values_sql(3),
-            "($1, $2, $3, NOW()), ($1, $4, $5, NOW()), ($1, $6, $7, NOW())"
+            "($1, $2, NOW()), ($3, $4, NOW()), ($5, $6, NOW())"
         );
-    }
-
-    #[test]
-    fn resolve_tenant_roundtrip() {
-        let schema: IcebergSchema = TraceTable::schema();
-        let spans = vec![sample_span(Some("tid"))];
-        let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
-        assert_eq!(
-            resolve_trace_tenant_id(std::slice::from_ref(&batch)).as_deref(),
-            Some("tid")
+        assert!(
+            !catalog_multi_values_sql(2).contains("($1, $2, $3"),
+            "single-tenant catalog upserts should no longer include tenant_id column/value placeholders"
         );
     }
 }
