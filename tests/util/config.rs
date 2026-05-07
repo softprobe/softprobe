@@ -18,6 +18,7 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
     std::fs::create_dir_all(duck_dir.join("data")).expect("ducklake data");
 
     let mut dl = config.ducklake_or_default();
+    dl.catalog_type = "duckdb".to_string();
     dl.metadata_path = duck_dir
         .join("metadata.ducklake")
         .to_string_lossy()

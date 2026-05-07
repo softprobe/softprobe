@@ -93,7 +93,7 @@ make teardown-local
 
 **Common test commands:**
 ```bash
-make test-quick      # Unit tests only (fast, no infrastructure)
+make test-quick      # Library unit tests + tests/tests.rs (no MinIO; no integration-e2e)
 make test-local      # Integration tests with local MinIO
 make test-r2         # Integration tests with Cloudflare R2
 make test-all        # All tests
@@ -187,7 +187,7 @@ make test-all
 ### Data & Verification
 ```bash
 make generate-telemetry
-make verify-e2e
+make test-all              # automated ingest + DuckLake (MinIO required for integration-e2e)
 make demo-session
 make duckdb-shell
 make drop-tables

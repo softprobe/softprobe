@@ -5,7 +5,7 @@ use crate::storage::iceberg::arrow::{
     logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
 };
 use crate::storage::TieredStorage;
-use crate::tenant_ducklake::TenantDuckLakeScope;
+use crate::runtime_engine::DuckLakeScope;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -291,7 +291,7 @@ impl DuckDBQueryEngine {
     pub async fn execute_query_in_ducklake_scope(
         &self,
         query: &str,
-        scope: &TenantDuckLakeScope,
+        scope: &DuckLakeScope,
     ) -> Result<QueryResult> {
         let mut config = self.config.clone();
         let mut ducklake = config.ducklake_or_default();

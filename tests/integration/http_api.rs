@@ -17,23 +17,23 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use serde_json::{json, Value};
 use softprobe_runtime::api::{AppPipeline, AppState};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
 
 async fn build_router() -> (Router, tempfile::TempDir) {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let config = file_backed_test_config(&temp);
-    let app = AppPipeline::new(&config).await.expect("app pipeline");
-    let router = app.into_router().await.expect("router");
+    let (router, _state, temp) = build_router_and_state().await;
     (router, temp)
 }
 
 async fn build_router_and_state() -> (Router, AppState, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
-    let app = AppPipeline::new(&config).await.expect("app pipeline");
+    let config = Arc::new(config);
+    let app = AppPipeline::new(config.as_ref()).await.expect("app pipeline");
     let (router, state) = softprobe_runtime::api::create_router(
+        config.clone(),
         app.storage,
         app.query_engine,
         Some(app.span_buffer),
@@ -435,13 +435,8 @@ async fn telemetry_search_sessions_returns_summary_rows() {
     let resp = router.clone().oneshot(req).await.expect("trace ingest");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    state
-        .span_buffer
-        .as_ref()
-        .expect("span buffer")
-        .force_flush()
-        .await
-        .expect("flush spans");
+    let engine = state.engine_for_id("").await.expect("engine");
+    engine.ingest.force_flush_spans().await.expect("flush spans");
 
     let body = json!({
         "version": 1,
@@ -512,27 +507,10 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    state
-        .span_buffer
-        .as_ref()
-        .expect("span buffer")
-        .force_flush()
-        .await
-        .expect("flush spans");
-    state
-        .log_buffer
-        .as_ref()
-        .expect("log buffer")
-        .force_flush()
-        .await
-        .expect("flush logs");
-    state
-        .metric_buffer
-        .as_ref()
-        .expect("metric buffer")
-        .force_flush()
-        .await
-        .expect("flush metrics");
+    let engine = state.engine_for_id("").await.expect("engine");
+    engine.ingest.force_flush_spans().await.expect("flush spans");
+    engine.ingest.force_flush_logs().await.expect("flush logs");
+    engine.ingest.force_flush_metrics().await.expect("flush metrics");
 
     let req = Request::builder()
         .uri(format!(

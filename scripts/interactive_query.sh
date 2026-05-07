@@ -1,69 +1,50 @@
 #!/bin/bash
-# Interactive DuckDB session with Iceberg tables pre-configured
-# Usage: ./scripts/interactive_query.sh
+# Interactive DuckDB against the same DuckLake scope as softprobe-runtime (from CONFIG_FILE).
+#
+# Usage:
+#   make duckdb-shell
+#   CONFIG_FILE=/path/to/runtime.yaml ./scripts/interactive_query.sh
+#
+# Optional:
+#   SOFTPROBE_DUCKDB_INIT  If set, path to a static attach-only .sql (skips YAML renderer; legacy).
 
-cat << 'EOF' > /tmp/duckdb_init.sql
--- Auto-load Iceberg extension
-INSTALL iceberg;
-LOAD iceberg;
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
--- Configure S3 for MinIO
-SET s3_endpoint='localhost:9000';
-SET s3_access_key_id='minioadmin';
-SET s3_secret_access_key='minioadmin';
-SET s3_use_ssl=false;
-SET s3_url_style='path';
+if ! command -v duckdb >/dev/null 2>&1; then
+  echo "ERROR: duckdb CLI not found (brew install duckdb)" >&2
+  exit 1
+fi
 
--- Enable unsafe version guessing
-SET unsafe_enable_version_guessing=true;
+# shellcheck source=/dev/null
+source "${ROOT}/scripts/duckdb_ducklake_combo.sh"
 
--- Welcome message
-.print '================================================'
-.print 'DuckDB Interactive Session - Iceberg Tables'
-.print '================================================'
-.print ''
-.print 'Loading Iceberg tables...'
+STATIC_INIT="${SOFTPROBE_DUCKDB_INIT:-}"
+if [[ -n "$STATIC_INIT" ]]; then
+  COMBO="$(softprobe_ducklake_build_combo_init "$ROOT" "$STATIC_INIT")"
+else
+  COMBO="$(softprobe_ducklake_build_combo_init "$ROOT")"
+fi
+trap 'rm -f "$COMBO"' EXIT
 
--- Create views for Iceberg tables (using S3 paths)
-CREATE OR REPLACE VIEW traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
+echo "Starting DuckDB (DuckLake attach + views for existing tables in this config scope)"
+grep '^-- CONFIG_FILE=' "$COMBO" 2>/dev/null || true
+grep '^-- DuckLake scope:' "$COMBO" 2>/dev/null || true
+if [[ -n "$STATIC_INIT" ]]; then
+  echo "  (static attach SQL: $STATIC_INIT)"
+fi
+echo "  Point CONFIG_FILE at the same YAML as the running runtime so metadata_schema / data_path match."
+if grep -q "CREATE OR REPLACE VIEW" "$COMBO" 2>/dev/null; then
+  echo "  Convenience views: $(grep 'CREATE OR REPLACE VIEW' "$COMBO" | sed -n 's/.*VIEW \([^ ]*\) AS.*/\1/p' | tr '\n' ' ')"
+else
+  echo "  No telemetry tables in this scope yet — ATTACH only. Ingest, then re-run or .read scripts/duckdb_ducklake_local_views.sql"
+fi
+echo ""
 
-CREATE OR REPLACE VIEW logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
+duckdb -init "$COMBO" -c "SELECT 1 AS attach_ok;" >/dev/null || {
+  echo "ERROR: DuckDB could not load DuckLake init. Check Postgres, MinIO, and CONFIG_FILE (default: tests/config/duckdb-shell-host.yaml)." >&2
+  exit 1
+}
 
-CREATE OR REPLACE VIEW metrics AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/metrics', allow_moved_paths := true);
-
--- 1. Create a helper to find the latest metadata file from S3
-CREATE OR REPLACE TEMP TABLE latest_meta AS 
-FROM glob('s3://warehouse/default/traces/metadata/*.metadata.json') 
-SELECT file_name ORDER BY file_name DESC LIMIT 1;
-
--- 2. Create a macro so you can just type 'checkpoint_traces()'
-CREATE OR REPLACE MACRO checkpoint_traces() AS TABLE 
-SELECT * FROM iceberg_snapshots((SELECT file_name FROM latest_meta));
-
-.print ''
-.print 'Available views:'
-.print '  - traces'
-.print '  - logs'
-.print '  - metrics'
-.print ''
-.print 'Useful commands:'
-.print '  DESCRIBE traces;'
-.print '  DESCRIBE logs;'
-.print '  DESCRIBE metrics;'
-.print ''
-.print 'Example queries:'
-.print '  SELECT COUNT(*) FROM traces;'
-.print '  SELECT * FROM logs ORDER BY timestamp DESC LIMIT 10;'
-.print '  SELECT session_id, COUNT(*) FROM traces GROUP BY session_id;'
-.print '  SELECT metric_name, COUNT(*) FROM metrics GROUP BY metric_name;'
-.print '  SELECT * FROM metrics WHERE metric_name = '\''cpu.usage'\'' ORDER BY timestamp DESC LIMIT 10;'
-.print ''
-.print '================================================'
-.print ''
-EOF
-
-# Launch DuckDB with init script
-duckdb -init /tmp/duckdb_init.sql
+exec duckdb -init "$COMBO"

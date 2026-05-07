@@ -45,89 +45,90 @@ impl Resolver {
             }
         }
 
-        let info = self.call_auth_service(api_key).await?;
+        let info = call_auth_service(&self.client, &self.url, api_key).await?;
 
         self.cache
             .insert(api_key.to_string(), (info.clone(), Instant::now()));
         Ok(info)
     }
+}
 
-    async fn call_auth_service(&self, api_key: &str) -> Result<TenantInfo> {
-        let body = serde_json::to_string(&serde_json::json!({ "apiKey": api_key }))?;
+async fn call_auth_service(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Result<TenantInfo> {
+    let body = serde_json::to_string(&serde_json::json!({ "apiKey": api_key }))?;
 
-        let resp = self
-            .client
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| anyhow!("authn: auth service unreachable: {e}"))?;
+    let resp = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("authn: auth service unreachable: {e}"))?;
 
-        #[derive(Deserialize)]
-        struct Outer {
-            success: bool,
-            data: Option<Data>,
-        }
-        #[derive(Deserialize)]
-        struct Data {
-            #[serde(rename = "tenantId")]
-            tenant_id: String,
-            resources: Option<Vec<Resource>>,
-        }
-        #[derive(Deserialize)]
-        struct Resource {
-            #[serde(rename = "resourceType")]
-            resource_type: String,
-            #[serde(rename = "configJson")]
-            config_json: String,
-        }
-        #[derive(Deserialize)]
-        struct BqCfg {
-            #[serde(rename = "dataset_id")]
-            dataset_id: String,
-            #[serde(rename = "bucket_name")]
-            bucket_name: String,
-        }
+    #[derive(Deserialize)]
+    struct Outer {
+        success: bool,
+        data: Option<Data>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(rename = "tenantId")]
+        tenant_id: String,
+        resources: Option<Vec<Resource>>,
+    }
+    #[derive(Deserialize)]
+    struct Resource {
+        #[serde(rename = "resourceType")]
+        resource_type: String,
+        #[serde(rename = "configJson")]
+        config_json: String,
+    }
+    #[derive(Deserialize)]
+    struct BqCfg {
+        #[serde(rename = "dataset_id")]
+        dataset_id: String,
+        #[serde(rename = "bucket_name")]
+        bucket_name: String,
+    }
 
-        let payload: Outer = resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("authn: decode response: {e}"))?;
+    let payload: Outer = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("authn: decode response: {e}"))?;
 
-        if !payload.success {
-            return Err(anyhow!("authn: invalid API key"));
-        }
-        let data = payload
-            .data
-            .ok_or_else(|| anyhow!("authn: invalid API key"))?;
+    if !payload.success {
+        return Err(anyhow!("authn: invalid API key"));
+    }
+    let data = payload
+        .data
+        .ok_or_else(|| anyhow!("authn: invalid API key"))?;
 
-        let mut info = TenantInfo {
-            tenant_id: data.tenant_id.clone(),
-            bucket_name: String::new(),
-            dataset_id: String::new(),
-        };
+    let mut info = TenantInfo {
+        tenant_id: data.tenant_id.clone(),
+        bucket_name: String::new(),
+        dataset_id: String::new(),
+    };
 
-        if let Some(resources) = data.resources {
-            for res in resources {
-                if res.resource_type != "BIGQUERY_DATASET"
-                    && res.resource_type != "BIGQUERY_STORAGE"
-                {
-                    continue;
-                }
-                if let Ok(cfg) = serde_json::from_str::<BqCfg>(&res.config_json) {
-                    info.dataset_id = cfg.dataset_id;
-                    info.bucket_name = cfg.bucket_name;
-                    break;
-                }
+    if let Some(resources) = data.resources {
+        for res in resources {
+            if res.resource_type != "BIGQUERY_DATASET" && res.resource_type != "BIGQUERY_STORAGE" {
+                continue;
+            }
+            if let Ok(cfg) = serde_json::from_str::<BqCfg>(&res.config_json) {
+                info.dataset_id = cfg.dataset_id;
+                info.bucket_name = cfg.bucket_name;
+                break;
             }
         }
-
-        if info.tenant_id.is_empty() {
-            return Err(anyhow!("authn: auth response missing tenantId"));
-        }
-        Ok(info)
     }
+
+    if info.tenant_id.is_empty() {
+        return Err(anyhow!("authn: auth response missing tenantId"));
+    }
+    Ok(info)
 }
 
 #[cfg(test)]

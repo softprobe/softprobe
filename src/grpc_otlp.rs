@@ -15,8 +15,9 @@ use prost::Message;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-struct GrpcTraceService {
-    state: AppState,
+/// gRPC [`TraceService`] implementation; exposed for `integration-e2e` tests that assert OTLP/gRPC parity with HTTP ingest.
+pub struct GrpcTraceService {
+    pub state: AppState,
 }
 
 #[tonic::async_trait]
@@ -35,8 +36,8 @@ impl TraceService for GrpcTraceService {
             .ok_or_else(|| Status::unauthenticated("missing or invalid authorization metadata"))?;
         let control_plane = self
             .state
-            .control_plane
-            .as_ref()
+            .engines
+            .control_plane()
             .ok_or_else(|| Status::internal("gRPC ingest requires control-plane runtime"))?;
         let tenant = control_plane
             .resolver
@@ -55,7 +56,7 @@ pub async fn run_trace_grpc_server(
     addr: std::net::SocketAddr,
     state: AppState,
 ) -> anyhow::Result<()> {
-    if state.control_plane.is_none() {
+    if state.engines.control_plane().is_none() {
         anyhow::bail!("gRPC ingest requires control-plane runtime");
     }
     let svc = GrpcTraceService { state };
@@ -75,7 +76,7 @@ mod tests {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
-        assert!(state.control_plane.is_none());
+        assert!(state.engines.control_plane().is_none());
         let svc = GrpcTraceService { state };
         let req = Request::new(ExportTraceServiceRequest::default());
         let got = TraceService::export(&svc, req).await;
@@ -93,7 +94,7 @@ mod tests {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
-        assert!(state.control_plane.is_none());
+        assert!(state.engines.control_plane().is_none());
         let svc = GrpcTraceService { state };
         let mut req = Request::new(ExportTraceServiceRequest::default());
         req.metadata_mut()

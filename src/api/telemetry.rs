@@ -1,4 +1,13 @@
+// ============================================================================
+// TENANT BINDING CONSTITUTION (HARD RULE)
+// Tenant identity is allowed only at auth/configuration/instantiation boundaries.
+// Operational APIs MUST NOT accept tenant_id parameters.
+// After binding tenant context, use tenant-scoped instances/contexts only.
+// ============================================================================
+
 use crate::api::AppState;
+use crate::authn::TenantInfo;
+use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -312,12 +321,12 @@ pub fn compile_details_sql(
 
 pub async fn search(
     State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
     Json(request): Json<TelemetrySearchRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let sql = compile_search_sql(&request).map_err(bad_request)?;
     let result = state
-        .query_engine
-        .execute_query(&sql)
+        .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &sql)
         .await
         .map_err(storage_error)?;
     let rows = rows_to_search_response(&request.scope, &result.columns, &result.rows);
@@ -337,11 +346,13 @@ pub async fn search(
 
 pub async fn session_details(
     State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     details_for_target(
         state,
+        tenant.as_ref().map(|e| &e.0),
         TelemetryDetailsTarget {
             kind: "session".to_string(),
             id: session_id,
@@ -354,11 +365,13 @@ pub async fn session_details(
 
 pub async fn trace_details(
     State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
     Path(trace_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     details_for_target(
         state,
+        tenant.as_ref().map(|e| &e.0),
         TelemetryDetailsTarget {
             kind: "trace".to_string(),
             id: trace_id,
@@ -371,6 +384,7 @@ pub async fn trace_details(
 
 pub async fn details_post(
     State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
     Json(request): Json<TelemetryDetailsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if request.version != 1 {
@@ -380,6 +394,7 @@ pub async fn details_post(
     }
     details_for_target(
         state,
+        tenant.as_ref().map(|e| &e.0),
         request.target,
         request.time_range,
         request.limit.unwrap_or(1000),
@@ -404,6 +419,7 @@ pub async fn fields() -> Json<Value> {
 
 pub async fn field_values(
     State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
     Path(field): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -418,11 +434,10 @@ pub async fn field_values(
         .clamp(1, 10_000);
     let sql = format!(
         "SELECT DISTINCT {field_sql} AS value FROM union_spans WHERE {field_sql} IS NOT NULL ORDER BY value ASC LIMIT {limit}",
-        field_sql = spec.sql
+        field_sql = spec.sql,
     );
     let result = state
-        .query_engine
-        .execute_query(&sql)
+        .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &sql)
         .await
         .map_err(storage_error)?;
     let values = result
@@ -437,14 +452,15 @@ pub async fn field_values(
 
 async fn details_for_target(
     state: AppState,
+    tenant: Option<&TenantInfo>,
     target: TelemetryDetailsTarget,
     time_range: Option<TelemetryTimeRange>,
     limit: usize,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let compiled = compile_details_sql(&target, time_range.as_ref(), limit).map_err(bad_request)?;
-    let spans = execute_objects(&state, &compiled.spans).await?;
-    let logs = execute_objects(&state, &compiled.logs).await?;
-    let metrics = execute_objects(&state, &compiled.metrics).await?;
+    let spans = execute_objects(&state, tenant, &compiled.spans).await?;
+    let logs = execute_objects(&state, tenant, &compiled.logs).await?;
+    let metrics = execute_objects(&state, tenant, &compiled.metrics).await?;
     let summary = json!({
         "spanCount": spans.len(),
         "logCount": logs.len(),
@@ -468,11 +484,11 @@ async fn details_for_target(
 
 async fn execute_objects(
     state: &AppState,
+    tenant: Option<&TenantInfo>,
     sql: &str,
 ) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
     let result = state
-        .query_engine
-        .execute_query(sql)
+        .execute_tenant_scoped_sql(tenant, sql)
         .await
         .map_err(storage_error)?;
     Ok(rows_to_objects(&result.columns, &result.rows))
@@ -644,10 +660,11 @@ fn detail_sql(
     time_filter: Option<&str>,
     limit: usize,
 ) -> String {
-    let where_sql = match time_filter {
-        Some(time) => format!("{id_filter} AND {time}"),
-        None => id_filter.to_string(),
-    };
+    let mut parts: Vec<String> = vec![id_filter.to_string()];
+    if let Some(time) = time_filter {
+        parts.push(time.to_string());
+    }
+    let where_sql = parts.join(" AND ");
     format!("SELECT {columns} FROM {table} WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}")
 }
 

@@ -1,3 +1,10 @@
+// ============================================================================
+// TENANT BINDING CONSTITUTION (HARD RULE)
+// Tenant identity is allowed only at auth/configuration/instantiation boundaries.
+// Operational APIs MUST NOT accept tenant_id parameters.
+// After binding tenant context, use tenant-scoped instances/contexts only.
+// ============================================================================
+
 //! Build capture JSON from SQL rows (ported from Go `hostedbackend`).
 
 use anyhow::Result;
@@ -5,10 +12,11 @@ use base64::Engine;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 
-pub fn capture_query_sql(capture_id: &str) -> String {
+pub fn capture_query_sql(capture_id: &str, tenant_id: &str) -> String {
     let ce = capture_id.replace('\'', "''");
+    let te = tenant_id.replace('\'', "''");
     format!(
-        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM committed_spans WHERE attributes['sp.capture.id'] = '{ce}' ORDER BY timestamp ASC"
+        "SELECT timestamp, trace_id, span_id, parent_span_id, app_id, tenant_id, message_type, span_kind, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes FROM committed_spans WHERE attributes['sp.capture.id'] = '{ce}' AND tenant_id = '{te}' ORDER BY timestamp ASC"
     )
 }
 
@@ -174,8 +182,9 @@ mod tests {
 
     #[test]
     fn capture_query_reads_committed_spans_only() {
-        let sql = capture_query_sql("cap-1");
+        let sql = capture_query_sql("cap-1", "tenant-a");
         assert!(sql.contains("FROM committed_spans"));
+        assert!(sql.contains("tenant_id = 'tenant-a'"));
         assert!(!sql.contains("FROM union_spans"));
         assert!(
             !sql.contains("sp.tenant.id"),
@@ -185,7 +194,7 @@ mod tests {
 
     #[test]
     fn capture_query_sql_escapes_quotes() {
-        let sql = capture_query_sql("cap'1");
+        let sql = capture_query_sql("cap'1", "t");
         assert!(sql.contains("cap''1"));
     }
 

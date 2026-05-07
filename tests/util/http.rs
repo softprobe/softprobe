@@ -4,6 +4,7 @@ use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::query;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -42,13 +43,15 @@ pub async fn start_test_server() -> (String, TempDir) {
         std::fs::create_dir_all(&ducklake.data_path).expect("ducklake data dir");
     }
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let config = Arc::new(config);
+    let pipeline = IngestPipeline::new(config.as_ref()).await.expect("pipeline");
     let query_engine =
-        query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
+        query::create_query_engine(config.as_ref(), std::sync::Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");
 
     let (app, _) = api::create_router(
+        config.clone(),
         pipeline.storage.clone(),
         query_engine,
         Some(pipeline.storage.span_buffer.clone()),

@@ -3,7 +3,7 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span;
 use softprobe_runtime::promotion::ensure_promotion_metadata_tables;
-use softprobe_runtime::tenant_ducklake::TenantDuckLakeResolver;
+use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
@@ -20,7 +20,12 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     ducklake.catalog_alias = "softprobe".to_string();
     ducklake.metadata_schema = format!("softprobe_test_{suffix}");
-    ducklake.data_path = temp.path().join("data").to_string_lossy().to_string();
+    let tenant_data_path = temp
+        .path()
+        .join("tenant-data")
+        .to_string_lossy()
+        .to_string();
+    ducklake.data_path = tenant_data_path.clone();
     ducklake.data_inlining_row_limit = Some(0);
     let data_path = ducklake.data_path.clone();
     let metadata_path = ducklake.metadata_path.clone();
@@ -29,12 +34,20 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().to_string());
 
     let tenant_id = format!("tenant-promoted-{suffix}");
-    let resolver = TenantDuckLakeResolver::connect(&config)
+    let resolver = DuckLakeScopeResolver::connect(&config)
         .await
         .expect("resolver")
         .expect("postgres resolver");
+    resolver
+        .provision_scope(ScopeProvisioningRequest {
+            tenant_id: tenant_id.clone(),
+            metadata_schema: format!("softprobe_promoted_data_{suffix}"),
+            data_path: tenant_data_path,
+        })
+        .await
+        .expect("provision tenant");
     let scope = resolver
-        .resolve_or_create(&tenant_id)
+        .resolve_scope(&tenant_id)
         .await
         .expect("tenant scope");
     insert_active_trace_promotion_spec(&scope.metadata_schema).await;

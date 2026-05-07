@@ -1,8 +1,12 @@
 # DuckDB Verification Scripts - Test Results
 
+**Archived:** The `verify_quick.sh`, `verify_e2e.sh`, `verify_iceberg.sql`, and `verify_session.sql` artifacts were removed. Use **`make test-all`** / **`make test-local`** in `softprobe-runtime` (and repo root **`make test`**) for automated checks; optional manual DuckDB snippets are in [`docs/adhoc-duckdb-ducklake.md`](../docs/adhoc-duckdb-ducklake.md).
+
+---
+
 **Date**: 2025-12-30
 **DuckDB Version**: v1.4.3
-**Status**: ✅ All tests passing
+**Status**: Historical record only
 
 ## Scripts Tested
 

@@ -37,6 +37,7 @@ pub struct Log {
     // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+
     // Field 15: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }

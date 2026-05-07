@@ -1,7 +1,7 @@
-//! HTTP surface unit tests (run with `cargo test --lib` — drives `llvm-cov --lib`).
+//! HTTP surface unit tests (included in `make test-quick` / `cargo test --lib`; coverage via `llvm-cov --lib`).
 
-use axum::body::Body;
-use axum::extract::State;
+use axum::body::{Body, Bytes};
+use axum::extract::{Extension, State};
 use axum::http::{header, Request, StatusCode};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -12,12 +12,51 @@ use tower::ServiceExt;
 
 use crate::api::ingestion::metrics::{ingest_metrics_json, ingest_metrics_protobuf};
 use crate::api::ingestion::traces::{ingest_traces_json, ingest_traces_protobuf};
+use crate::authn::TenantInfo;
+use std::sync::Arc;
 use crate::api::telemetry::{
     compile_details_sql, compile_search_sql, TelemetryDetailsTarget, TelemetryFilter,
     TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
     TelemetrySortDirection, TelemetryTimeRange,
 };
 use crate::test_support::local_router_and_state;
+
+fn test_tenant() -> TenantInfo {
+    TenantInfo {
+        tenant_id: "unit-test-tenant".to_string(),
+        bucket_name: "unit-bucket".to_string(),
+        dataset_id: "unit-dataset".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn unit_runtime_engine_manager_cache_hit_same_arc() {
+    let (_router, state, _t) = local_router_and_state().await.expect("router");
+    let t = test_tenant();
+    let e1 = state.engine_for_tenant(&t).await.expect("engine");
+    let e2 = state.engine_for_tenant(&t).await.expect("engine");
+    assert!(Arc::ptr_eq(&e1, &e2));
+}
+
+#[tokio::test]
+async fn unit_runtime_engine_manager_single_flight_build_once() {
+    let (_router, state, _t) = local_router_and_state().await.expect("router");
+    let tenant_id = "unit-test-single-flight".to_string();
+    let (a, b, c, d) = tokio::join!(
+        state.engine_for_id(&tenant_id),
+        state.engine_for_id(&tenant_id),
+        state.engine_for_id(&tenant_id),
+        state.engine_for_id(&tenant_id),
+    );
+    let e1 = a.expect("engine");
+    let e2 = b.expect("engine");
+    let e3 = c.expect("engine");
+    let e4 = d.expect("engine");
+    assert!(Arc::ptr_eq(&e1, &e2));
+    assert!(Arc::ptr_eq(&e1, &e3));
+    assert!(Arc::ptr_eq(&e1, &e4));
+    assert_eq!(state.engines.build_count(), 1);
+}
 
 #[tokio::test]
 async fn unit_health_ready_traces_logs_metrics_query() {
@@ -133,27 +172,48 @@ async fn unit_openapi_and_swagger_endpoints_are_served() {
 #[tokio::test]
 async fn unit_ingest_traces_json_and_protobuf_handlers() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
+    let tenant = Extension(test_tenant());
 
     let body = json!({ "resourceSpans": [] }).to_string();
-    let res = ingest_traces_json(State(state.clone()), body.into()).await;
+    let res = ingest_traces_json(
+        State(state.clone()),
+        Some(tenant.clone()),
+        Bytes::from(body),
+    )
+    .await;
     assert!(res.0.success);
 
     let mut buf = Vec::new();
     ExportTraceServiceRequest::default()
         .encode(&mut buf)
         .expect("encode");
-    let res = ingest_traces_protobuf(State(state.clone()), buf.into()).await;
+    let res = ingest_traces_protobuf(
+        State(state.clone()),
+        Some(tenant.clone()),
+        Bytes::from(buf),
+    )
+    .await;
     assert!(res.0.success);
 
     let body = json!({ "resourceMetrics": [] }).to_string();
-    let res = ingest_metrics_json(State(state.clone()), body.into()).await;
+    let res = ingest_metrics_json(
+        State(state.clone()),
+        Some(tenant.clone()),
+        Bytes::from(body),
+    )
+    .await;
     assert!(res.0.success);
 
     let mut buf = Vec::new();
     ExportMetricsServiceRequest::default()
         .encode(&mut buf)
         .unwrap();
-    let res = ingest_metrics_protobuf(State(state), buf.into()).await;
+    let res = ingest_metrics_protobuf(
+        State(state),
+        Some(tenant),
+        Bytes::from(buf),
+    )
+    .await;
     assert!(res.0.success);
 }
 

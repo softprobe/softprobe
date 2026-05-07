@@ -7,8 +7,7 @@
 #
 # Usage:
 #   make test           - Unit tests + full local integration (MinIO; integration-e2e)
-#   make test-quick     - Unit tests only
-#   make test-smoke     - Lightweight integration tests (no MinIO)
+#   make test-smoke     - Alias of test-quick (library + lightweight tests/tests.rs)
 #   make test-local     - Full integration only (MinIO + integration-e2e)
 #   make test-r2        - Integration tests with Cloudflare R2
 #   make test-ci        - CI: MinIO → lib + integration-e2e; else lib only
@@ -16,7 +15,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test test-all test-local test-smoke test-r2 test-ci test-quick test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt verify-e2e verify-quick demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test test-all test-local test-smoke test-r2 test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables
 
 # Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
 # tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
@@ -47,10 +46,9 @@ help:
 	@echo "  make test            - Unit tests + full local integration (MinIO + integration-e2e)"
 	@echo "  make test-all        - Same as make test"
 	@echo "  make test-local      - Full integration only (MinIO + integration-e2e)"
-	@echo "  make test-smoke      - Fast integration smoke (no MinIO; default test crate features)"
 	@echo "  make test-r2         - Integration tests with Cloudflare R2 (+ integration-e2e)"
-	@echo "  make test-ci         - CI: MinIO present → lib + integration-e2e; else lib only"
-	@echo "  make test-quick      - Unit tests only (cargo test --lib)"
+	@echo "  make test-ci         - CI: MinIO present → test-quick + integration-e2e; else test-quick only"
+	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no MinIO)"
 	@echo ""
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
@@ -68,10 +66,9 @@ help:
 	@echo ""
 	@echo "Data & Verification:"
 	@echo "  make generate-telemetry - Generate demo OTLP data"
-	@echo "  make verify-e2e      - End-to-end verification (services + data)"
-	@echo "  make verify-quick    - Quick DuckDB verification"
+	@echo "  make test-all / test-local - Automated ingest + DuckLake coverage (see repo e2e README)"
 	@echo "  make demo-session    - Run session query demo"
-	@echo "  make duckdb-shell    - Launch DuckDB with Iceberg views"
+	@echo "  make duckdb-shell    - Launch DuckDB against local DuckLake (attach smoke runs first)"
 	@echo "  make drop-tables     - Drop Iceberg tables in REST catalog"
 	@echo ""
 	@echo "Development:"
@@ -176,13 +173,11 @@ check-local-postgres:
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local' from softprobe-runtime/)" && exit 1)
 
 # Test targets
+# Single cargo run: #[cfg(test)] in src/ plus the default integration crate tests/tests.rs
+# (modules gated behind integration-e2e are skipped unless that feature is enabled).
 test-quick:
-	@echo "🧪 Running unit tests..."
-	cargo test --lib
-
-test-smoke:
-	@echo "🧪 Running lightweight integration tests (no integration-e2e feature)..."
-	cargo test --test tests -- --test-threads=1
+	@echo "🧪 Running library + lightweight integration tests (no integration-e2e)..."
+	cargo test --lib --test tests -- --test-threads=1
 
 test-local: check-local
 	@echo "🧪 Running full integration tests with local MinIO (integration-e2e)..."
@@ -237,8 +232,7 @@ test-ci:
 	@# In CI, we expect services to be available via docker-compose or service containers
 	@if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then \
 		echo "✅ MinIO detected"; \
-		echo "🧪 Running unit tests..."; \
-		cargo test --lib; \
+		$(MAKE) test-quick; \
 		echo "🧪 Running integration tests (integration-e2e)..."; \
 		SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --test-threads=1; \
 		for test_name in $(INTEGRATION_PERF_TESTS); do \
@@ -246,8 +240,8 @@ test-ci:
 			SPLAKE_RESET_DUCKLAKE=1 ICEBERG_TEST_TYPE=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 || exit $$?; \
 		done; \
 	else \
-		echo "⚠️  No local MinIO on :9000, running unit tests only"; \
-		cargo test --lib; \
+		echo "⚠️  No local MinIO on :9000, running test-quick only"; \
+		$(MAKE) test-quick; \
 	fi
 
 test-all: test-quick test-local
@@ -268,12 +262,6 @@ ci-full: check-fmt lint build test-ci
 generate-telemetry:
 	@python3 scripts/generate_telemetry.py
 
-verify-e2e:
-	@./scripts/verify_e2e.sh
-
-verify-quick:
-	@./scripts/verify_quick.sh
-
 demo-session:
 	@./scripts/demo_session_queries.sh
 
@@ -286,8 +274,6 @@ drop-tables:
 help-scripts:
 	@echo "Script-backed targets:"
 	@echo "  make generate-telemetry"
-	@echo "  make verify-e2e"
-	@echo "  make verify-quick"
 	@echo "  make demo-session"
 	@echo "  make duckdb-shell"
 	@echo "  make drop-tables"

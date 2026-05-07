@@ -1,16 +1,22 @@
+// ============================================================================
+// TENANT BINDING CONSTITUTION (HARD RULE)
+// Tenant identity is allowed only at auth/configuration/instantiation boundaries.
+// Operational APIs MUST NOT accept tenant_id parameters.
+// After binding tenant context, use tenant-scoped instances/contexts only.
+// ============================================================================
+
 pub mod health;
 pub mod ingestion;
 pub mod query;
 pub mod telemetry;
 
-use crate::authn;
+use crate::authn::TenantInfo;
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
-use crate::session_redis::RedisStore;
+use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
-use crate::tenant_ducklake::TenantDuckLakeResolver;
 use axum::{
     response::Html,
     routing::{get, post, MethodRouter},
@@ -19,27 +25,53 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 
-/// Control-plane dependencies (sessions, inject).
-#[derive(Clone)]
-pub struct ControlPlaneRuntime {
-    pub resolver: authn::Resolver,
-    pub session_store: Arc<tokio::sync::Mutex<RedisStore>>,
-    /// DuckLake Postgres pool + configured metadata schema for this process (runtime-owned scope).
-    pub tenant_ducklake: Option<TenantDuckLakeResolver>,
-}
+pub use crate::control_plane::ControlPlaneRuntime;
+pub use crate::runtime_engine::{RuntimeEngine, RuntimeEngineManager};
 
-// Unified application state for Axum router
+/// Unified application state for Axum router
 #[derive(Clone)]
 pub struct AppState {
-    pub storage: Arc<Storage>,
-    pub query_engine: Arc<QueryEngine>,
-    pub span_buffer: Option<Arc<SpanBuffer>>,
-    pub log_buffer: Option<Arc<LogBuffer>>,
-    pub metric_buffer: Option<Arc<MetricBuffer>>,
-    /// When set, `/v1/sessions`, `/v1/inject`, and control-plane trace ingest are enabled.
-    pub control_plane: Option<ControlPlaneRuntime>,
-    /// UI dropdown metadata (Postgres EAV); requires `dropdown_catalog.enabled` and DuckLake+Postgres.
-    pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
+    pub engines: Arc<RuntimeEngineManager>,
+}
+
+impl AppState {
+    pub async fn engine_for_tenant(
+        &self,
+        tenant: &TenantInfo,
+    ) -> anyhow::Result<Arc<RuntimeEngine>> {
+        self.engines.engine_for_tenant(tenant).await
+    }
+
+    pub async fn engine_for_id(&self, tenant_id: &str) -> anyhow::Result<Arc<RuntimeEngine>> {
+        self.engines.engine_for(tenant_id).await
+    }
+
+    /// Execute SQL on the tenant-bound query engine (scope fixed at engine construction).
+    pub async fn execute_tenant_scoped_sql(
+        &self,
+        tenant: Option<&TenantInfo>,
+        sql: &str,
+    ) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+        let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
+        let engine = self.engines.engine_for(tenant_id).await?;
+        match engine.query.execute_query(sql).await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("Table with name traces does not exist")
+                    || msg.contains("Table with name logs does not exist")
+                    || msg.contains("Table with name metrics does not exist")
+                {
+                    return Ok(crate::query::duckdb::QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        row_count: 0,
+                    });
+                }
+                Err(err)
+            }
+        }
+    }
 }
 
 pub struct AppPipeline {
@@ -66,7 +98,9 @@ impl AppPipeline {
     }
 
     pub async fn into_router(self) -> anyhow::Result<Router> {
+        let config = Arc::new(Config::load()?);
         let (r, _) = create_router(
+            config,
             self.storage,
             self.query_engine,
             Some(self.span_buffer),
@@ -82,26 +116,26 @@ impl AppPipeline {
 }
 
 pub async fn create_router(
-    storage: Storage,
-    query_engine: QueryEngine,
-    span_buffer: Option<SpanBuffer>,
-    log_buffer: Option<LogBuffer>,
-    metric_buffer: Option<MetricBuffer>,
+    config: Arc<Config>,
+    _storage: Storage,
+    _query_engine: QueryEngine,
+    _span_buffer: Option<SpanBuffer>,
+    _log_buffer: Option<LogBuffer>,
+    _metric_buffer: Option<MetricBuffer>,
     traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
-    dropdown_catalog: Option<Arc<DropdownCatalog>>,
+    _dropdown_catalog: Option<Arc<DropdownCatalog>>,
 ) -> anyhow::Result<(Router, AppState)> {
+    let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
+    let runtime_engine_manager = Arc::new(RuntimeEngineManager::new(
+        config,
+        control_plane.clone(),
+        scope_registry,
+    ));
     let state = AppState {
-        storage: Arc::new(storage),
-        query_engine: Arc::new(query_engine),
-        span_buffer: span_buffer.map(Arc::new),
-        log_buffer: log_buffer.map(Arc::new),
-        metric_buffer: metric_buffer.map(Arc::new),
-        control_plane,
-        dropdown_catalog,
+        engines: runtime_engine_manager,
     };
 
-    // OTLP standard endpoints (`with_state` closes the state type → `Router` is ready for `axum::serve`)
     let router = Router::new()
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
@@ -170,8 +204,7 @@ async fn swagger_ui() -> Html<&'static str> {
       window.ui = SwaggerUIBundle({ url: "/openapi.json", dom_id: "#swagger-ui" });
     </script>
   </body>
-</html>"#,
- </html>"##,
+</html>"##,
     )
 }
 

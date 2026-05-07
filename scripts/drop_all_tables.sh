@@ -1,53 +1,28 @@
-#!/bin/bash
-# Drop all Iceberg tables from the REST catalog
-# This script is useful for development when you need to reset the schema
+#!/usr/bin/env bash
+# Drop DuckLake telemetry tables for the scope in CONFIG_FILE (same as duckdb-shell).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
-set -e
-
-echo "=== Dropping all Iceberg tables ==="
-echo ""
-
-# Configuration from docker-compose.yml
-CATALOG_URI="http://localhost:8181/catalog"
-WAREHOUSE="default"
-NAMESPACE="default"
-
-CONFIG_URL="${CATALOG_URI}/v1/config?warehouse=${WAREHOUSE}"
-PREFIX=$(curl -s "${CONFIG_URL}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["defaults"]["prefix"])')
-if [ -z "${PREFIX}" ]; then
-    echo "✗ Failed to resolve Lakekeeper catalog prefix"
-    exit 1
+if ! command -v duckdb >/dev/null 2>&1; then
+  echo "ERROR: duckdb CLI not found" >&2
+  exit 1
 fi
-CATALOG_PREFIX_URI="${CATALOG_URI}/v1/${PREFIX}"
 
-# Tables to drop (including old test tables)
-TABLES=("traces" "logs" "metrics" "otlp_traces" "otlp_logs" "otlp_metrics" "raw_sessions" "test_spans")
+R=$(mktemp)
+M=$(mktemp)
+trap 'rm -f "$R" "$M"' EXIT
 
-for table in "${TABLES[@]}"; do
-    echo "Attempting to drop table: ${NAMESPACE}.${table}"
+python3 "${ROOT}/scripts/duckdb_ducklake_render_init.py" --root "$ROOT" --meta "$M" >"$R"
+# shellcheck disable=SC1090
+source "$M"
+P="$SOFTPROBE_DL_QUALIFIED_PREFIX"
 
-    # Try to drop the table using the Iceberg REST catalog API
-    http_code=$(curl -s -o /tmp/drop_response.txt -w "%{http_code}" -X DELETE \
-        "${CATALOG_PREFIX_URI}/namespaces/${NAMESPACE}/tables/${table}" \
-        -H "Content-Type: application/json")
-
-    if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
-        echo "✓ Successfully dropped table: ${table}"
-    elif [ "$http_code" = "404" ]; then
-        echo "⚠ Table ${table} does not exist (already dropped or never created)"
-    else
-        echo "✗ Failed to drop table ${table} (HTTP ${http_code})"
-        echo "Response:"
-        cat /tmp/drop_response.txt
-    fi
-    echo ""
-done
-
-echo "=== Table drop complete ==="
-echo ""
-echo "Verification: Listing all tables in namespace '${NAMESPACE}'"
-echo ""
-
-# List remaining tables
-list_response=$(curl -s "${CATALOG_PREFIX_URI}/namespaces/${NAMESPACE}/tables")
-echo "$list_response" | jq '.' 2>/dev/null || echo "$list_response"
+echo "=== Dropping DuckLake tables: ${P}.(traces|logs|metrics) ==="
+duckdb -init "$R" -c "
+DROP TABLE IF EXISTS ${P}.traces;
+DROP TABLE IF EXISTS ${P}.logs;
+DROP TABLE IF EXISTS ${P}.metrics;
+SELECT 'drop complete' AS status;
+"
+echo "=== Done ==="

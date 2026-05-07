@@ -17,62 +17,35 @@ bash scripts/ec2_run_perf_stress.sh --duration 120 --warmup-secs 10 --span-qps 1
 # EC2 (catalog instance): run perf client (background)
 bash scripts/ec2_run_perf_stress.sh --background --duration 86400 --warmup-secs 60 --span-qps 100 --log-qps 100 --metric-qps 100 --query-concurrency 10 --query-interval-ms 500
 
-# Automated verification (recommended)
-make verify-e2e
+# Automated verification (ingest + DuckLake + HTTP API)
+# From repo root: make test
+# From this crate:  make test-all   # needs MinIO for integration-e2e (see Makefile)
 
-# Interactive session
+# Interactive DuckDB against local DuckLake (Postgres + MinIO; see duckdb_ducklake_local_init.sql)
 make duckdb-shell
-
-# Run SQL file
-duckdb < scripts/verify_iceberg.sql
 ```
 
-## DuckDB Iceberg Syntax (v1.4.3+)
+## DuckDB + DuckLake (local)
 
-### Basic Setup
+The runtime stores committed telemetry in **DuckLake** (`ATTACH 'ducklake:postgres:…'`, `data_path` on S3/MinIO). **`make duckdb-shell`** builds that ATTACH from **`CONFIG_FILE`** (default: `tests/config/duckdb-shell-host.yaml` on the host) so `catalog_alias`, `metadata_schema`, and `data_path` match the process you are debugging. Use the **same YAML as the running server**; for another tenant scope, point `CONFIG_FILE` at a config that carries that scope’s `ducklake.*` keys.
 
-```sql
-INSTALL iceberg;
-LOAD iceberg;
+- `scripts/duckdb_ducklake_render_init.py` — emits ATTACH + S3 `SET`s from YAML (stdlib only).
+- `scripts/duckdb_ducklake_combo.sh` — temp `-init` = rendered ATTACH + `CREATE VIEW` only for existing `traces`/`logs`/`metrics` in that scope.
+- `scripts/interactive_query.sh` — used by `make duckdb-shell`; smoke `SELECT 1` before the REPL.
+- Legacy static attach: `SOFTPROBE_DUCKDB_INIT=scripts/duckdb_ducklake_local_init.sql` (fixed scope; use CONFIG_FILE instead).
 
--- S3 configuration for MinIO
-SET s3_endpoint='localhost:9000';
-SET s3_access_key_id='minioadmin';
-SET s3_secret_access_key='minioadmin';
-SET s3_use_ssl=false;
-SET s3_url_style='path';
-
--- Required for REST catalog
-SET unsafe_enable_version_guessing=true;
-
--- Create views using iceberg_scan function with S3 paths
-CREATE OR REPLACE VIEW traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
-
-CREATE OR REPLACE VIEW logs AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/logs', allow_moved_paths := true);
-
--- Now query using simple view names
-SELECT COUNT(*) FROM traces;
-SELECT COUNT(*) FROM logs;
-```
-
-### Key Points
-
-1. **Use `iceberg_scan()` function** with REST catalog URL
-2. **Create views** for easier querying (avoid long URLs in every query)
-3. **Enable `unsafe_enable_version_guessing`** for REST catalogs without explicit versions
-4. **Set `allow_moved_paths := true`** to handle Iceberg table evolution
+Details and qualified names: [`docs/adhoc-duckdb-ducklake.md`](../docs/adhoc-duckdb-ducklake.md).
 
 ## Files
 
 - **telemetrygen_hosted.sh** - Smoke-test OTLP/HTTP ingestion (traces, metrics, logs) against a hosted runtime using [telemetrygen](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/telemetrygen) with `Authorization: Bearer` (set `SOFTPROBE_TOKEN` or `SOFTPROBE_API_KEY`; optional `OTLP_ENDPOINT`, default `runtime.softprobe.dev:443`).
-- **verify_iceberg.sql** - Comprehensive verification queries
-- **verify_session.sql** - Session-specific queries with macro
+- **duckdb_ducklake_render_init.py** - YAML → DuckDB ATTACH (same shape as runtime)
+- **duckdb_ducklake_combo.sh** - Temp `-init` = rendered ATTACH + optional `CREATE VIEW`s for existing tables
+- **duckdb_ducklake_local_init.sql** - Legacy static ATTACH (optional `SOFTPROBE_DUCKDB_INIT`)
+- **duckdb_ducklake_local_views.sql** - Optional `.read` for all three views when tables exist (adjust qualified names if needed)
 - **interactive_query.sh** - Interactive DuckDB session launcher (used by `make duckdb-shell`)
-- **demo_session_queries.sh** - Sample session queries (used by `make demo-session`)
-- **verify_e2e.sh** - End-to-end verification (used by `make verify-e2e`)
-- **drop_all_tables.sh** - Reset Iceberg tables (used by `make drop-tables`)
+- **demo_session_queries.sh** - Sample session queries against DuckLake (used by `make demo-session`)
+- **drop_all_tables.sh** - Reset catalog tables (used by `make drop-tables`)
 - **ec2_sync_build.sh** - Sync+build on app EC2 and copy `perf_stress` to catalog EC2
 - **ec2_start_splake.sh** - Start/stop `splake` on the app EC2 instance
 - **ec2_run_perf_stress.sh** - Run `perf_stress` on the catalog EC2 instance
@@ -114,38 +87,20 @@ ORDER BY spans + logs DESC;
 ```
 
 ### Specific Session
-```sql
--- Load macro first
-.read scripts/verify_session.sql
 
--- Query session
-SELECT * FROM verify_session('your-session-id');
-```
+See [`docs/adhoc-duckdb-ducklake.md`](../docs/adhoc-duckdb-ducklake.md) for qualified names and a `UNION ALL` session example.
 
 ## Troubleshooting
 
-### "Unknown parameter 'uri'" or "Catalog does not exist"
-**Fix**: Use `iceberg_scan()` function with S3 paths instead of `CREATE SECRET` or `ATTACH` syntax:
-```sql
-CREATE VIEW traces AS
-SELECT * FROM iceberg_scan('s3://warehouse/default/traces', allow_moved_paths := true);
-```
+### `ATTACH` fails (Postgres)
+**Fix**: Start `ducklake-postgres` from this crate’s `docker-compose.yml` and ensure `host=localhost port=5432` matches your init SQL.
 
-### "No version was provided"
-**Fix**: Enable unsafe version guessing:
-```sql
-SET unsafe_enable_version_guessing=true;
-```
-
-### Connection refused to MinIO/REST catalog
-**Fix**: Check services are running:
+### Connection refused to MinIO
+**Fix**: Start MinIO and check:
 ```bash
-# MinIO
-curl http://localhost:9000/minio/health/live
-
-# Lakekeeper REST catalog
-curl "http://localhost:8181/catalog/v1/config?warehouse=default"
+curl -sf http://localhost:9000/minio/health/live
 ```
+`DATA_PATH` in the `ATTACH` must match the runtime’s DuckLake config (see `test-docker.yaml`).
 
 ### Empty tables
 **Reasons**:
@@ -155,5 +110,7 @@ curl "http://localhost:8181/catalog/v1/config?warehouse=default"
 
 ## References
 
-- [DuckDB Iceberg Extension](https://duckdb.org/docs/extensions/iceberg)
-- [Full Documentation](../VERIFYING_DATA.md)
+- [DuckDB DuckLake extension](https://duckdb.org/docs/extensions/ducklake)
+- [Ad hoc DuckLake queries](../docs/adhoc-duckdb-ducklake.md)
+- [Strict storage SQL contracts](../tests/integration/storage_contract_validation.rs) (automated; `make test-local`)
+- [Legacy manual SQL fixtures](../tests/fixtures/README.md)

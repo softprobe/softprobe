@@ -1,4 +1,4 @@
-//! Local router + config helpers for `#[cfg(test)]` modules (`cargo test --lib` / `llvm-cov --lib`).
+//! Local router + config helpers for `#[cfg(test)]` modules (`make test-quick` / `cargo test --lib` / `llvm-cov --lib`).
 //! Mirrors `tests/util/config.rs` so unit tests do not depend on the integration-test crate.
 
 use crate::api::ingestion::traces::ingest_traces;
@@ -6,6 +6,7 @@ use crate::api::{create_router, AppPipeline, AppState};
 use crate::config::Config;
 use axum::routing::post;
 use axum::Router;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// File-backed DuckLake under `temp`; compaction and metadata maintenance disabled.
@@ -37,8 +38,10 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
 pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempDir)> {
     let temp = TempDir::new()?;
     let config = file_backed_test_config(&temp);
-    let app = AppPipeline::new(&config).await?;
+    let config = Arc::new(config);
+    let app = AppPipeline::new(config.as_ref()).await?;
     let (router, state) = create_router(
+        config.clone(),
         app.storage,
         app.query_engine,
         Some(app.span_buffer),

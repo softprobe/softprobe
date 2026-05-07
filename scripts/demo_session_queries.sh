@@ -1,143 +1,117 @@
 #!/bin/bash
-set -e
+# Session-oriented demo queries against DuckLake via DuckDB (same combo init as interactive_query.sh).
+# Prerequisites: CONFIG_FILE (or default host yaml), Postgres + MinIO + ingested traces.
 
-echo "🔍 Session-Based Query Demonstrations"
-echo "======================================"
-echo ""
-
+set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
-# Download all trace files and combine them
-echo "Preparing data..."
-docker-compose exec -T minio mc find local/warehouse/default/traces --name '*.parquet' 2>/dev/null | head -10 | while read file; do
-    docker-compose exec -T minio mc cp "$file" /tmp/traces_sample.parquet >/dev/null 2>&1
-    docker-compose exec -T minio cat /tmp/traces_sample.parquet >> /tmp/all_traces.parquet 2>/dev/null
-done
+if ! command -v duckdb >/dev/null 2>&1; then
+  echo "ERROR: duckdb CLI not found" >&2
+  exit 1
+fi
 
-echo "✓ Data prepared"
+# shellcheck source=/dev/null
+source "${ROOT}/scripts/duckdb_ducklake_combo.sh"
+
+STATIC_INIT="${SOFTPROBE_DUCKDB_INIT:-}"
+if [[ -n "$STATIC_INIT" ]]; then
+  COMBO="$(softprobe_ducklake_build_combo_init "$ROOT" "$STATIC_INIT")"
+else
+  COMBO="$(softprobe_ducklake_build_combo_init "$ROOT")"
+fi
+trap 'rm -f "$COMBO"' EXIT
+
+duckq() {
+  duckdb -init "$COMBO" "$@"
+}
+
+echo "Session-Based Query Demonstrations (DuckLake)"
+echo "============================================="
+grep '^-- CONFIG_FILE=' "$COMBO" 2>/dev/null || true
 echo ""
 
+if ! grep -q "CREATE OR REPLACE VIEW traces" "$COMBO" 2>/dev/null; then
+  echo "ERROR: No \`traces\` table in this DuckLake scope — ingest with the runtime using the same CONFIG_FILE, then re-run." >&2
+  exit 1
+fi
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 1: All Sessions with Request Counts"
+echo "Query 1: Sessions with span counts"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-duckdb -c "
+duckq -c "
 SELECT
-  LEFT(session_id, 40) || '...' as session,
-  COUNT(*) as total_requests,
-  MIN(timestamp)::VARCHAR as first_seen,
-  MAX(timestamp)::VARCHAR as last_seen,
-  COUNT(DISTINCT http_request_path) as unique_endpoints
-FROM read_parquet('/tmp/all_traces.parquet')
+  LEFT(session_id, 40) AS session,
+  COUNT(*) AS total_spans,
+  MIN(timestamp)::VARCHAR AS first_seen,
+  MAX(timestamp)::VARCHAR AS last_seen,
+  COUNT(DISTINCT http_request_path) AS unique_endpoints
+FROM traces
 GROUP BY session_id
-ORDER BY total_requests DESC;
+ORDER BY total_spans DESC
+LIMIT 20;
 "
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 2: Request Timeline for a Specific Session"
+echo "Query 2: Timeline for one session"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+SAMPLE_SESSION=$(duckq -csv -noheader -c "SELECT session_id FROM traces WHERE session_id IS NOT NULL LIMIT 1;" | head -1 | tr -d '\r')
+if [[ -z "$SAMPLE_SESSION" ]]; then
+  echo "(no rows in traces; table exists but empty)"
+else
+  echo "Session: $SAMPLE_SESSION"
+  ESC=${SAMPLE_SESSION//\'/\'\'}
+  duckq -c "
+  SELECT
+    timestamp::VARCHAR AS time,
+    COALESCE(http_request_method, '') || ' ' || COALESCE(http_request_path, '') AS request,
+    http_response_status_code AS status
+  FROM traces
+  WHERE session_id = '$ESC'
+  ORDER BY timestamp;
+  "
+fi
+
 echo ""
-
-SAMPLE_SESSION=$(duckdb -csv -noheader -c "SELECT session_id FROM read_parquet('/tmp/all_traces.parquet') LIMIT 1")
-
-echo "Session: $SAMPLE_SESSION"
-echo ""
-
-duckdb -c "
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Query 3: Endpoints (HTTP paths)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+duckq -c "
 SELECT
-  timestamp::VARCHAR as time,
-  http_request_method || ' ' || http_request_path as request,
-  http_response_status_code as status,
-  attributes['duration_ms'] as duration_ms,
-  attributes['user.id'] as user_id
-FROM read_parquet('/tmp/all_traces.parquet')
-WHERE session_id = '$SAMPLE_SESSION'
-ORDER BY timestamp;
-"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 3: Endpoint Performance Statistics"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-duckdb -c "
-SELECT
-  http_request_path as endpoint,
-  COUNT(*) as requests,
-  ROUND(AVG(CAST(attributes['duration_ms'] AS INTEGER)), 2) as avg_duration_ms,
-  MIN(CAST(attributes['duration_ms'] AS INTEGER)) as min_duration_ms,
-  MAX(CAST(attributes['duration_ms'] AS INTEGER)) as max_duration_ms,
-  COUNT(DISTINCT session_id) as unique_sessions
-FROM read_parquet('/tmp/all_traces.parquet')
+  http_request_path AS endpoint,
+  COUNT(*) AS requests,
+  COUNT(DISTINCT session_id) AS unique_sessions
+FROM traces
 WHERE http_request_path IS NOT NULL
 GROUP BY http_request_path
-ORDER BY requests DESC;
+ORDER BY requests DESC
+LIMIT 20;
 "
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 4: Error Analysis by Session"
+echo "Query 4: Traces + logs for a session (correlation)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-duckdb -c "
-SELECT
-  LEFT(session_id, 40) || '...' as session,
-  COUNT(*) as total_requests,
-  COUNT(*) FILTER (WHERE http_response_status_code >= 500) as errors,
-  ROUND(COUNT(*) FILTER (WHERE http_response_status_code >= 500) * 100.0 / COUNT(*), 2) as error_rate_pct
-FROM read_parquet('/tmp/all_traces.parquet')
-GROUP BY session_id
-HAVING COUNT(*) FILTER (WHERE http_response_status_code >= 500) > 0
-ORDER BY error_rate_pct DESC;
-"
+if [[ -n "${SAMPLE_SESSION:-}" ]]; then
+  ESC=${SAMPLE_SESSION//\'/\'\'}
+  if grep -q "CREATE OR REPLACE VIEW logs" "$COMBO" 2>/dev/null; then
+    duckq -c "
+    SELECT type, session_id, trace_id, content, timestamp::VARCHAR AS ts FROM (
+      SELECT 'trace' AS type, session_id, trace_id, CAST(message_type AS VARCHAR) AS content, timestamp
+      FROM traces WHERE session_id = '$ESC'
+      UNION ALL
+      SELECT 'log', session_id, trace_id, body, timestamp FROM logs WHERE session_id = '$ESC'
+    ) u
+    ORDER BY timestamp
+    LIMIT 50;
+    "
+  else
+    echo "(skipped — no \`logs\` table in this scope yet)"
+  fi
+else
+  echo "(skipped — no sample session)"
+fi
 
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 5: Session Journey Analysis"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-duckdb -c "
-SELECT
-  LEFT(session_id, 40) || '...' as session,
-  STRING_AGG(http_request_path, ' → ' ORDER BY timestamp) as journey
-FROM read_parquet('/tmp/all_traces.parquet')
-WHERE http_request_path IS NOT NULL
-GROUP BY session_id
-LIMIT 5;
-"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Query 6: Verify sp.session.id Attribute"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-duckdb -c "
-SELECT
-  'Rows with sp.session.id' as metric,
-  COUNT(*)::VARCHAR as count
-FROM read_parquet('/tmp/all_traces.parquet')
-WHERE attributes['sp.session.id'] IS NOT NULL
-UNION ALL
-SELECT
-  'Total rows',
-  COUNT(*)::VARCHAR
-FROM read_parquet('/tmp/all_traces.parquet')
-UNION ALL
-SELECT
-  'Coverage (%)',
-  ROUND(
-    COUNT(*) FILTER (WHERE attributes['sp.session.id'] IS NOT NULL) * 100.0 / COUNT(*),
-    2
-  )::VARCHAR || '%'
-FROM read_parquet('/tmp/all_traces.parquet');
-"
-
-echo ""
-echo "✅ Demo complete! All queries show sp.session.id is working."
-echo ""
-echo "Next Steps:"
-echo "  • Generate more data: python3 scripts/generate_telemetry.py"
-echo "  • View in MinIO: http://localhost:9001"
-echo "  • Custom queries: duckdb /tmp/all_traces.parquet"
-echo ""
+echo "Demo complete. For an interactive shell: make duckdb-shell"

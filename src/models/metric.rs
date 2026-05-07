@@ -40,6 +40,7 @@ pub struct Metric {
     /// Resource attributes identifying the metric source
     /// (e.g., service.name, host.name, k8s.pod.name)
     pub resource_attributes: HashMap<String, String>,
+
     // Field 13: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }

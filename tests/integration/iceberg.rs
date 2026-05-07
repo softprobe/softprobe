@@ -773,7 +773,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 resource_attributes,
                 trace_id,
                 span_id,
-            });
+                });
         }
     }
 
@@ -951,7 +951,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
                 value,
                 attributes,
                 resource_attributes,
-            });
+                });
         }
         all_metric_batches.push(metric_data_points);
         expected_sums.push(expected_sum);

@@ -3,7 +3,7 @@ use softprobe_runtime::promotion::{
     business_table_create_ddls, parse_promotion_manifest, PromotionManifest,
 };
 use softprobe_runtime::storage::ducklake::DuckLakeWriter;
-use softprobe_runtime::tenant_ducklake::TenantDuckLakeResolver;
+use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -80,18 +80,29 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     ducklake.catalog_alias = "softprobe".to_string();
     ducklake.metadata_schema = format!("softprobe_business_apply_{suffix}");
-    ducklake.data_path = temp.path().join("data").to_string_lossy().to_string();
+    let business_data_path = temp.path().join("data").to_string_lossy().to_string();
+    ducklake.data_path = business_data_path.clone();
     ducklake.data_inlining_row_limit = Some(0);
     config.ducklake = Some(ducklake);
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
     config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().to_string());
 
-    let resolver = TenantDuckLakeResolver::connect(&config)
+    let resolver = DuckLakeScopeResolver::connect(&config)
         .await
         .expect("resolver")
         .expect("postgres resolver");
+    let business_tenant_id = format!("tenant-business-apply-{suffix}");
+    let business_metadata_schema = format!("softprobe_business_apply_data_{suffix}");
+    resolver
+        .provision_scope(ScopeProvisioningRequest {
+            tenant_id: business_tenant_id.clone(),
+            metadata_schema: business_metadata_schema.clone(),
+            data_path: business_data_path,
+        })
+        .await
+        .expect("provision tenant");
     let scope = resolver
-        .resolve_or_create(&format!("tenant-business-apply-{suffix}"))
+        .resolve_scope(&business_tenant_id)
         .await
         .expect("tenant scope");
     let writer = DuckLakeWriter::new(&config, None, Some(resolver))

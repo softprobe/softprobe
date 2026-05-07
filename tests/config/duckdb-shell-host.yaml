@@ -1,0 +1,42 @@
+# Ad hoc `make duckdb-shell` on the host (not inside Docker).
+# Matches e2e DuckLake scope (metadata_schema, data_path, catalog_alias) but uses localhost for Postgres + MinIO.
+# Override with CONFIG_FILE if your runtime uses a different tenant scope.
+
+server:
+  port: 8080
+  host: 127.0.0.1
+  max_body_size: 104857600
+  worker_threads: null
+
+storage:
+  s3_region: us-east-1
+
+span_buffering:
+  max_buffer_spans: 1
+  flush_interval_seconds: 1
+
+ingest_engine:
+  cache_dir: /tmp/softprobe-shell
+
+compaction:
+  enabled: false
+
+duckdb:
+  max_connections: 10
+  max_memory_per_query: 2GB
+  max_query_duration_seconds: 30
+  enable_spill_to_disk: true
+  spill_directory: /tmp/duckdb_spill
+
+s3:
+  endpoint: http://localhost:9000
+  access_key_id: minioadmin
+  secret_access_key: minioadmin
+
+ducklake:
+  catalog_type: postgres
+  metadata_path: host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: softprobe
+  data_inlining_row_limit: 10000

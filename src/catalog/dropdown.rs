@@ -134,10 +134,7 @@ ON {} (entity_type, last_seen_at DESC);"#,
 
     /// Upsert distinct (entity_type, entity_value) pairs for traces from Arrow batches.
     /// Call **before** DuckLake INSERT so inlined rows are covered.
-    pub async fn upsert_trace_batches(
-        &self,
-        batches: &[RecordBatch],
-    ) -> Result<()> {
+    pub async fn upsert_trace_batches(&self, batches: &[RecordBatch]) -> Result<()> {
         let pairs = collect_trace_catalog_pairs(batches, &self.cfg)?;
         self.upsert_pairs_sql(pairs).await
     }

@@ -15,11 +15,12 @@ use crate::promotion::{
     BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
     TelemetryTable,
 };
-use crate::tenant_ducklake::TenantDuckLakeScope;
+use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
+use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
 use axum::{
     body::Bytes,
     extract::{Extension, Path, Query, Request, State},
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -31,7 +32,33 @@ use opentelemetry_proto::tonic::trace::v1::Span;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
+
+async fn sessions_or_fail(
+    state: &AppState,
+    tenant: &TenantInfo,
+) -> Result<Arc<TenantSessionStore>, (StatusCode, Json<serde_json::Value>)> {
+    let engine = state.engine_for_tenant(tenant).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
+        )
+    })?;
+    engine.sessions.clone().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(
+            json!({"error": {"code": "session_store_unavailable", "message": "sessions require Redis control-plane"}}),
+        ),
+    ))
+}
+
+async fn flush_engine_capture_buffers(engine: &RuntimeEngine) -> anyhow::Result<()> {
+    engine.ingest.force_flush_spans().await?;
+    engine.ingest.force_flush_logs().await?;
+    engine.ingest.force_flush_metrics().await?;
+    Ok(())
+}
 
 /// Require `Authorization: Bearer` for `/v1/*`, resolve tenant, store [`TenantInfo`] in extensions.
 pub async fn runtime_auth_middleware(
@@ -53,8 +80,8 @@ pub async fn runtime_auth_middleware(
     let token = parse_bearer(auth).ok_or(StatusCode::UNAUTHORIZED)?;
 
     let control_plane = state
-        .control_plane
-        .as_ref()
+        .engines
+        .control_plane()
         .expect("runtime auth middleware requires control-plane state");
     let info = control_plane
         .resolver
@@ -67,7 +94,18 @@ pub async fn runtime_auth_middleware(
 }
 
 fn requires_runtime_auth(method: &Method, path: &str) -> bool {
-    path.starts_with("/v1/") && method != Method::OPTIONS
+    if path == "/v1/tenants" && *method == Method::POST {
+        return false;
+    }
+    path.starts_with("/v1/")
+}
+
+fn admin_provision_token_matches(token: &str) -> bool {
+    let Ok(want) = std::env::var("SOFTPROBE_ADMIN_API_KEY") else {
+        return false;
+    };
+    let want = want.trim();
+    !want.is_empty() && want == token.trim()
 }
 
 /// JSON body for HTTP 404 when a session id is missing from this process's session store
@@ -106,7 +144,7 @@ struct DuckLakeConnectionMaterial {
 
 fn ducklake_connection_material(
     tenant: &TenantInfo,
-    scope: &TenantDuckLakeScope,
+    scope: &DuckLakeScope,
 ) -> Result<DuckLakeConnectionMaterial, String> {
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
     let ducklake = config.ducklake_or_default();
@@ -212,7 +250,7 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
-        let scope = TenantDuckLakeScope {
+        let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "./warehouse/ducklake/data/".to_string(),
         };
@@ -263,7 +301,7 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
-        let scope = TenantDuckLakeScope {
+        let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "gs://bucket/ducklake/data/".to_string(),
         };
@@ -314,7 +352,7 @@ mod data_connection_tests {
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
         };
-        let scope = TenantDuckLakeScope {
+        let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "gs://bucket/ducklake/data/".to_string(),
         };
@@ -337,6 +375,139 @@ pub(crate) fn parse_bearer(h: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantProvisionHttpRequest {
+    tenant_id: String,
+    #[serde(default)]
+    storage_hints: Option<TenantStorageHintsBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantStorageHintsBody {
+    ducklake_metadata_schema: Option<String>,
+    ducklake_data_path: Option<String>,
+    gcs_bucket: Option<String>,
+}
+
+/// `POST /v1/tenants` — admin-only tenant provisioning ([`spec/protocol/http-control-api.md`]).
+async fn v1_provision_scope(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TenantProvisionHttpRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"code": "unauthorized", "message": "Authorization header required"}})),
+        ))?;
+    let token = parse_bearer(auth).ok_or((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": {"code": "unauthorized", "message": "Bearer token required"}})),
+    ))?;
+    if !admin_provision_token_matches(&token) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": {"code": "admin_required", "message": "admin API key required for tenant provisioning"}}),
+            ),
+        ));
+    }
+
+    let tenant_id = body.tenant_id.trim().to_string();
+    if tenant_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_request", "message": "tenantId is required"}})),
+        ));
+    }
+
+    let Some(tenant_ducklake) = state.engines.scope_registry()
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({"error": {"code": "tenant_provisioning_unavailable", "message": "tenant registry is not configured"}}),
+            ),
+        ));
+    };
+
+    let hints = body.storage_hints.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_request", "message": "storageHints is required"}})),
+        )
+    })?;
+    let metadata_schema = hints.ducklake_metadata_schema.clone().unwrap_or_default();
+    let data_path = hints.ducklake_data_path.clone().unwrap_or_default();
+    if metadata_schema.trim().is_empty() || data_path.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": {"code": "invalid_request", "message": "storageHints.ducklakeMetadataSchema and ducklakeDataPath are required"}}),
+            ),
+        ));
+    }
+
+    if let Ok(existing) = tenant_ducklake.resolve_scope(&tenant_id).await {
+        if existing.metadata_schema == metadata_schema && existing.data_path == data_path {
+            let mut scope = json!({
+                "ducklakeMetadataSchema": existing.metadata_schema,
+                "ducklakeDataPath": existing.data_path,
+            });
+            if let Some(b) = hints.gcs_bucket.as_ref().filter(|s| !s.trim().is_empty()) {
+                scope["gcsBucket"] = json!(b);
+            }
+            return Ok(Json(json!({
+                "version": 1,
+                "tenantId": tenant_id,
+                "status": "exists",
+                "scope": scope
+            })));
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": {"code": "tenant_scope_conflict", "message": "tenant exists with different storage scope"}}),
+            ),
+        ));
+    }
+
+    let scope = tenant_ducklake
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: tenant_id.clone(),
+            metadata_schema: metadata_schema.clone(),
+            data_path: data_path.clone(),
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "provision_failed", "message": e.to_string()}})),
+            )
+        })?;
+
+    let mut scope_json = json!({
+        "ducklakeMetadataSchema": scope.metadata_schema,
+        "ducklakeDataPath": scope.data_path,
+    });
+    if let Some(b) = hints.gcs_bucket.as_ref().filter(|s| !s.trim().is_empty()) {
+        scope_json["gcsBucket"] = json!(b);
+    }
+
+    state.engines.invalidate(&tenant_id);
+
+    Ok(Json(json!({
+        "version": 1,
+        "tenantId": tenant_id,
+        "status": "created",
+        "scope": scope_json
+    })))
+}
+
 async fn v1_meta() -> impl IntoResponse {
     Json(json!({
         "runtimeVersion": env!("CARGO_PKG_VERSION"),
@@ -348,6 +519,7 @@ async fn v1_meta() -> impl IntoResponse {
 pub fn runtime_control_routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
+        .route("/v1/tenants", post(v1_provision_scope))
         .route("/v1/meta", get(v1_meta))
         .route(
             "/v1/sessions",
@@ -372,10 +544,7 @@ async fn v1_ducklake_connection(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state
-        .control_plane
-        .as_ref()
-        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    let Some(tenant_ducklake) = state.engines.scope_registry()
     else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -388,7 +557,7 @@ async fn v1_ducklake_connection(
         ));
     };
     let scope = tenant_ducklake
-        .resolve_or_create("")
+        .resolve_scope(&tenant.tenant_id)
         .await
         .map_err(|err| {
             (
@@ -449,14 +618,11 @@ async fn v1_promotions_apply(
 
 async fn apply_telemetry_promotion(
     state: AppState,
-    _tenant: TenantInfo,
+    tenant: TenantInfo,
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state
-        .control_plane
-        .as_ref()
-        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    let Some(tenant_ducklake) = state.engines.scope_registry()
     else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -468,19 +634,19 @@ async fn apply_telemetry_promotion(
             })),
         ));
     };
-    let scope = tenant_ducklake
-        .resolve_or_create("")
+    let engine = state
+        .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
-    state
+    engine
         .storage
         .writer
-        .apply_telemetry_column_promotion(&scope, &spec)
+        .apply_telemetry_column_promotion(&engine.scope, &spec)
         .await
         .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
     tenant_ducklake
         .record_active_telemetry_promotion_spec(
-            &scope,
+            &engine.scope,
             &manifest_yaml,
             &telemetry_table_names(&spec.target.tables),
         )
@@ -499,14 +665,11 @@ async fn apply_telemetry_promotion(
 
 async fn apply_business_table_promotion(
     state: AppState,
-    _tenant: TenantInfo,
+    tenant: TenantInfo,
     manifest_yaml: String,
     spec: BusinessTableManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state
-        .control_plane
-        .as_ref()
-        .and_then(|cp| cp.tenant_ducklake.as_ref())
+    let Some(tenant_ducklake) = state.engines.scope_registry()
     else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -518,18 +681,18 @@ async fn apply_business_table_promotion(
             })),
         ));
     };
-    let scope = tenant_ducklake
-        .resolve_or_create("")
+    let engine = state
+        .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
-    state
+    engine
         .storage
         .writer
-        .apply_business_table_promotion(&scope, &spec)
+        .apply_business_table_promotion(&engine.scope, &spec)
         .await
         .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
     tenant_ducklake
-        .record_active_business_promotion_spec(&scope, &manifest_yaml, &spec.target.table)
+        .record_active_business_promotion_spec(&engine.scope, &manifest_yaml, &spec.target.table)
         .await
         .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
     Ok(Json(json!({
@@ -629,9 +792,15 @@ fn default_catalog_limit() -> i64 {
 
 async fn v1_catalog_entity_types(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let Some(cat) = state.dropdown_catalog.as_ref() else {
+    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
+        )
+    })?;
+    let Some(cat) = engine.dropdown_catalog.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "dropdown_catalog_unavailable"})),
@@ -649,7 +818,7 @@ async fn v1_catalog_entity_types(
 
 async fn v1_catalog_values(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<TenantInfo>,
     Query(q): Query<CatalogValuesQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     if q.entity_type.is_empty() {
@@ -658,7 +827,13 @@ async fn v1_catalog_values(
             Json(json!({"error": "entityType is required"})),
         ));
     }
-    let Some(cat) = state.dropdown_catalog.as_ref() else {
+    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
+        )
+    })?;
+    let Some(cat) = engine.dropdown_catalog.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "dropdown_catalog_unavailable"})),
@@ -666,10 +841,7 @@ async fn v1_catalog_values(
     };
     let limit = q.limit.clamp(1, 10_000);
     let days = cat.active_values_days();
-    match cat
-        .list_entity_values(&q.entity_type, days, limit)
-        .await
-    {
+    match cat.list_entity_values(&q.entity_type, days, limit).await {
         Ok(values) => Ok(Json(json!({
             "entityType": q.entity_type,
             "values": values
@@ -683,7 +855,7 @@ async fn v1_catalog_values(
 
 async fn v1_create_session(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<TenantInfo>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let mode = body.get("mode").and_then(|m| m.as_str()).ok_or_else(|| {
@@ -692,12 +864,13 @@ async fn v1_create_session(
             Json(json!({"error": "invalid create session request"})),
         )
     })?;
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let s = store.create(mode).await;
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.create(mode).await else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "session_store_failed"})),
+        ));
+    };
     Ok(Json(json!({
         "sessionId": s.id,
         "sessionRevision": 0
@@ -706,14 +879,13 @@ async fn v1_create_session(
 
 async fn v1_list_sessions(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let list = store.list().await;
+    let sessions = match sessions_or_fail(&state, &tenant).await {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let list = sessions.list().await;
     let sessions: Vec<_> = list
         .into_iter()
         .map(|s| {
@@ -729,25 +901,23 @@ async fn v1_list_sessions(
 
 async fn v1_close_session(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let session = {
-        let mut store = control_plane.session_store.lock().await;
-        store.get(&id).await
-    };
+    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
+        )
+    })?;
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let session = sessions.get(&id).await;
     let Some(session) = session else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     // Capture export reads `committed_*` views; spans may still be in RAM until flush.
     if session.mode.eq_ignore_ascii_case("capture") {
-        if let Err(e) = flush_buffers_for_capture_export(&state).await {
+        if let Err(e) = flush_engine_capture_buffers(&engine).await {
             tracing::warn!("capture session close: buffer flush failed: {e}");
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -755,35 +925,16 @@ async fn v1_close_session(
             ));
         }
     }
-    let closed = {
-        let mut store = control_plane.session_store.lock().await;
-        store.close(&id).await
-    };
+    let closed = sessions.close(&id).await;
     if !closed {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     }
     Ok(Json(json!({"sessionId": id, "closed": true})))
 }
 
-/// Ensure buffered telemetry is persisted so capture SQL over `committed_*` sees recent data.
-async fn flush_buffers_for_capture_export(state: &AppState) -> anyhow::Result<()> {
-    if let Some(buf) = state.span_buffer.as_ref() {
-        buf.force_flush().await?;
-    }
-    if let Some(buf) = state.log_buffer.as_ref() {
-        buf.force_flush().await?;
-    }
-    if let Some(buf) = state.metric_buffer.as_ref() {
-        buf.force_flush().await?;
-    }
-    Ok(())
-}
-
 async fn v1_load_case(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -793,16 +944,9 @@ async fn v1_load_case(
             Json(json!({"error": "invalid load-case request"})),
         ));
     }
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.load_case(&id, body.to_vec()).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.load_case(&id, body.to_vec()).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     Ok(Json(json!({
         "sessionId": s.id,
@@ -812,6 +956,7 @@ async fn v1_load_case(
 
 async fn v1_apply_rules(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -832,16 +977,9 @@ async fn v1_apply_rules(
             })),
         ));
     }
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.apply_rules(&id, body.to_vec()).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.apply_rules(&id, body.to_vec()).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     Ok(Json(json!({
         "sessionId": s.id,
@@ -851,6 +989,7 @@ async fn v1_apply_rules(
 
 async fn v1_apply_policy(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -860,16 +999,9 @@ async fn v1_apply_policy(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.apply_policy(&id, body.to_vec()).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.apply_policy(&id, body.to_vec()).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     Ok(Json(json!({
         "sessionId": s.id,
@@ -879,6 +1011,7 @@ async fn v1_apply_policy(
 
 async fn v1_fixtures_auth(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -888,16 +1021,9 @@ async fn v1_fixtures_auth(
             Json(json!({"error": "invalid control payload"})),
         ));
     }
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.apply_fixtures_auth(&id, body.to_vec()).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.apply_fixtures_auth(&id, body.to_vec()).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     Ok(Json(json!({
         "sessionId": s.id,
@@ -907,18 +1033,12 @@ async fn v1_fixtures_auth(
 
 async fn v1_session_stats(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.get(&id).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.get(&id).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     Ok(Json(json!({
         "sessionId": s.id,
@@ -934,18 +1054,12 @@ async fn v1_session_stats(
 
 async fn v1_session_state(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
-    let mut store = control_plane.session_store.lock().await;
-    let Some(s) = store.get(&id).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json_unknown_session(&id)),
-        ));
+    let sessions = sessions_or_fail(&state, &tenant).await?;
+    let Some(s) = sessions.get(&id).await else {
+        return Err((StatusCode::NOT_FOUND, Json(json_unknown_session(&id))));
     };
     let out = json!({
         "sessionId": s.id,
@@ -965,7 +1079,7 @@ async fn v1_session_state(
 /// Runtime OTLP trace export (gRPC): same processing as [`runtime_post_v1_traces`].
 pub async fn runtime_export_trace_request(
     state: AppState,
-    _tenant: &TenantInfo,
+    tenant: &TenantInfo,
     req: ExportTraceServiceRequest,
 ) -> anyhow::Result<()> {
     let (capture_id, _) = parse_extract_meta(&req).map_err(|e| anyhow::anyhow!(e))?;
@@ -976,13 +1090,13 @@ pub async fn runtime_export_trace_request(
     };
     let annotated = annotate_export_request(req, &capture_id);
     let body_size = annotated.encoded_len();
-    process_traces(state, annotated, body_size).await?;
+    process_traces(state, annotated, body_size, Some(tenant.tenant_id.clone())).await?;
     Ok(())
 }
 
 pub async fn runtime_post_v1_traces(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    tenant: Option<Extension<TenantInfo>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let req = normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -994,9 +1108,14 @@ pub async fn runtime_post_v1_traces(
     };
     let annotated = annotate_export_request(req, &capture_id);
     let body_size = annotated.encoded_len();
-    process_traces(state.clone(), annotated, body_size)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    process_traces(
+        state.clone(),
+        annotated,
+        body_size,
+        tenant.map(|t| t.tenant_id.clone()),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok((
         StatusCode::OK,
         Json(json!({ "captureId": capture_id, "accepted": true })),
@@ -1173,7 +1292,8 @@ mod annotate_export_tests {
         assert!(contains_kv(resource_attrs, "sp.capture.id", "cap-123"));
         assert!(contains_kv(span_attrs, "sp.capture.id", "cap-123"));
         assert!(
-            !contains_key(resource_attrs, "sp.tenant.id") && !contains_key(span_attrs, "sp.tenant.id"),
+            !contains_key(resource_attrs, "sp.tenant.id")
+                && !contains_key(span_attrs, "sp.tenant.id"),
             "runtime annotation must not inject tenant routing attributes"
         );
     }
@@ -1197,12 +1317,15 @@ mod annotate_export_tests {
 
 async fn v1_inject(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
-    let control_plane = state
-        .control_plane
-        .as_ref()
-        .expect("runtime control routes require control-plane state");
+    let sessions = sessions_or_fail(&state, &tenant).await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session store unavailable".into(),
+        )
+    })?;
     let payload =
         normalize_otlp_body(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let lookup =
@@ -1210,8 +1333,7 @@ async fn v1_inject(
     if lookup.session_id.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing session id".into()));
     }
-    let mut store = control_plane.session_store.lock().await;
-    let Some(sess) = store.get(&lookup.session_id).await else {
+    let Some(sess) = sessions.get(&lookup.session_id).await else {
         return Err((
             StatusCode::NOT_FOUND,
             text_unknown_session_for_inject(&lookup.session_id),
@@ -1241,8 +1363,9 @@ async fn v1_inject(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "mock rule missing response".into(),
             ))?;
-            let _ = store.record_injected_spans(&lookup.session_id, 1).await;
-            drop(store);
+            let _ = sessions
+                .record_injected_spans(&lookup.session_id, 1)
+                .await;
             let body = encode_inject_response_proto(&resp)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(Response::builder()
@@ -1254,14 +1377,14 @@ async fn v1_inject(
         "error" => {
             let (st, msg) = build_error_response(&m.rule);
             if m.source == "policy" {
-                let _ = store.record_strict_miss(&lookup.session_id, 1).await;
+                let _ = sessions
+                    .record_strict_miss(&lookup.session_id, 1)
+                    .await;
             }
-            drop(store);
             let code = StatusCode::from_u16(st as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             Ok((code, Json(json!({"error": msg}))).into_response())
         }
         "passthrough" | "capture_only" => {
-            drop(store);
             Ok((
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "no inject match"})),
@@ -1277,31 +1400,20 @@ async fn v1_inject(
 
 async fn v1_get_capture(
     State(state): State<AppState>,
-    Extension(_tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<TenantInfo>,
     Path(capture_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let sql = capture_query_sql(&capture_id);
-    let result = if let Some(tenant_ducklake) = state
-        .control_plane
-        .as_ref()
-        .and_then(|cp| cp.tenant_ducklake.as_ref())
-    {
-        let scope = tenant_ducklake
-            .resolve_or_create("")
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
-                )
-            })?;
-        state
-            .query_engine
-            .execute_query_in_ducklake_scope(&sql, &scope)
-            .await
-    } else {
-        state.query_engine.execute_query(&sql).await
-    };
+    let sql = capture_query_sql(&capture_id, &tenant.tenant_id);
+    let engine = state
+        .engine_for_tenant(&tenant)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
+            )
+        })?;
+    let result = engine.query.execute_query(&sql).await;
 
     match result {
         Ok(result) => {
@@ -1323,10 +1435,19 @@ async fn v1_get_capture(
                 .body(axum::body::Body::from(out))
                 .unwrap())
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
-        )),
+        Err(e) => {
+            let message = e.to_string();
+            if message.contains("Table with name traces does not exist") {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"code": "not_found", "message": "capture not found"}})),
+                ));
+            }
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "storage_error", "message": message}})),
+            ))
+        }
     }
 }
 
@@ -1355,11 +1476,33 @@ mod bearer_tests {
     }
 
     #[test]
-    fn skips_auth_for_v1_options_preflight() {
-        assert!(!requires_runtime_auth(
+    fn requires_auth_for_v1_options_preflight() {
+        assert!(requires_runtime_auth(
             &Method::OPTIONS,
             "/v1/telemetry/search"
         ));
         assert!(requires_runtime_auth(&Method::POST, "/v1/telemetry/search"));
+    }
+
+    #[test]
+    fn exempts_only_documented_non_v1_routes() {
+        for path in ["/health", "/ready", "/openapi.json", "/swagger"] {
+            assert!(
+                !requires_runtime_auth(&Method::GET, path),
+                "{path} must remain unauthenticated"
+            );
+        }
+
+        for path in ["/v1/traces", "/v1/sessions", "/v1/inject", "/v1/meta"] {
+            assert!(
+                requires_runtime_auth(&Method::GET, path),
+                "{path} must require auth"
+            );
+        }
+
+        assert!(
+            !requires_runtime_auth(&Method::POST, "/v1/tenants"),
+            "POST /v1/tenants uses admin Bearer validated in-handler, not tenant middleware"
+        );
     }
 }

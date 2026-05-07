@@ -10,7 +10,6 @@ use softprobe_runtime::runtime_api::{
     runtime_auth_middleware, runtime_control_routes, runtime_post_v1_traces,
 };
 use softprobe_runtime::session_redis::RedisStore;
-use softprobe_runtime::tenant_ducklake::TenantDuckLakeResolver;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,17 +31,18 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting softprobe-runtime v{}", env!("CARGO_PKG_VERSION"));
 
-    let config = Config::load()?;
+    let config = Arc::new(Config::load()?);
     info!("Configuration loaded");
 
-    let pipeline = IngestPipeline::new(&config).await?;
+    let pipeline = IngestPipeline::new(config.as_ref()).await?;
     let storage = pipeline.storage.clone();
     let dropdown_catalog = pipeline.dropdown_catalog.clone();
     let query_engine =
-        softprobe_runtime::query::create_query_engine(&config, Arc::new(storage.clone())).await?;
+        softprobe_runtime::query::create_query_engine(config.as_ref(), Arc::new(storage.clone()))
+            .await?;
 
     if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
-        &config,
+        config.as_ref(),
         dropdown_catalog.clone(),
     )
     .await?
@@ -50,10 +50,11 @@ async fn main() -> anyhow::Result<()> {
         info!("Maintenance scheduler started");
     }
 
-    let control_plane = control_plane_runtime_from_env().await?;
+    let control_plane = control_plane_runtime_from_env(config.clone()).await?;
     let traces = post(runtime_post_v1_traces);
 
     let (mut app, state) = api::create_router(
+        config.clone(),
         storage.clone(),
         query_engine,
         Some(pipeline.storage.span_buffer.clone()),
@@ -107,9 +108,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime> {
-    let config = Config::load()?;
-    let auth = required_env("SOFTPROBE_AUTH_URL")?;
+async fn control_plane_runtime_from_env(
+    _config: Arc<Config>,
+) -> anyhow::Result<ControlPlaneRuntime> {
     let redis_host = required_env("REDIS_HOST")?;
     let port: u16 = std::env::var("REDIS_PORT")
         .ok()
@@ -125,12 +126,21 @@ async fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime>
         Duration::from_secs(86_400),
     )
     .await?;
-    let resolver = Resolver::new(auth, Duration::from_secs(60));
-    let tenant_ducklake = TenantDuckLakeResolver::connect(&config).await?;
+    let auth_url = match optional_env("SOFTPROBE_AUTH_URL") {
+        Some(url) => url,
+        None => {
+            const DEFAULT_LOCAL_AUTH: &str = "http://127.0.0.1:8091/validate";
+            info!(
+                "SOFTPROBE_AUTH_URL not set; using default local auth stub {}",
+                DEFAULT_LOCAL_AUTH
+            );
+            DEFAULT_LOCAL_AUTH.to_string()
+        }
+    };
+    let resolver = Resolver::new(auth_url, Duration::from_secs(60));
     Ok(ControlPlaneRuntime {
         resolver,
         session_store: Arc::new(tokio::sync::Mutex::new(store)),
-        tenant_ducklake,
     })
 }
 
@@ -141,4 +151,14 @@ fn required_env(name: &str) -> anyhow::Result<String> {
         anyhow::bail!("{name} is required in control-plane-only runtime mode");
     }
     Ok(value)
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    let value = std::env::var(name).unwrap_or_default();
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
