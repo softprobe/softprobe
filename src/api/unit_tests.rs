@@ -12,14 +12,14 @@ use tower::ServiceExt;
 
 use crate::api::ingestion::metrics::{ingest_metrics_json, ingest_metrics_protobuf};
 use crate::api::ingestion::traces::{ingest_traces_json, ingest_traces_protobuf};
-use crate::authn::TenantInfo;
-use std::sync::Arc;
 use crate::api::telemetry::{
     compile_details_sql, compile_search_sql, TelemetryDetailsTarget, TelemetryFilter,
     TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
     TelemetrySortDirection, TelemetryTimeRange,
 };
+use crate::authn::TenantInfo;
 use crate::test_support::local_router_and_state;
+use std::sync::Arc;
 
 fn test_tenant() -> TenantInfo {
     TenantInfo {
@@ -187,12 +187,8 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
     ExportTraceServiceRequest::default()
         .encode(&mut buf)
         .expect("encode");
-    let res = ingest_traces_protobuf(
-        State(state.clone()),
-        Some(tenant.clone()),
-        Bytes::from(buf),
-    )
-    .await;
+    let res =
+        ingest_traces_protobuf(State(state.clone()), Some(tenant.clone()), Bytes::from(buf)).await;
     assert!(res.0.success);
 
     let body = json!({ "resourceMetrics": [] }).to_string();
@@ -208,12 +204,7 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
     ExportMetricsServiceRequest::default()
         .encode(&mut buf)
         .unwrap();
-    let res = ingest_metrics_protobuf(
-        State(state),
-        Some(tenant),
-        Bytes::from(buf),
-    )
-    .await;
+    let res = ingest_metrics_protobuf(State(state), Some(tenant), Bytes::from(buf)).await;
     assert!(res.0.success);
 }
 

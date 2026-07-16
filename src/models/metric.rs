@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 /// Metric data model representing an OTLP metric data point
 ///
-/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
-/// Field order matches Iceberg field IDs for consistency
+/// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
+/// (legacy path; Arrow/DuckLake column order).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metric {
     // Field 1-4: Metric identity
@@ -40,18 +40,17 @@ pub struct Metric {
     /// Resource attributes identifying the metric source
     /// (e.g., service.name, host.name, k8s.pod.name)
     pub resource_attributes: HashMap<String, String>,
-
     // Field 13: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
 
 impl Metric {
-    /// Convert a batch of Metrics to Arrow RecordBatch for Iceberg storage
+    /// Convert a batch of Metrics to Arrow RecordBatch for DuckLake storage
     pub fn to_record_batch(
         metrics: &[Metric],
-        iceberg_schema: &iceberg::spec::Schema,
+        schema: &arrow::datatypes::Schema,
     ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-        crate::storage::iceberg::arrow::metrics_to_record_batch(metrics, iceberg_schema)
+        crate::storage::schema::arrow::metrics_to_record_batch(metrics, schema)
     }
 
     /// Create Metrics from an OTLP Metric and resource attributes
@@ -334,7 +333,7 @@ impl Bufferable for Metric {
     }
 
     /// Sort by metric_name first, then timestamp
-    /// This matches Iceberg sort order (field 1, 5)
+    /// This matches telemetry table sort keys (metric_name, timestamp)
     fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.metric_name
             .cmp(&other.metric_name)

@@ -48,12 +48,3 @@ s3:
   access_key_id: null  # Not needed when using IAM role
   secret_access_key: null  # Not needed when using IAM role
 
-iceberg:
-  catalog_type: "rest"  # REST catalog (Lakekeeper)
-  catalog_uri: "http://CATALOG-IP:8181/catalog"  # Update with REST catalog IP
-  catalog_token: null  # Set if catalog requires authentication
-  warehouse: "s3://YOUR-S3-BUCKET-NAME/warehouse"  # Update with your S3 bucket path
-  write_target_file_size_bytes: 134217728  # 128MB for production
-  write_row_group_size_bytes: 134217728  # 128MB
-  write_page_size_bytes: 1048576  # 1MB
-  force_close_after_append: false

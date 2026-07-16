@@ -41,14 +41,14 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
     let unknown = resolver
         .resolve_scope(&tenant_id)
         .await
-        .expect_err("unknown tenants must not be lazily provisioned");
+        .expect_err("unknown scopes must not be lazily provisioned");
     assert!(
-        unknown.to_string().contains("unknown tenant"),
-        "unexpected unknown tenant error: {unknown}"
+        unknown.to_string().contains("unknown scope"),
+        "unexpected unknown scope error: {unknown}"
     );
 
     let request = ScopeProvisioningRequest {
-        tenant_id: tenant_id.clone(),
+        scope_id: tenant_id.clone(),
         metadata_schema: metadata_schema.clone(),
         data_path: data_path.clone(),
     };
@@ -86,7 +86,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
 
     let scope_a = resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_a.clone(),
+            scope_id: tenant_a.clone(),
             metadata_schema: format!("tenant_promo_registry_a_scope_{suffix}"),
             data_path: format!("s3://warehouse/tenants/{tenant_a}/ducklake/data/"),
         })
@@ -94,7 +94,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .expect("provision tenant A");
     let scope_b = resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_b.clone(),
+            scope_id: tenant_b.clone(),
             metadata_schema: format!("tenant_promo_registry_b_scope_{suffix}"),
             data_path: format!("s3://warehouse/tenants/{tenant_b}/ducklake/data/"),
         })

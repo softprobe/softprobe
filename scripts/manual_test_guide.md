@@ -1,3 +1,5 @@
+> **Legacy.** Prefer `make test-local` and [docs/adhoc-duckdb-ducklake.md](../docs/adhoc-duckdb-ducklake.md). Iceberg/`iceberg_scan` examples below are outdated.
+
 # Manual End-to-End Test Guide
 
 This guide helps you manually test the OTLP Data Lake with Grafana integration.

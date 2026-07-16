@@ -10,9 +10,6 @@ pub struct Config {
     pub compaction: CompactionConfig,
     pub duckdb: DuckDBConfig,
     pub s3: S3Config,
-    /// Omitted in YAML uses `IcebergConfig::default` (DuckLake deployments do not need a real Iceberg catalog).
-    #[serde(default)]
-    pub iceberg: IcebergConfig,
     #[serde(default)]
     pub ducklake: Option<DuckLakeConfig>,
     #[serde(default)]
@@ -142,38 +139,6 @@ pub struct S3Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IcebergConfig {
-    pub catalog_type: String, // "s3", "glue", or "rest"
-    pub catalog_uri: String,
-    #[serde(default)]
-    pub catalog_token: Option<String>, // Bearer token for REST catalog (e.g., Cloudflare R2)
-    #[serde(default = "default_iceberg_namespace")]
-    pub namespace: String,
-    #[serde(default = "default_warehouse")]
-    pub warehouse: String, // Warehouse location (s3://path or warehouse ID)
-    pub write_target_file_size_bytes: usize, // 64MB
-    pub write_row_group_size_bytes: usize,   // 128MB
-    pub write_page_size_bytes: usize,        // 1MB
-    pub force_close_after_append: bool,      // testing: close file after each append
-}
-
-impl Default for IcebergConfig {
-    fn default() -> Self {
-        Self {
-            catalog_type: "s3".to_string(),
-            catalog_uri: "s3://softprobe-recordings".to_string(),
-            catalog_token: None,
-            namespace: default_iceberg_namespace(),
-            warehouse: "s3://warehouse".to_string(),
-            write_target_file_size_bytes: 64 * 1024 * 1024,
-            write_row_group_size_bytes: 128 * 1024 * 1024,
-            write_page_size_bytes: 1024 * 1024,
-            force_close_after_append: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuckLakeConfig {
     #[serde(default = "default_ducklake_catalog_type")]
     pub catalog_type: String, // duckdb, postgres, sqlite
@@ -187,14 +152,6 @@ pub struct DuckLakeConfig {
     pub metadata_schema: String,
     #[serde(default)]
     pub data_inlining_row_limit: Option<u64>,
-}
-
-fn default_warehouse() -> String {
-    "s3://warehouse".to_string()
-}
-
-fn default_iceberg_namespace() -> String {
-    "default".to_string()
 }
 
 fn default_ducklake_catalog_type() -> String {
@@ -326,7 +283,6 @@ impl Default for Config {
                 access_key_id: None,
                 secret_access_key: None,
             },
-            iceberg: IcebergConfig::default(),
             ducklake: Some(DuckLakeConfig {
                 catalog_type: default_ducklake_catalog_type(),
                 metadata_path: default_ducklake_metadata_path(),
@@ -387,12 +343,6 @@ impl Config {
             self.storage.s3_region = region;
         }
 
-        if let Ok(namespace) = std::env::var("ICEBERG_NAMESPACE") {
-            if !namespace.trim().is_empty() {
-                self.iceberg.namespace = namespace;
-            }
-        }
-
         if let Ok(raw) = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES") {
             if let Ok(n) = raw.trim().parse::<usize>() {
                 if n > 0 {
@@ -443,12 +393,10 @@ mod tests {
         let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
         let prev_port = std::env::var("PORT").ok();
         let prev_region = std::env::var("S3_REGION").ok();
-        let prev_ns = std::env::var("ICEBERG_NAMESPACE").ok();
         let prev_body = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES").ok();
 
         std::env::set_var("PORT", "9191");
         std::env::set_var("S3_REGION", "eu-west-1");
-        std::env::set_var("ICEBERG_NAMESPACE", "acctests");
         std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES");
 
         let mut c = Config::default();
@@ -462,10 +410,6 @@ mod tests {
             Some(p) => std::env::set_var("S3_REGION", p),
             None => std::env::remove_var("S3_REGION"),
         }
-        match prev_ns {
-            Some(p) => std::env::set_var("ICEBERG_NAMESPACE", p),
-            None => std::env::remove_var("ICEBERG_NAMESPACE"),
-        }
         match prev_body {
             Some(p) => std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", p),
             None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
@@ -473,7 +417,6 @@ mod tests {
 
         assert_eq!(c.server.port, 9191);
         assert_eq!(c.storage.s3_region, "eu-west-1");
-        assert_eq!(c.iceberg.namespace, "acctests");
     }
 
     #[test]

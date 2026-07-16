@@ -1,12 +1,10 @@
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::models::{Log, Metric, Span};
+use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::buffer::{FlushCallback, FlushFuture, PreAddCallback, PreAddFuture};
 use crate::storage::ducklake::DuckLakeWriter;
-use crate::storage::{
-    create_log_buffer, create_metric_buffer, create_span_buffer, Storage,
-};
-use crate::runtime_engine::{DuckLakeScopeResolver, DuckLakeScope};
+use crate::storage::{create_log_buffer, create_metric_buffer, create_span_buffer, Storage};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,10 +86,7 @@ impl IngestEngine {
     }
 
     pub async fn add_logs(&self, items: Vec<Log>, request_size: usize) -> Result<()> {
-        self.storage
-            .log_buffer
-            .add_items(items, request_size)
-            .await
+        self.storage.log_buffer.add_items(items, request_size).await
     }
 
     pub async fn add_metrics(&self, items: Vec<Metric>, request_size: usize) -> Result<()> {
@@ -126,9 +121,8 @@ impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let dropdown_catalog = DropdownCatalog::connect(config).await?;
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
-        let writer = Arc::new(
-            DuckLakeWriter::new(config, dropdown_catalog.clone(), tenant_ducklake).await?,
-        );
+        let writer =
+            Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone(), tenant_ducklake).await?);
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
 
         let span_buffer = create_span_buffer(
@@ -178,9 +172,8 @@ impl IngestPipeline {
         ducklake.metadata_schema = scope.metadata_schema;
         ducklake.data_path = scope.data_path;
         scoped_config.ducklake = Some(ducklake);
-        let writer = Arc::new(
-            DuckLakeWriter::new(&scoped_config, dropdown_catalog, tenant_ducklake).await?,
-        );
+        let writer =
+            Arc::new(DuckLakeWriter::new(&scoped_config, dropdown_catalog, tenant_ducklake).await?);
         let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
         let span_buffer = create_span_buffer(
             config,

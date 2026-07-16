@@ -51,10 +51,10 @@ cleanup_wal_on_instance() {
         sudo rm -rf /var/tmp/datalake/cache/wal_watermarks/* || true
         sudo rm -rf /var/tmp/datalake/cache/staged_watermarks/* || true
         sudo rm -rf /var/tmp/datalake/cache/wal_manifest/* || true
-        sudo rm -rf /var/tmp/datalake/cache/iceberg_metadata/* || true
+        sudo rm -rf /var/tmp/datalake/cache/catalog_metadata/* || true
         
         # Recreate directories
-        sudo mkdir -p /var/tmp/datalake/cache/{wal,spans,logs,metrics,wal_watermarks,staged_watermarks,wal_manifest,iceberg_metadata}
+        sudo mkdir -p /var/tmp/datalake/cache/{wal,spans,logs,metrics,wal_watermarks,staged_watermarks,wal_manifest,catalog_metadata}
         sudo chown -R ubuntu:ubuntu /var/tmp/datalake/cache
         
         echo "Cleanup complete"
@@ -67,7 +67,8 @@ reset_catalog() {
     log_info "Resetting catalog on $catalog_ip..."
     
     ssh -i "$KEY_FILE" -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@"$catalog_ip" bash << 'RESET'
-        cd lakekeeper
+        # lakekeeper removed; DuckLake uses ducklake-postgres
+        # cd lakekeeper
         docker-compose down -v || true
         docker-compose up -d
         sleep 10
@@ -75,7 +76,7 @@ reset_catalog() {
         # Wait for lakekeeper to be ready
         for i in {1..30}; do
             if curl -s http://localhost:8181/catalog/v1/config >/dev/null 2>&1; then
-                echo "Lakekeeper is ready"
+                echo "DuckLake stack ready"
                 break
             fi
             sleep 2

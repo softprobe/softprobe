@@ -5,9 +5,9 @@
 //! Requirements: `integration-e2e` feature, local MinIO on the configured S3 endpoint, and
 //! `tests/config/test.yaml` (see `make test-local`).
 
-use crate::util::iceberg::{ensure_wal_bucket, load_test_config};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
+use crate::util::storage_config::{ensure_wal_bucket, load_test_config};
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};

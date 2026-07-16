@@ -1,23 +1,18 @@
 use anyhow::Result;
 use chrono::Utc;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Log as LogData;
-use softprobe_runtime::query;
 use softprobe_runtime::query::duckdb::{reset_view_counters, view_counters_snapshot};
-use softprobe_runtime::storage;
-use softprobe_runtime::storage::iceberg::arrow::logs_to_record_batch;
 use std::collections::HashMap;
 use std::time::Instant;
-use tempfile::tempdir;
 
 use crate::util::pipeline::TestPipeline;
+use crate::util::storage_config::ensure_wal_bucket;
 
 // ========================================
 // Performance test goals (tunable via env):
-// - Ingest N events (WAL + staged + Iceberg)
+// - Ingest N events (WAL + DuckLake commit)
 // - Query last N days via DuckDB union view
 // - Warm p95 latency target under PERF_TARGET_MS
 // - Parallel queries under PERF_CONCURRENCY
@@ -34,38 +29,13 @@ fn load_perf_config() -> Config {
         }
     }
 
-    let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
+    let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     let config_file = match test_type.as_str() {
         "r2" => "tests/config/test-r2.yaml",
         _ => "tests/config/test.yaml",
     };
     std::env::set_var("CONFIG_FILE", config_file);
     Config::load().expect("Failed to load config")
-}
-
-fn ensure_wal_bucket(config: &mut Config) {
-    if config.ingest_engine.wal_bucket != "your-bucket-name" {
-        return;
-    }
-
-    let warehouse = config.iceberg.warehouse.trim();
-    let mut candidate = warehouse
-        .rsplit('/')
-        .next()
-        .unwrap_or(warehouse)
-        .to_string();
-    if let Some(after_underscore) = candidate.rsplit('_').next() {
-        if !after_underscore.is_empty() {
-            candidate = after_underscore.to_string();
-        }
-    }
-
-    assert!(
-        !candidate.is_empty() && candidate != "your-bucket-name",
-        "wal_bucket is a placeholder and could not be derived from iceberg.warehouse: {}",
-        warehouse
-    );
-    config.ingest_engine.wal_bucket = candidate;
 }
 
 fn perf_target() -> std::time::Duration {
@@ -177,7 +147,7 @@ async fn retry_query_until_count(
     expected_count: i64,
     max_retries: u32,
 ) -> Result<softprobe_runtime::query::duckdb::QueryResult, anyhow::Error> {
-    let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
+    let is_r2 = std::env::var("E2E_BACKEND").ok().as_deref() == Some("r2");
     let max_retries = if is_r2 {
         max_retries.max(10)
     } else {
@@ -328,7 +298,7 @@ async fn perf_union_read_latency() {
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM iceberg_logs \
+        "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         base_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -349,7 +319,7 @@ async fn perf_union_read_latency() {
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM iceberg_logs \
+        "SELECT COUNT(*) AS count FROM union_logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         base_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -401,7 +371,7 @@ async fn perf_union_read_latency() {
     maybe_log_cache_profile(&query_engine, "after_latency").await;
     if diagnostics_enabled() {
         let base_sql = format!(
-            "SELECT COUNT(*) AS count FROM iceberg_logs \
+            "SELECT COUNT(*) AS count FROM union_logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
             base_session.replace('\'', "''"),
             record_date_start(days_back),
@@ -412,7 +382,7 @@ async fn perf_union_read_latency() {
             staged_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        run_diagnostics(&query_engine, "iceberg_logs", &base_sql).await;
+        run_diagnostics(&query_engine, "union_logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
         let buffer_sql = format!(
             "SELECT COUNT(*) AS count FROM buffer_logs \
@@ -611,7 +581,7 @@ async fn perf_union_read_concurrency() {
     maybe_log_cache_profile(&query_engine, "after_concurrency").await;
     if diagnostics_enabled() {
         let base_sql = format!(
-            "SELECT COUNT(*) AS count FROM iceberg_logs \
+            "SELECT COUNT(*) AS count FROM union_logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
             base_session.replace('\'', "''"),
             record_date_start(days_back),
@@ -634,7 +604,7 @@ async fn perf_union_read_concurrency() {
             buffer_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        run_diagnostics(&query_engine, "iceberg_logs", &base_sql).await;
+        run_diagnostics(&query_engine, "union_logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
         run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
         run_diagnostics(&query_engine, "union_logs", &union_sql).await;
@@ -739,8 +709,8 @@ async fn perf_view_recreate_stability() {
     let snapshot_after_second = view_counters_snapshot();
 
     assert_eq!(
-        snapshot_after_first.iceberg_recreates, snapshot_after_second.iceberg_recreates,
-        "Iceberg view should not be recreated between warm queries"
+        snapshot_after_first.committed_recreates, snapshot_after_second.committed_recreates,
+        "Committed view should not be recreated between warm queries"
     );
     assert_eq!(
         snapshot_after_first.staged_recreates, snapshot_after_second.staged_recreates,
@@ -754,69 +724,6 @@ async fn perf_view_recreate_stability() {
 
 #[tokio::test]
 async fn view_recreate_stability_local_stub() {
-    let previous_config = std::env::var("CONFIG_FILE").ok();
-    std::env::set_var("CONFIG_FILE", "tests/config/test.yaml");
-    let mut config = Config::load().expect("config");
-    let cache_dir = tempdir().expect("temp cache dir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
-
-    let stub_dir = tempdir().expect("stub dir");
-    let stub_path = stub_dir.path().join("iceberg_stub.parquet");
-
-    let now = Utc::now();
-    let log = LogData {
-        session_id: Some("stub-session".to_string()),
-        timestamp: now,
-        observed_timestamp: Some(now + chrono::Duration::milliseconds(1)),
-        severity_number: 4,
-        severity_text: "INFO".to_string(),
-        body: "stub log".to_string(),
-        attributes: HashMap::new(),
-        resource_attributes: HashMap::new(),
-        trace_id: None,
-        span_id: None,
-    };
-    let schema = storage::iceberg::OtlpLogsTable::schema();
-    let record_batch = logs_to_record_batch(&[log], &schema).expect("record batch");
-    let props = WriterProperties::builder().build();
-    let file = std::fs::File::create(&stub_path).expect("stub file");
-    let mut writer =
-        ArrowWriter::try_new(file, record_batch.schema(), Some(props)).expect("writer");
-    writer.write(&record_batch).expect("write");
-    writer.close().expect("close");
-
-    std::env::set_var(
-        "DUCKDB_TEST_ICEBERG_FALLBACK_PATH",
-        stub_path.to_string_lossy().to_string(),
-    );
-    reset_view_counters();
-
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
-    let sql = "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = 'stub-session'";
-    let first = query_engine.execute_query(sql).await.expect("query");
-    assert_eq!(first.rows[0][0].as_i64().unwrap_or(0), 1);
-    let after_first = view_counters_snapshot();
-
-    let second = query_engine.execute_query(sql).await.expect("query");
-    assert_eq!(second.rows[0][0].as_i64().unwrap_or(0), 1);
-    let after_second = view_counters_snapshot();
-
-    assert_eq!(
-        after_first.iceberg_recreates,
-        after_second.iceberg_recreates
-    );
-    assert_eq!(after_first.staged_recreates, after_second.staged_recreates);
-    assert_eq!(after_first.union_recreates, after_second.union_recreates);
-
-    std::env::remove_var("DUCKDB_TEST_ICEBERG_FALLBACK_PATH");
-    if let Some(previous) = previous_config {
-        std::env::set_var("CONFIG_FILE", previous);
-    } else {
-        std::env::remove_var("CONFIG_FILE");
-    }
+    // Removed: relied on DUCKDB_TEST_ICEBERG_FALLBACK_PATH / iceberg_scan stub path.
+    // Committed-tier stability is covered by perf_view_recreate_stability (union_logs).
 }

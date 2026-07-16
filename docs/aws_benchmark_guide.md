@@ -1,3 +1,5 @@
+> **Historical / pre-DuckLake.** Prefer DuckLake + object store; Lakekeeper/Iceberg REST sections are legacy. See [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md).
+
 # AWS Benchmark Guide
 
 Complete guide for running full stress performance benchmarks on AWS with EC2 instances, S3 storage, and Iceberg REST catalog.

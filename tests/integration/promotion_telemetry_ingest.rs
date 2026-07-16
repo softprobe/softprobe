@@ -40,7 +40,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .expect("postgres resolver");
     resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_id.clone(),
+            scope_id: tenant_id.clone(),
             metadata_schema: format!("softprobe_promoted_data_{suffix}"),
             data_path: tenant_data_path,
         })

@@ -1,5 +1,7 @@
 # Softprobe Business Vision & Strategic Goals
 
+> **Note:** Runtime durable storage is now **DuckLake** (see [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md) and ADR-014). Iceberg mentions below are historical positioning.
+
 **Company**: Softprobe
 **Date**: 2025-12-31
 **Status**: Strategic Vision

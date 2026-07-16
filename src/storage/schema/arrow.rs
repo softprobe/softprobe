@@ -8,7 +8,6 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
-use iceberg::spec::Schema as IcebergSchema;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -114,8 +113,8 @@ fn promoted_array_from_values(
     }
 }
 
-/// Build arrays for extra Iceberg fields (e.g. tenant-applied promoted columns) in schema order.
-/// Attribute keys default to the Iceberg/Arrow column name.
+/// Build arrays for extra promoted fields (e.g. tenant-applied promoted columns) in schema order.
+/// Attribute keys default to the Arrow column name.
 fn build_promoted_columns_for_spans(
     spans: &[Span],
     arrow_schema: &Schema,
@@ -160,13 +159,9 @@ fn build_promoted_columns_from_attribute_maps(
     promoted_arrays
 }
 
-/// Convert Span batch to Arrow RecordBatch using Iceberg table schema
-pub fn spans_to_record_batch(
-    spans: &[Span],
-    iceberg_schema: &IcebergSchema,
-) -> Result<RecordBatch> {
-    // Convert Iceberg schema to Arrow schema
-    let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
+/// Convert Span batch to Arrow RecordBatch using telemetry Arrow schema
+pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBatch> {
+    let arrow_schema = Arc::new(schema.clone());
 
     let num_spans = spans.len();
     debug!("Converting {} spans to Arrow RecordBatch", num_spans);
@@ -556,9 +551,9 @@ fn build_events_array(
     Ok(Arc::new(list_array))
 }
 
-/// Convert Log batch to Arrow RecordBatch using Iceberg table schema
-pub fn logs_to_record_batch(logs: &[Log], iceberg_schema: &IcebergSchema) -> Result<RecordBatch> {
-    let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
+/// Convert Log batch to Arrow RecordBatch using telemetry Arrow schema
+pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch> {
+    let arrow_schema = Arc::new(schema.clone());
 
     debug!("Converting {} logs to Arrow RecordBatch", logs.len());
     trace!("Arrow schema field count: {}", arrow_schema.fields().len());
@@ -750,13 +745,9 @@ fn build_log_map_array(
     Ok(Arc::new(map_array))
 }
 
-/// Convert Metric batch to Arrow RecordBatch using Iceberg table schema
-pub fn metrics_to_record_batch(
-    metrics: &[Metric],
-    iceberg_schema: &IcebergSchema,
-) -> Result<RecordBatch> {
-    // Convert Iceberg schema to Arrow schema
-    let arrow_schema = Arc::new(Schema::try_from(iceberg_schema)?);
+/// Convert Metric batch to Arrow RecordBatch using telemetry Arrow schema
+pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<RecordBatch> {
+    let arrow_schema = Arc::new(schema.clone());
 
     let num_metrics = metrics.len();
     debug!("Converting {} metrics to Arrow RecordBatch", num_metrics);
@@ -866,7 +857,7 @@ pub fn metrics_to_record_batch(
         METRICS_BASE_FIELDS,
     );
 
-    // Create RecordBatch with columns matching Iceberg schema order
+    // Create RecordBatch with columns matching schema field order
     let mut arrays = vec![
         metric_names,
         descriptions,

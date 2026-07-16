@@ -50,13 +50,3 @@ s3:
   access_key_id: null
   secret_access_key: null
 
-iceberg:
-  catalog_type: "rest"
-  # GCP-deployed catalog URI (set via environment)
-  catalog_uri: "https://i.softprobe.ai/catalog"  # Placeholder
-  catalog_token: null
-  warehouse: "gs://softprobe-iceberg-warehouse"  # GCP Cloud Storage
-  write_target_file_size_bytes: 134217728  # 128MB for production
-  write_row_group_size_bytes: 134217728  # 128MB
-  write_page_size_bytes: 1048576  # 1MB
-  force_close_after_append: false  # Production: buffered writes

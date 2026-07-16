@@ -252,7 +252,7 @@ Content-Type: application/json
 ## Design Document
 
 All implementation follows the design document:
-- **Location**: `../docs/migration-to-iceberg-design.md`
+- **Location**: `docs/iceberg-legacy-cleanup.md`
 - **Version**: 1.7 (latest)
 - **Status**: Reviewed and approved
 

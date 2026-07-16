@@ -15,8 +15,8 @@ use crate::promotion::{
     BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
     TelemetryTable,
 };
-use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
 use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
+use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
 use axum::{
     body::Bytes,
     extract::{Extension, Path, Query, Request, State},
@@ -425,8 +425,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    let Some(tenant_ducklake) = state.engines.scope_registry()
-    else {
+    let Some(tenant_ducklake) = state.engines.scope_registry() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(
@@ -544,8 +543,7 @@ async fn v1_ducklake_connection(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry()
-    else {
+    let Some(tenant_ducklake) = state.engines.scope_registry() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -622,8 +620,7 @@ async fn apply_telemetry_promotion(
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry()
-    else {
+    let Some(tenant_ducklake) = state.engines.scope_registry() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -669,8 +666,7 @@ async fn apply_business_table_promotion(
     manifest_yaml: String,
     spec: BusinessTableManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry()
-    else {
+    let Some(tenant_ducklake) = state.engines.scope_registry() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -1363,9 +1359,7 @@ async fn v1_inject(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "mock rule missing response".into(),
             ))?;
-            let _ = sessions
-                .record_injected_spans(&lookup.session_id, 1)
-                .await;
+            let _ = sessions.record_injected_spans(&lookup.session_id, 1).await;
             let body = encode_inject_response_proto(&resp)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(Response::builder()
@@ -1377,20 +1371,16 @@ async fn v1_inject(
         "error" => {
             let (st, msg) = build_error_response(&m.rule);
             if m.source == "policy" {
-                let _ = sessions
-                    .record_strict_miss(&lookup.session_id, 1)
-                    .await;
+                let _ = sessions.record_strict_miss(&lookup.session_id, 1).await;
             }
             let code = StatusCode::from_u16(st as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             Ok((code, Json(json!({"error": msg}))).into_response())
         }
-        "passthrough" | "capture_only" => {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "no inject match"})),
-            )
-                .into_response())
-        }
+        "passthrough" | "capture_only" => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no inject match"})),
+        )
+            .into_response()),
         _ => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "unsupported rule action".into(),
@@ -1404,15 +1394,12 @@ async fn v1_get_capture(
     Path(capture_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let sql = capture_query_sql(&capture_id, &tenant.tenant_id);
-    let engine = state
-        .engine_for_tenant(&tenant)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
-            )
-        })?;
+    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"code": "storage_error", "message": e.to_string()}})),
+        )
+    })?;
     let result = engine.query.execute_query(&sql).await;
 
     match result {

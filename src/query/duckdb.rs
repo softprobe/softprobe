@@ -1,11 +1,11 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
+use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::ducklake_qualified_table_name;
-use crate::storage::iceberg::arrow::{
+use crate::storage::schema::arrow::{
     logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
 };
 use crate::storage::TieredStorage;
-use crate::runtime_engine::DuckLakeScope;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -30,7 +30,6 @@ pub struct DuckDBQueryEngine {
     tiered_storage: Arc<dyn TieredStorage>,
 }
 
-const CATALOG_ALIAS: &str = "iceberg_catalog";
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
 /// When a DuckLake catalog is attached, DuckDB treats identifiers containing substrings like
@@ -86,17 +85,17 @@ fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
         ("union_metrics", "tm_all_metric"),
         ("committed_metrics", "tm_cq_metric"),
         ("buffer_metrics", "tm_buf_metric"),
-        ("iceberg_metrics", "tm_icb_metric"),
+        ("iceberg_metrics", "tm_cq_metric"),
         ("staged_metrics", "tm_stg_metric"),
         ("union_logs", "tm_all_log"),
         ("committed_logs", "tm_cq_log"),
         ("buffer_logs", "tm_buf_log"),
-        ("iceberg_logs", "tm_icb_log"),
+        ("iceberg_logs", "tm_cq_log"),
         ("staged_logs", "tm_stg_log"),
         ("union_spans", "tm_all_span"),
         ("committed_spans", "tm_cq_span"),
         ("buffer_spans", "tm_buf_span"),
-        ("iceberg_spans", "tm_icb_span"),
+        ("iceberg_spans", "tm_cq_span"),
         ("staged_spans", "tm_stg_span"),
     ];
     for &(from, to) in PAIRS {
@@ -111,7 +110,7 @@ use std::sync::atomic::AtomicU64;
 
 #[derive(Default)]
 struct ViewCounters {
-    iceberg: AtomicU64,
+    committed: AtomicU64,
     staged: AtomicU64,
     union_view: AtomicU64,
 }
@@ -121,20 +120,20 @@ static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::n
 static PINNED_MODE_OPTION_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 #[derive(Debug, Clone)]
 pub struct ViewCounterSnapshot {
-    pub iceberg_recreates: u64,
+    pub committed_recreates: u64,
     pub staged_recreates: u64,
     pub union_recreates: u64,
 }
 
 pub fn reset_view_counters() {
-    VIEW_COUNTERS.iceberg.store(0, Ordering::Relaxed);
+    VIEW_COUNTERS.committed.store(0, Ordering::Relaxed);
     VIEW_COUNTERS.staged.store(0, Ordering::Relaxed);
     VIEW_COUNTERS.union_view.store(0, Ordering::Relaxed);
 }
 
 pub fn view_counters_snapshot() -> ViewCounterSnapshot {
     ViewCounterSnapshot {
-        iceberg_recreates: VIEW_COUNTERS.iceberg.load(Ordering::Relaxed),
+        committed_recreates: VIEW_COUNTERS.committed.load(Ordering::Relaxed),
         staged_recreates: VIEW_COUNTERS.staged.load(Ordering::Relaxed),
         union_recreates: VIEW_COUNTERS.union_view.load(Ordering::Relaxed),
     }
@@ -154,36 +153,12 @@ struct ConnectionState {
     conn: Connection,
     prepared_kinds: HashSet<String>,
     staged_signatures: HashMap<String, String>,
-    iceberg_sources: HashMap<String, IcebergSource>,
-    iceberg_signatures: HashMap<String, String>,
     tiered_storage: Arc<dyn TieredStorage>,
     /// Last `TieredStorage::catalog_write_generation()` applied after reattach for this worker.
     last_seen_catalog_write_generation: u64,
     cache_httpfs_wrap_supported: bool,
     cache_httpfs_wrapped_s3: bool,
     cache_httpfs_wrapped_httpfs: bool,
-}
-
-#[derive(Clone)]
-enum IcebergSource {
-    Pinned {
-        metadata_path: String,
-        snapshot_id: Option<i64>,
-        compression: Option<String>,
-        signature: String,
-        data_files_path: Option<String>,
-    },
-    Catalog,
-    ScanUri(String),
-    Stub(String),
-}
-
-struct PinnedMetadata {
-    metadata_path: String,
-    snapshot_id: Option<i64>,
-    compression: Option<String>,
-    signature: String,
-    data_files_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -344,8 +319,6 @@ impl DuckDBCore {
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch("INSTALL httpfs;")?;
-        // Keep iceberg installed for backward-compatible fallback paths.
-        conn.execute_batch("INSTALL iceberg;")?;
         // DuckLake is the primary committed storage path.
         conn.execute_batch("INSTALL ducklake;")?;
         if self.ducklake_config().catalog_type == "postgres" {
@@ -364,8 +337,6 @@ impl DuckDBCore {
             conn,
             prepared_kinds: HashSet::new(),
             staged_signatures: HashMap::new(),
-            iceberg_sources: HashMap::new(),
-            iceberg_signatures: HashMap::new(),
             tiered_storage: self.tiered_storage.clone(),
             last_seen_catalog_write_generation: 0,
             cache_httpfs_wrap_supported: true,
@@ -385,8 +356,6 @@ impl DuckDBCore {
                 self.force_reattach_catalog(&state.conn)?;
                 state.prepared_kinds.clear();
                 state.staged_signatures.clear();
-                state.iceberg_sources.clear();
-                state.iceberg_signatures.clear();
                 state.last_seen_catalog_write_generation = gen;
             }
         }
@@ -459,8 +428,6 @@ impl DuckDBCore {
                     self.force_reattach_catalog(&state.conn)?;
                     state.prepared_kinds.clear();
                     state.staged_signatures.clear();
-                    state.iceberg_sources.clear();
-                    state.iceberg_signatures.clear();
                     return run_once(state);
                 }
                 Err(err)
@@ -634,9 +601,7 @@ impl DuckDBCore {
             || sql.contains("tm_stg_span")
             || sql.contains("tm_buf_span");
         if uses_spans {
-            let ducklake_need_buffer = self.config.ducklake.is_none()
-                || sql.contains("tm_buf_span")
-                || sql.contains("tm_all_span");
+            let ducklake_need_buffer = sql.contains("tm_buf_span") || sql.contains("tm_all_span");
             self.prepare_union_view(state, "spans", "traces", ducklake_need_buffer)?;
         }
 
@@ -646,9 +611,7 @@ impl DuckDBCore {
             || sql.contains("tm_stg_log")
             || sql.contains("tm_buf_log");
         if uses_logs {
-            let ducklake_need_buffer = self.config.ducklake.is_none()
-                || sql.contains("tm_buf_log")
-                || sql.contains("tm_all_log");
+            let ducklake_need_buffer = sql.contains("tm_buf_log") || sql.contains("tm_all_log");
             self.prepare_union_view(state, "logs", "logs", ducklake_need_buffer)?;
         }
 
@@ -658,9 +621,8 @@ impl DuckDBCore {
             || sql.contains("tm_stg_metric")
             || sql.contains("tm_buf_metric");
         if uses_metrics {
-            let ducklake_need_buffer = self.config.ducklake.is_none()
-                || sql.contains("tm_buf_metric")
-                || sql.contains("tm_all_metric");
+            let ducklake_need_buffer =
+                sql.contains("tm_buf_metric") || sql.contains("tm_all_metric");
             self.prepare_union_view(state, "metrics", "metrics", ducklake_need_buffer)?;
         }
 
@@ -678,36 +640,8 @@ impl DuckDBCore {
         let kind_ready = state.prepared_kinds.contains(&kind_key);
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
         let start = std::time::Instant::now();
-        if self.config.ducklake.is_some() {
-            // Catalog is attached once in `init_connection_state_with`. Re-running ATTACH here on
-            // every query (even when it "succeeds" via already-attached) breaks DuckLake snapshot
-            // binding for reads in this DuckDB build.
-            self.create_committed_catalog_view(&state.conn, kind, table_name)?;
-        } else {
-            let (source, source_signature) =
-                self.resolve_iceberg_source(state, &kind_key, table_name)?;
-            let source_changed = state
-                .iceberg_signatures
-                .get(&kind_key)
-                .map(|prev| prev != &source_signature)
-                .unwrap_or(true);
-            if source_changed || !kind_ready {
-                let applied_source =
-                    self.create_iceberg_view(&state.conn, kind, table_name, &source)?;
-                let applied_signature =
-                    self.iceberg_source_signature(&applied_source, table_name)?;
-                state
-                    .iceberg_signatures
-                    .insert(kind_key.clone(), applied_signature);
-                state
-                    .iceberg_sources
-                    .insert(kind_key.clone(), applied_source);
-                #[cfg(test)]
-                {
-                    VIEW_COUNTERS.iceberg.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
+        // Catalog is attached once in `init_connection_state_with`.
+        self.create_committed_catalog_view(&state.conn, kind, table_name)?;
         if diag {
             println!(
                 "DIAG committed_view({}) prepared in {:?}",
@@ -722,28 +656,8 @@ impl DuckDBCore {
             self.create_buffer_view_sync(&state.conn, kind, &state.tiered_storage)?;
         }
 
-        // DuckLake: any TEMP VIEW / wrapper over attached tables breaks snapshot binding; union is
+        // DuckLake: TEMP VIEW wrappers over attached tables break snapshot binding; union is
         // expanded inline in `ducklake_inline_sql` instead.
-        if !kind_ready && self.config.ducklake.is_none() {
-            let (vc, vb, vu, _) = telemetry_view_names(kind);
-            let union_view = format!(
-                "CREATE OR REPLACE TEMP VIEW {vu} AS \
-                 SELECT * FROM {vc} \
-                 UNION ALL SELECT * FROM {vb};",
-                vu = vu,
-                vc = vc,
-                vb = vb,
-            );
-            let start = std::time::Instant::now();
-            state.conn.execute_batch(&union_view)?;
-            if diag {
-                println!("DIAG union_view({}) created in {:?}", kind, start.elapsed());
-            }
-            #[cfg(test)]
-            {
-                VIEW_COUNTERS.union_view.fetch_add(1, Ordering::Relaxed);
-            }
-        }
 
         state.prepared_kinds.insert(kind_key);
 
@@ -806,19 +720,11 @@ impl DuckDBCore {
     }
 
     fn use_attached_catalog(&self) -> bool {
-        self.config.ducklake.is_some()
+        true
     }
 
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
-        if std::env::var("DUCKDB_TEST_ICEBERG_FALLBACK_PATH").is_ok() {
-            // Tests can bypass REST catalog attach when using a local parquet stub.
-            return Ok(());
-        }
-        if !self.use_attached_catalog() {
-            return Ok(());
-        }
-
-        let sql = if self.config.ducklake.is_some() {
+        let sql = {
             let ducklake = self.ducklake_config();
             let attach_target = match ducklake.catalog_type.as_str() {
                 "postgres" => {
@@ -856,24 +762,6 @@ impl DuckDBCore {
                 ducklake.catalog_alias,
                 options.join(", ")
             )
-        } else {
-            let endpoint = escape_sql_literal(&self.config.iceberg.catalog_uri);
-            let warehouse = escape_sql_literal(&self.config.iceberg.warehouse);
-            let mut options = vec![
-                "TYPE ICEBERG".to_string(),
-                format!("ENDPOINT '{}'", endpoint),
-            ];
-            if let Some(token) = self.config.iceberg.catalog_token.as_ref() {
-                options.push(format!("TOKEN '{}'", escape_sql_literal(token)));
-            } else {
-                options.push("AUTHORIZATION_TYPE 'none'".to_string());
-            }
-            format!(
-                "ATTACH '{}' AS {} ({});",
-                warehouse,
-                CATALOG_ALIAS,
-                options.join(", ")
-            )
         };
         match conn.execute_batch(&sql) {
             Ok(()) => Ok(()),
@@ -881,8 +769,7 @@ impl DuckDBCore {
                 let message = err.to_string();
                 if message.contains("already exists") || message.contains("already attached") {
                     Ok(())
-                } else if self.config.ducklake.is_some()
-                    && message.contains("__ducklake_metadata_")
+                } else if message.contains("__ducklake_metadata_")
                     && message.contains("does not exist")
                 {
                     let ducklake = self.ducklake_config();
@@ -964,117 +851,6 @@ impl DuckDBCore {
             }
         }
         Ok(())
-    }
-
-    /// Resolve the iceberg source for a given kind and table name.
-    fn resolve_iceberg_source(
-        &self,
-        state: &ConnectionState,
-        kind_key: &str,
-        table_name: &str,
-    ) -> Result<(IcebergSource, String)> {
-        // DuckLake-backed runtime should always read committed data through the attached
-        // catalog tables. This avoids legacy pinned metadata + iceberg_scan fallback logic,
-        // which is Iceberg-specific and adds noise/latency in DuckLake deployments.
-        if self.config.ducklake.is_some() {
-            let signature = format!("catalog:{}:{}", self.catalog_schema().as_str(), table_name);
-            return Ok((IcebergSource::Catalog, signature));
-        }
-
-        // Check if we've already resolved this source for this kind.
-        if let Some(source) = state.iceberg_sources.get(kind_key) {
-            if matches!(source, IcebergSource::Stub(_)) {
-                // Re-resolve stub sources so we can switch to committed catalog tables
-                // after the first optimizer commit.
-            } else {
-                if let IcebergSource::Pinned { .. } = source {
-                    if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
-                        // If we have pinned metadata, use it.
-                        return Ok((
-                            IcebergSource::Pinned {
-                                metadata_path: pinned.metadata_path,
-                                snapshot_id: pinned.snapshot_id,
-                                compression: pinned.compression,
-                                signature: pinned.signature.clone(),
-                                data_files_path: pinned.data_files_path,
-                            },
-                            pinned.signature,
-                        ));
-                    }
-                }
-                // Otherwise, use the signature of the source.
-                let signature = self.iceberg_source_signature(source, table_name)?;
-                return Ok((source.clone(), signature));
-            }
-        }
-
-        if let Ok(stub_path) = std::env::var("DUCKDB_TEST_ICEBERG_FALLBACK_PATH") {
-            let signature = self.stub_signature(&stub_path)?;
-            return Ok((IcebergSource::Stub(stub_path), signature));
-        }
-
-        let disable_pinned = std::env::var("DUCKDB_DISABLE_PINNED_METADATA")
-            .ok()
-            .as_deref()
-            == Some("1");
-        if !disable_pinned {
-            if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
-                if pinned.data_files_path.is_some() {
-                    info!(
-                        "Using pinned metadata for {} with data_files_path",
-                        table_name
-                    );
-                } else {
-                    debug!(
-                        "Pinned metadata for {} exists but data_files_path is None; will query committed table via metadata scan",
-                        table_name
-                    );
-                }
-                return Ok((
-                    IcebergSource::Pinned {
-                        metadata_path: pinned.metadata_path,
-                        snapshot_id: pinned.snapshot_id,
-                        compression: pinned.compression,
-                        signature: pinned.signature.clone(),
-                        data_files_path: pinned.data_files_path,
-                    },
-                    pinned.signature,
-                ));
-            } else {
-                debug!(
-                    "No pinned metadata found for {}, will use catalog or scan",
-                    table_name
-                );
-            }
-        }
-
-        if self.use_attached_catalog() {
-            let signature = format!("catalog:{}:{}", self.catalog_schema().as_str(), table_name);
-            return Ok((IcebergSource::Catalog, signature));
-        }
-
-        let uri = self.iceberg_table_uri(table_name);
-        let signature = format!("scan_uri:{}", uri);
-        Ok((IcebergSource::ScanUri(uri), signature))
-    }
-
-    fn iceberg_source_signature(&self, source: &IcebergSource, table_name: &str) -> Result<String> {
-        match source {
-            IcebergSource::Pinned { signature, .. } => {
-                if let Some(pinned) = self.iceberg_pinned_metadata(table_name) {
-                    Ok(pinned.signature)
-                } else {
-                    Ok(signature.clone())
-                }
-            }
-            IcebergSource::Catalog => Ok(format!(
-                "catalog:{}:{}",
-                self.catalog_schema().as_str(),
-                table_name
-            )),
-            IcebergSource::ScanUri(uri) => Ok(format!("scan_uri:{}", uri)),
-            IcebergSource::Stub(path) => self.stub_signature(path),
-        }
     }
 
     fn create_buffer_view_sync(
@@ -1176,323 +952,6 @@ impl DuckDBCore {
         Ok(())
     }
 
-    fn create_iceberg_view(
-        &self,
-        conn: &Connection,
-        kind: &str,
-        table_name: &str,
-        source: &IcebergSource,
-    ) -> Result<IcebergSource> {
-        let (vc, _, _, _) = telemetry_view_names(kind);
-        match source {
-            IcebergSource::Pinned {
-                metadata_path,
-                snapshot_id,
-                compression,
-                data_files_path,
-                ..
-            } => {
-                if let Some(data_files_path) = data_files_path.as_ref() {
-                    info!(
-                        "Attempting to use data_files.json for {}: {:?}",
-                        kind, data_files_path
-                    );
-                    if let Ok(contents) = std::fs::read_to_string(data_files_path) {
-                        #[derive(serde::Deserialize)]
-                        struct DataFiles {
-                            files: Vec<String>,
-                        }
-                        if let Ok(files) = serde_json::from_str::<DataFiles>(&contents) {
-                            info!(
-                                "Loaded {} files from data_files.json for {}",
-                                files.files.len(),
-                                kind
-                            );
-                            if !files.files.is_empty() {
-                                // Separate local and S3 files
-                                let mut local_files = Vec::new();
-                                let mut s3_files = Vec::new();
-
-                                for path in &files.files {
-                                    if path.contains("://") {
-                                        // S3 path - check if cached locally
-                                        if let Some(cache_dir) = self.cache_dir() {
-                                            let filename = path.rsplit('/').next().unwrap_or("");
-                                            // Use table_name, not kind, because cache structure uses table names
-                                            let cached_path = cache_dir
-                                                .join("iceberg_metadata")
-                                                .join(table_name)
-                                                .join("data")
-                                                .join(filename);
-                                            if cached_path.exists() {
-                                                local_files.push(
-                                                    cached_path.to_string_lossy().to_string(),
-                                                );
-                                            } else {
-                                                // Not cached, will use S3 (slow but works)
-                                                s3_files.push(path.clone());
-                                            }
-                                        } else {
-                                            s3_files.push(path.clone());
-                                        }
-                                    } else {
-                                        // Already a local path
-                                        if std::path::Path::new(path).exists() {
-                                            local_files.push(path.clone());
-                                        }
-                                    }
-                                }
-
-                                // Prefer local cache. If no local files exist, fall back to S3/HTTP paths.
-                                let (files_to_use, skipped_s3_count, using_remote) =
-                                    if !local_files.is_empty() {
-                                        let skipped = s3_files.len();
-                                        (local_files, skipped, false)
-                                    } else {
-                                        (s3_files, 0, true)
-                                    };
-
-                                if !files_to_use.is_empty() {
-                                    let file_list = files_to_use
-                                        .iter()
-                                        .map(|path| format!("'{}'", escape_sql_literal(path)))
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    let used_count = files_to_use.len();
-                                    if using_remote {
-                                        info!(
-                                            "Using {} remote files for iceberg_{} (no local cache available)",
-                                            used_count, kind
-                                        );
-                                    } else {
-                                        info!(
-                                            "Using {} local cached files for iceberg_{} (skipped {} S3 files)",
-                                            used_count, kind, skipped_s3_count
-                                        );
-                                    }
-                                    let committed_view = format!(
-                                        "CREATE OR REPLACE TEMP VIEW {vc} AS \
-                                         SELECT * FROM read_parquet([{files}]);",
-                                        vc = vc,
-                                        files = file_list,
-                                    );
-                                    conn.execute_batch(&committed_view)?;
-                                    self.create_legacy_iceberg_alias(conn, kind)?;
-                                    return Ok(source.clone());
-                                } else {
-                                    warn!("No local files available for iceberg_{}, falling back to S3 (slow)", kind);
-                                }
-                            } else {
-                                warn!("data_files.json for {} is empty", kind);
-                            }
-                        } else {
-                            warn!(
-                                "Failed to parse data_files.json for {}: {:?}",
-                                kind, data_files_path
-                            );
-                        }
-                    } else {
-                        warn!(
-                            "Failed to read data_files.json for {}: {:?}",
-                            kind, data_files_path
-                        );
-                    }
-                } else {
-                    debug!(
-                        "data_files_path is None for committed_{}, falling back to iceberg_scan metadata path",
-                        kind
-                    );
-                }
-                // Check if metadata_path is a local file path (not S3/HTTP)
-                // iceberg_scan doesn't work with local paths, so we need to fall back
-                if !metadata_path.contains("://") {
-                    // Local metadata path - iceberg_scan won't work, fall back to catalog or S3
-                    warn!("Pinned metadata has local path but iceberg_scan requires remote path for {}: {}", table_name, metadata_path);
-                    let fallback = if self.use_attached_catalog() {
-                        IcebergSource::Catalog
-                    } else {
-                        IcebergSource::ScanUri(self.iceberg_table_uri(table_name))
-                    };
-                    return self.create_iceberg_view(conn, kind, table_name, &fallback);
-                }
-
-                let mut options = vec![
-                    "mode := 'metadata'".to_string(),
-                    "allow_moved_paths := true".to_string(),
-                ];
-                if let Some(snapshot_id) = snapshot_id {
-                    options.push(format!("snapshot_from_id := {}", snapshot_id));
-                }
-                if let Some(codec) = compression {
-                    options.push(format!("metadata_compression_codec := '{}'", codec));
-                }
-                let escaped_uri = escape_sql_literal(metadata_path);
-                let with_mode_sql = format!(
-                    "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM iceberg_scan('{uri}', {options});",
-                    vc = vc,
-                    uri = escaped_uri,
-                    options = options.join(", "),
-                );
-                if let Err(err) = conn.execute_batch(&with_mode_sql) {
-                    let err_msg = err.to_string();
-                    if err_msg.contains("Unimplemented option mode") {
-                        if !PINNED_MODE_OPTION_WARNED.swap(true, Ordering::Relaxed) {
-                            warn!(
-                                "Pinned metadata view uses unsupported iceberg_scan mode option; retrying without mode for {}",
-                                table_name
-                            );
-                        } else {
-                            debug!(
-                                "Retrying pinned metadata view without iceberg_scan mode option for {}",
-                                table_name
-                            );
-                        }
-                        options.retain(|opt| !opt.starts_with("mode :="));
-                        let without_mode_sql = format!(
-                            "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM iceberg_scan('{uri}', {options});",
-                            vc = vc,
-                            uri = escaped_uri,
-                            options = options.join(", "),
-                        );
-                        match conn.execute_batch(&without_mode_sql) {
-                            Ok(()) => {
-                                self.create_legacy_iceberg_alias(conn, kind)?;
-                                return Ok(source.clone());
-                            }
-                            Err(retry_err) => {
-                                warn!(
-                                    "Pinned metadata view retry without mode also failed for {}: {}",
-                                    table_name, retry_err
-                                );
-                            }
-                        }
-                    }
-                    warn!("Pinned metadata view failed for {}: {}", table_name, err);
-                    let fallback = if self.use_attached_catalog() {
-                        IcebergSource::Catalog
-                    } else {
-                        IcebergSource::ScanUri(self.iceberg_table_uri(table_name))
-                    };
-                    return self.create_iceberg_view(conn, kind, table_name, &fallback);
-                }
-                self.create_legacy_iceberg_alias(conn, kind)?;
-                Ok(source.clone())
-            }
-            IcebergSource::Catalog => {
-                self.attach_catalog_if_needed(conn)?;
-                let alias = self.catalog_alias();
-                let schema = self.catalog_schema();
-                let committed_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM {alias}.{ns}.{table};",
-                    vc = vc,
-                    alias = alias,
-                    ns = schema,
-                    table = table_name,
-                );
-                match conn.execute_batch(&committed_view) {
-                    Ok(()) => {
-                        self.create_legacy_iceberg_alias(conn, kind)?;
-                        Ok(source.clone())
-                    }
-                    Err(err) => {
-                        let error_msg = err.to_string();
-                        let alt_view = format!(
-                            "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM {alias}.{table};",
-                            vc = vc,
-                            alias = alias,
-                            table = table_name,
-                        );
-                        if conn.execute_batch(&alt_view).is_ok() {
-                            self.create_legacy_iceberg_alias(conn, kind)?;
-                            return Ok(source.clone());
-                        }
-                        // Provide helpful error message if table doesn't exist
-                        if error_msg.contains("does not exist")
-                            || error_msg.contains("Catalog")
-                            || (error_msg.contains("Table") && error_msg.contains("not found"))
-                        {
-                            // Before the first optimizer commit, DuckLake tables might not exist yet.
-                            // Build an empty committed view with the staged schema to keep union-read working.
-                            let staged_files = self.staged_files(kind);
-                            if let Some(first_file) = staged_files.first() {
-                                let empty_view = format!(
-                                    "CREATE OR REPLACE TEMP VIEW {vc} AS \
-                                     SELECT * FROM read_parquet('{path}') WHERE 1=0;",
-                                    vc = vc,
-                                    path = escape_sql_literal(first_file),
-                                );
-                                conn.execute_batch(&empty_view)?;
-                                self.create_legacy_iceberg_alias(conn, kind)?;
-                                return Ok(IcebergSource::Stub(first_file.clone()));
-                            }
-                            Err(anyhow!(
-                                "Iceberg table '{}.{}.{}' does not exist in catalog. \
-                                 This usually means:\n\
-                                 1. No data has been ingested and flushed to Iceberg yet, or\n\
-                                 2. The table name/namespace is incorrect, or\n\
-                                 3. The catalog connection failed\n\
-                                 \n\
-                                 To fix: Ensure data has been ingested and flushed to Iceberg tables. \
-                                 Check that the ingest pipeline is running and data is being written.\n\
-                                 \n\
-                                 Original error: {}",
-                                CATALOG_ALIAS,
-                                self.catalog_schema().as_str(),
-                                table_name,
-                                error_msg
-                            ))
-                        } else {
-                            Err(anyhow!(
-                                "Failed to create iceberg view for {}: {}",
-                                table_name,
-                                err
-                            ))
-                        }
-                    }
-                }
-            }
-            IcebergSource::ScanUri(uri) => {
-                let committed_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM iceberg_scan('{uri}', allow_moved_paths := true);",
-                    vc = vc,
-                    uri = escape_sql_literal(uri),
-                );
-                conn.execute_batch(&committed_view)?;
-                self.create_legacy_iceberg_alias(conn, kind)?;
-                Ok(source.clone())
-            }
-            IcebergSource::Stub(path) => {
-                let committed_view = format!(
-                    "CREATE OR REPLACE TEMP VIEW {vc} AS SELECT * FROM read_parquet('{path}');",
-                    vc = vc,
-                    path = escape_sql_literal(path),
-                );
-                conn.execute_batch(&committed_view)?;
-                self.create_legacy_iceberg_alias(conn, kind)?;
-                Ok(source.clone())
-            }
-        }
-    }
-
-    fn create_legacy_iceberg_alias(&self, conn: &Connection, kind: &str) -> Result<()> {
-        let (vc, _, _, v_ice) = telemetry_view_names(kind);
-        conn.execute_batch(&format!(
-            "CREATE OR REPLACE TEMP VIEW {v_ice} AS SELECT * FROM {vc};",
-            v_ice = v_ice,
-            vc = vc,
-        ))?;
-        Ok(())
-    }
-
-    fn stub_signature(&self, path: &str) -> Result<String> {
-        let modified = std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339())
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(format!("stub:{}:{}", path, modified))
-    }
-
     fn staged_files(&self, kind: &str) -> Vec<String> {
         let mut files = match self.tiered_storage.list_staged_files(kind) {
             Ok(files) => files,
@@ -1506,103 +965,16 @@ impl DuckDBCore {
             .collect()
     }
 
-    fn iceberg_pinned_metadata(&self, table: &str) -> Option<PinnedMetadata> {
-        let cache_dir = self.cache_dir()?;
-        let pointer_path = cache_dir
-            .join("iceberg_metadata")
-            .join(format!("{table}.json"));
-        if !pointer_path.exists() {
-            debug!("Pinned metadata file not found: {:?}", pointer_path);
-            return None;
-        }
-        let contents = std::fs::read_to_string(&pointer_path).ok()?;
-        #[derive(serde::Deserialize)]
-        struct Pointer {
-            metadata_file: Option<String>,
-            metadata_location: Option<String>,
-            snapshot_id: Option<i64>,
-            data_files_path: Option<String>,
-        }
-        let pointer: Pointer = serde_json::from_str(&contents).ok()?;
-        let pointer_modified = std::fs::metadata(&pointer_path)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339())
-            .unwrap_or_else(|| "unknown".to_string());
-        let mut metadata_path = None;
-        if let Some(metadata_file) = pointer.metadata_file.as_ref() {
-            let local_path = cache_dir
-                .join("iceberg_metadata")
-                .join(table)
-                .join("metadata")
-                .join(metadata_file);
-            if local_path.exists() {
-                metadata_path = Some(local_path.to_string_lossy().to_string());
-            }
-        }
-        if metadata_path.is_none() {
-            metadata_path = pointer.metadata_location;
-        }
-        let metadata_path = metadata_path?;
-        let compression =
-            if metadata_path.ends_with(".gz.metadata.json") || metadata_path.ends_with(".gz") {
-                Some("gzip".to_string())
-            } else {
-                None
-            };
-        let data_files_modified = pointer
-            .data_files_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .and_then(|metadata| metadata.modified().ok())
-            .map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339())
-            .unwrap_or_else(|| "unknown".to_string());
-        let signature = format!(
-            "pinned:{}:{:?}:{:?}:{}:{}",
-            metadata_path, pointer.snapshot_id, compression, pointer_modified, data_files_modified
-        );
-        Some(PinnedMetadata {
-            metadata_path,
-            snapshot_id: pointer.snapshot_id,
-            compression,
-            signature,
-            data_files_path: pointer.data_files_path,
-        })
-    }
-
-    fn iceberg_table_uri(&self, table: &str) -> String {
-        let warehouse = self.config.iceberg.warehouse.trim_end_matches('/');
-        if warehouse.contains("://") {
-            format!(
-                "{}/{}/{}",
-                warehouse,
-                self.config.iceberg.namespace.as_str(),
-                table
-            )
-        } else {
-            let bucket = self.config.ingest_engine.wal_bucket.trim_end_matches('/');
-            format!("s3://{}/{}/{}", bucket, warehouse, table)
-        }
-    }
-
     fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
         self.config.ducklake_or_default()
     }
 
     fn catalog_alias(&self) -> String {
-        if self.config.ducklake.is_some() {
-            self.ducklake_config().catalog_alias
-        } else {
-            CATALOG_ALIAS.to_string()
-        }
+        self.ducklake_config().catalog_alias
     }
 
     fn catalog_schema(&self) -> String {
-        if self.config.ducklake.is_some() {
-            self.ducklake_config().metadata_schema
-        } else {
-            self.config.iceberg.namespace.clone()
-        }
+        self.ducklake_config().metadata_schema
     }
 }
 

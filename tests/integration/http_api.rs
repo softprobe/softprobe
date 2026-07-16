@@ -31,7 +31,9 @@ async fn build_router_and_state() -> (Router, AppState, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
     let config = Arc::new(config);
-    let app = AppPipeline::new(config.as_ref()).await.expect("app pipeline");
+    let app = AppPipeline::new(config.as_ref())
+        .await
+        .expect("app pipeline");
     let (router, state) = softprobe_runtime::api::create_router(
         config.clone(),
         app.storage,
@@ -436,7 +438,11 @@ async fn telemetry_search_sessions_returns_summary_rows() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine.ingest.force_flush_spans().await.expect("flush spans");
+    engine
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
 
     let body = json!({
         "version": 1,
@@ -508,9 +514,17 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
     }
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine.ingest.force_flush_spans().await.expect("flush spans");
+    engine
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
     engine.ingest.force_flush_logs().await.expect("flush logs");
-    engine.ingest.force_flush_metrics().await.expect("flush metrics");
+    engine
+        .ingest
+        .force_flush_metrics()
+        .await
+        .expect("flush metrics");
 
     let req = Request::builder()
         .uri(format!(

@@ -1,7 +1,9 @@
 # HTTP Body Storage & Business Attribute Indexing Design
 
+> **Historical / pre-DuckLake.** Runtime durable storage is DuckLake. See [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md) and ADR-014 in [decision_log.md](decision_log.md). Iceberg-foundation sections below are retained for history.
+
 **Date**: 2025-12-31
-**Status**: Brainstorming / Design Discussion
+**Status**: Historical (brainstorming / design discussion)
 **Purpose**: Explore options for storing HTTP request/response bodies and enabling efficient search by business attributes
 
 > **Strategic Context**: This design directly supports [Softprobe's business vision](goals.md) of building an AI-ready enterprise data lake. HTTP body storage is **Phase 1** of our broader strategy to capture all business data for LLM-based AI agents.

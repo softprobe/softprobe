@@ -1,3 +1,5 @@
+# LEGACY Iceberg/Lakekeeper deploy sections remain below; prefer DuckLake (ducklake-postgres + data_path).
+# See docs/iceberg-legacy-cleanup.md.
 #!/bin/bash
 # AWS Benchmark Setup Script
 #

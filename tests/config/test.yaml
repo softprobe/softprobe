@@ -37,11 +37,10 @@ s3:
   access_key_id: minioadmin
   secret_access_key: minioadmin
 
-iceberg:
-  catalog_type: rest
-  catalog_uri: http://localhost:8181/catalog
-  warehouse: default  # Lakekeeper warehouse name
-  write_target_file_size_bytes: 67108864
-  write_row_group_size_bytes: 134217728
-  write_page_size_bytes: 1048576
-  force_close_after_append: true
+ducklake:
+  catalog_type: duckdb
+  metadata_path: /tmp/softprobe-test-ducklake/metadata.ducklake
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: main
+  data_inlining_row_limit: 0

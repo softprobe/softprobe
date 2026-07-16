@@ -1,7 +1,9 @@
-use crate::util::iceberg::{ensure_wal_bucket, load_test_config, warn_if_minio_unresolvable};
 use crate::util::perf::{PerformanceMetrics, Timer};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
+use crate::util::storage_config::{
+    ensure_wal_bucket, load_test_config, warn_if_minio_unresolvable,
+};
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
@@ -17,62 +19,11 @@ async fn build_test_pipeline(mut config: Config) -> TestPipeline {
 }
 
 #[tokio::test]
-async fn test_iceberg_writer_initialization() {
-    let config = load_test_config();
-    if config.ducklake.is_some() {
-        // Under DuckLake migration, this Iceberg-specific initialization test is not applicable.
-        return;
-    }
-
-    println!("Testing with catalog URI: {}", config.iceberg.catalog_uri);
-
-    // Performance tracking: measure initialization time
-    let timer = Timer::start("Iceberg Writer Initialization");
-
-    // Test that the Iceberg writer can be initialized with real REST catalog
-    let result = softprobe_runtime::storage::iceberg::IcebergWriter::new(&config).await;
-
-    let init_duration = timer.stop();
-
-    match result {
-        Ok(_) => {
-            println!("✅ Iceberg writer initialized successfully with REST catalog");
-
-            // Report initialization performance
-            let metrics = PerformanceMetrics::new("Writer Initialization")
-                .with_duration(init_duration)
-                .with_rows(0);
-            metrics.print_report();
-
-            // Assert initialization is reasonably fast (should be < 5 seconds for catalog connection)
-            metrics.assert_performance_target(5000, "Initialization time");
-        }
-        Err(e) => {
-            println!("❌ Iceberg writer failed to initialize: {}", e);
-
-            // Print full error chain to see the REAL error (anyhow provides chain())
-            println!("\n🔍 Full error chain:");
-            for (i, cause) in e.chain().enumerate() {
-                if i == 0 {
-                    println!("  Error: {}", cause);
-                } else {
-                    println!("  {}. Caused by: {}", i, cause);
-                }
-            }
-
-            // If this fails, it means either the catalog is not running or there's a real issue
-            panic!("Expected Iceberg writer to initialize successfully with local REST catalog");
-        }
-    }
-}
-
-#[tokio::test]
 async fn test_config_loading() {
-    // Test that test config can be loaded and has valid iceberg section
     let config = load_test_config();
     assert!(
-        !config.iceberg.catalog_uri.is_empty(),
-        "Catalog URI should not be empty"
+        config.ducklake.is_some(),
+        "DuckLake config should be present for local e2e"
     );
     assert_eq!(
         config.span_buffering.max_buffer_spans, 1,
@@ -712,7 +663,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with logs to test multi-session row groups
-    let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
+    let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     let (num_sessions, logs_per_session) = if test_type == "r2" {
         (2, 200)
     } else {
@@ -773,7 +724,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 resource_attributes,
                 trace_id,
                 span_id,
-                });
+            });
         }
     }
 
@@ -951,7 +902,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
                 value,
                 attributes,
                 resource_attributes,
-                });
+            });
         }
         all_metric_batches.push(metric_data_points);
         expected_sums.push(expected_sum);
@@ -1536,156 +1487,15 @@ async fn test_wal_replay_recovers_spans() {
 
 #[tokio::test]
 async fn test_metadata_maintenance_job_expires_snapshots() {
-    use chrono::{Duration as ChronoDuration, Utc};
-    use iceberg::{Catalog, TableCreation, TableIdent};
-    use softprobe_runtime::compaction::executor::{
-        ActionStatus, CompactionStatus, MaintenanceExecutor,
-    };
-    use softprobe_runtime::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
-    use std::collections::HashMap;
+    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
 
-    let mut config = load_test_config();
-    if config.ducklake.is_some() {
-        let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
-        let _ = executor.run_once().await.unwrap();
-        return;
-    }
-    ensure_wal_bucket(&mut config);
-    config.compaction.enabled = true;
-    config.compaction.min_files_to_compact = 1;
-    config.compaction.metadata_maintenance_enabled = true;
-    config.compaction.metadata_min_snapshots_to_keep = 1;
-    config.compaction.metadata_max_snapshot_age_seconds = 0;
-
-    let catalog = IcebergCatalog::new(&config).await.expect("catalog");
-    let namespace = iceberg::NamespaceIdent::from_strs([config.iceberg.namespace.as_str()])
-        .expect("namespace ident");
-    let _ = catalog
-        .catalog()
-        .create_namespace(&namespace, HashMap::new())
-        .await;
-
-    let table_name = format!("traces_maintenance_{}", uuid::Uuid::new_v4().simple());
-    let table_ident =
-        TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
-            .expect("table ident");
-
-    let schema = TraceTable::schema();
-    let partition_spec = TraceTable::partition_spec(&schema).unwrap();
-    let sort_order = TraceTable::sort_order(&schema).unwrap();
-    let properties = TraceTable::table_properties();
-    let creation = TableCreation::builder()
-        .name(table_name.clone())
-        .schema(schema)
-        .partition_spec(partition_spec)
-        .sort_order(sort_order)
-        .properties(properties)
-        .build();
-    catalog
-        .catalog()
-        .create_table(&namespace, creation)
-        .await
-        .unwrap();
-
-    let writer = TableWriter::new(catalog.catalog().clone(), table_ident.clone());
-    let base_time = Utc::now();
-    for offset in 0..3 {
-        let timestamp = base_time + ChronoDuration::seconds(offset);
-        let span = SpanData {
-            session_id: format!("maint-{}", offset),
-            trace_id: format!("trace-{}", offset),
-            span_id: format!("span-{}", offset),
-            parent_span_id: None,
-            app_id: "app-test".to_string(),
-            organization_id: None,
-            tenant_id: None,
-            message_type: "span".to_string(),
-            span_kind: Some("server".to_string()),
-            timestamp,
-            end_timestamp: Some(timestamp + ChronoDuration::seconds(1)),
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-            events: Vec::new(),
-            http_request_method: None,
-            http_request_path: None,
-            http_request_headers: None,
-            http_request_body: None,
-            http_response_status_code: None,
-            http_response_headers: None,
-            http_response_body: None,
-            status_code: Some("OK".to_string()),
-            status_message: None,
-        };
-        writer
-            .write_batches(vec![vec![span]], SpanData::to_record_batch)
-            .await
-            .unwrap();
-    }
-
-    let table_before = catalog.catalog().load_table(&table_ident).await.unwrap();
-    let snapshot_count_before = table_before.metadata().snapshots().count();
+    let config = load_test_config();
     assert!(
-        snapshot_count_before >= 3,
-        "expected at least 3 snapshots, found {}",
-        snapshot_count_before
+        config.ducklake.is_some(),
+        "DuckLake required for maintenance smoke"
     );
-
     let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
-    let summary = executor
-        .run_once_for_tables(&[table_ident.clone()])
-        .await
-        .unwrap();
-    let result = summary.tables.first().unwrap();
-    assert!(
-        result.metadata.expired_snapshots >= 2,
-        "expected at least 2 snapshots expired, found {}",
-        result.metadata.expired_snapshots
-    );
-    assert!(
-        matches!(
-            result.compaction.status,
-            CompactionStatus::Completed | CompactionStatus::Unsupported
-        ),
-        "unexpected compaction status"
-    );
-    assert!(
-        matches!(
-            result.rewrite_manifests.status,
-            ActionStatus::Completed | ActionStatus::Unsupported
-        ),
-        "unexpected rewrite manifests status"
-    );
-    let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
-    if is_r2 {
-        // Cloudflare R2 Data Catalog: orphan file cleanup is not supported yet.
-        // See: https://developers.cloudflare.com/r2/data-catalog/table-maintenance/
-        assert!(
-            matches!(result.remove_orphan_files.status, ActionStatus::Unsupported),
-            "expected remove orphan files to be Unsupported on R2"
-        );
-    } else {
-        assert!(
-            matches!(
-                result.remove_orphan_files.status,
-                ActionStatus::Completed | ActionStatus::Unsupported
-            ),
-            "unexpected remove orphan files status"
-        );
-    }
-
-    wait_for(
-        Duration::from_secs(5),
-        Duration::from_millis(200),
-        || async {
-            let table_after = catalog.catalog().load_table(&table_ident).await?;
-            let remaining = table_after.metadata().snapshots().count();
-            Ok(remaining <= config.compaction.metadata_min_snapshots_to_keep)
-        },
-    )
-    .await
-    .expect("snapshots should be expired down to configured minimum");
-
-    let _ = catalog.catalog().drop_table(&table_ident).await;
+    let _ = executor.run_once().await.unwrap();
 }
 
 #[tokio::test]

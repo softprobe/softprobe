@@ -1,6 +1,5 @@
 pub mod buffer;
 pub mod ducklake;
-pub mod iceberg;
 pub mod schema;
 pub mod transaction;
 
@@ -32,7 +31,7 @@ pub trait TieredStorage: Send + Sync {
     fn staged_watermark_signature(&self, kind: &str) -> String;
 }
 
-/// Storage components for buffer + staged + Iceberg access.
+/// Storage components for buffer + DuckLake durable commit.
 #[derive(Clone)]
 pub struct Storage {
     pub writer: Arc<DuckLakeWriter>,
@@ -86,7 +85,7 @@ impl TieredStorage for Storage {
     }
 }
 
-/// Create span buffer with Iceberg writer as flush callback
+/// Create span buffer with DuckLake writer as flush callback
 pub async fn create_span_buffer(
     config: &Config,
     pre_add_callback: Option<Arc<PreAddCallback<Span>>>,
@@ -100,7 +99,7 @@ pub async fn create_span_buffer(
     ))
 }
 
-/// Create log buffer with Iceberg writer as flush callback
+/// Create log buffer with DuckLake writer as flush callback
 pub async fn create_log_buffer(
     config: &Config,
     pre_add_callback: Option<Arc<PreAddCallback<Log>>>,
@@ -114,7 +113,7 @@ pub async fn create_log_buffer(
     ))
 }
 
-/// Create metric buffer with Iceberg writer as flush callback
+/// Create metric buffer with DuckLake writer as flush callback
 pub async fn create_metric_buffer(
     config: &Config,
     pre_add_callback: Option<Arc<PreAddCallback<Metric>>>,

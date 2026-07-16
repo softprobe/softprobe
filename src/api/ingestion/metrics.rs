@@ -105,24 +105,25 @@ pub async fn ingest_metrics(
     // Protobuf
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
-            Ok(request) => match process_metrics(state, request, body_size, tenant_info.clone()).await
-            {
-                Ok(count) => Json(IngestResponse {
-                    success: true,
-                    ingested_count: count,
-                    message: format!("Successfully ingested {} metric data points", count),
-                })
-                .into_response(),
-                Err(e) => {
-                    error!("Failed to process OTLP metrics: {}", e);
-                    Json(IngestResponse {
-                        success: false,
-                        ingested_count: 0,
-                        message: format!("Ingestion failed: {}", e),
+            Ok(request) => {
+                match process_metrics(state, request, body_size, tenant_info.clone()).await {
+                    Ok(count) => Json(IngestResponse {
+                        success: true,
+                        ingested_count: count,
+                        message: format!("Successfully ingested {} metric data points", count),
                     })
-                    .into_response()
+                    .into_response(),
+                    Err(e) => {
+                        error!("Failed to process OTLP metrics: {}", e);
+                        Json(IngestResponse {
+                            success: false,
+                            ingested_count: 0,
+                            message: format!("Ingestion failed: {}", e),
+                        })
+                        .into_response()
+                    }
                 }
-            },
+            }
             Err(e) => {
                 error!("Failed to decode protobuf: {}", e);
                 (StatusCode::BAD_REQUEST, "Invalid protobuf").into_response()
@@ -131,24 +132,25 @@ pub async fn ingest_metrics(
     } else {
         // JSON (application/json)
         match serde_json::from_slice::<ExportMetricsServiceRequest>(&body) {
-            Ok(request) => match process_metrics(state, request, body_size, tenant_info.clone()).await
-            {
-                Ok(count) => Json(IngestResponse {
-                    success: true,
-                    ingested_count: count,
-                    message: format!("Successfully ingested {} metric data points", count),
-                })
-                .into_response(),
-                Err(e) => {
-                    error!("Failed to process OTLP metrics: {}", e);
-                    Json(IngestResponse {
-                        success: false,
-                        ingested_count: 0,
-                        message: format!("Ingestion failed: {}", e),
+            Ok(request) => {
+                match process_metrics(state, request, body_size, tenant_info.clone()).await {
+                    Ok(count) => Json(IngestResponse {
+                        success: true,
+                        ingested_count: count,
+                        message: format!("Successfully ingested {} metric data points", count),
                     })
-                    .into_response()
+                    .into_response(),
+                    Err(e) => {
+                        error!("Failed to process OTLP metrics: {}", e);
+                        Json(IngestResponse {
+                            success: false,
+                            ingested_count: 0,
+                            message: format!("Ingestion failed: {}", e),
+                        })
+                        .into_response()
+                    }
                 }
-            },
+            }
             Err(_) => (StatusCode::BAD_REQUEST, "Invalid JSON").into_response(),
         }
     }

@@ -1,5 +1,5 @@
-# Cloudflare R2 Iceberg Catalog Test Configuration
-# This configuration uses Cloudflare R2's native Iceberg catalog support
+# Cloudflare R2 object-store test configuration for DuckLake data_path
+# R2 is used as S3-compatible storage; catalog is DuckLake (not Iceberg REST)
 #
 # Setup instructions:
 # 1. Create R2 bucket: npx wrangler r2 bucket create your-bucket-name
@@ -50,17 +50,3 @@ s3:
   access_key_id: "f4264a811928d7649cdd426f55fa3091"
   secret_access_key: "f46ba8076875f179cacb191cc96c6ff608654de54c744e692b2aba011a62662a"
 
-iceberg:
-  catalog_type: "rest"
-  # Cloudflare R2 Iceberg Catalog URI
-  catalog_uri: "https://catalog.cloudflarestorage.com/fb4b299688885a31058d94ee11ee1129/r2-data-catalog-tutorial"
-  # API Token for catalog authentication (Bearer token)
-  catalog_token: "tKMkVh6ytpX0Ca33E2vpQemi8dsIMB6ag7wQRx58"
-  # Warehouse identifier from Cloudflare
-  warehouse: "fb4b299688885a31058d94ee11ee1129_r2-data-catalog-tutorial"
-  # Write settings
-  write_target_file_size_bytes: 67108864  # 64MB
-  write_row_group_size_bytes: 134217728  # 128MB
-  write_page_size_bytes: 1048576  # 1MB
-  # Force immediate commits for testing
-  force_close_after_append: true

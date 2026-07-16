@@ -12,13 +12,13 @@ use crate::promotion::{
     BusinessTableManifest, PromotionColumn, TelemetryColumnsManifest, TelemetryPromotionEvent,
     TelemetryPromotionRow, TelemetryTable,
 };
-use crate::storage::iceberg::arrow;
-use crate::storage::iceberg::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
-use crate::runtime_engine::{DuckLakeScopeResolver, DuckLakeScope};
+use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::storage::schema::arrow;
+use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
+use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
 use duckdb::{Connection, ToSql};
-use iceberg::spec::Schema as IcebergSchema;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
@@ -332,7 +332,10 @@ impl DuckLakeWriter {
                 data_path: String::new(),
             });
             let manifests = if scope.metadata_schema.is_empty() {
-                resolver.load_active_telemetry_columns_manifests("").await?.1
+                resolver
+                    .load_active_telemetry_columns_manifests("")
+                    .await?
+                    .1
             } else {
                 resolver
                     .load_active_telemetry_columns_manifests_for_scope(&scope)
@@ -349,7 +352,8 @@ impl DuckLakeWriter {
                 record_batches.push(arrow::logs_to_record_batch(&batch, schema.as_ref())?);
             }
         }
-        self.write_record_batches_internal("logs", record_batches).await
+        self.write_record_batches_internal("logs", record_batches)
+            .await
     }
 
     async fn write_tenant_metric_batches(
@@ -383,7 +387,10 @@ impl DuckLakeWriter {
                 data_path: String::new(),
             });
             let manifests = if scope.metadata_schema.is_empty() {
-                resolver.load_active_telemetry_columns_manifests("").await?.1
+                resolver
+                    .load_active_telemetry_columns_manifests("")
+                    .await?
+                    .1
             } else {
                 resolver
                     .load_active_telemetry_columns_manifests_for_scope(&scope)
@@ -536,21 +543,21 @@ impl DuckLakeWriter {
             TelemetryTable::Logs => ("logs", OtlpLogsTable::schema()),
             TelemetryTable::Metrics => ("metrics", OtlpMetricsTable::schema()),
         };
-        let arrow_schema = Arc::new(::arrow::datatypes::Schema::try_from(&schema)?);
+        let arrow_schema = Arc::new(schema);
         let batch = RecordBatch::new_empty(arrow_schema);
         self.write_record_batches_internal_with_ducklake(dk, table_name, vec![batch])
             .await
     }
 
-    pub async fn spans_schema(&self) -> Result<Arc<IcebergSchema>> {
+    pub async fn spans_schema(&self) -> Result<Arc<Schema>> {
         Ok(Arc::new(TraceTable::schema()))
     }
 
-    pub async fn logs_schema(&self) -> Result<Arc<IcebergSchema>> {
+    pub async fn logs_schema(&self) -> Result<Arc<Schema>> {
         Ok(Arc::new(OtlpLogsTable::schema()))
     }
 
-    pub async fn metrics_schema(&self) -> Result<Arc<IcebergSchema>> {
+    pub async fn metrics_schema(&self) -> Result<Arc<Schema>> {
         Ok(Arc::new(OtlpMetricsTable::schema()))
     }
 
@@ -810,7 +817,7 @@ impl DuckLakeWriter {
         let Some(cache_dir) = self.cache_dir.as_ref() else {
             return Ok(());
         };
-        let metadata_dir = cache_dir.join("iceberg_metadata");
+        let metadata_dir = cache_dir.join("catalog_metadata");
         std::fs::create_dir_all(&metadata_dir)?;
         let pointer_path = metadata_dir.join(format!("{table_name}.json"));
         let mut next_snapshot = chrono::Utc::now().timestamp_millis();
@@ -978,7 +985,7 @@ mod tests {
 
         let schema = writer.spans_schema().await.expect("schema");
         assert!(
-            schema.field_by_name("division_name").is_none(),
+            schema.field_with_name("division_name").is_err(),
             "promoted telemetry columns come from runtime-scoped promotion apply, not process config"
         );
     }
