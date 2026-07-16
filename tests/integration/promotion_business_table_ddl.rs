@@ -85,7 +85,6 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     ducklake.data_inlining_row_limit = Some(0);
     config.ducklake = Some(ducklake);
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().to_string());
 
     let resolver = DuckLakeScopeResolver::connect(&config)
         .await

@@ -5,7 +5,6 @@ use std::net::IpAddr;
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
-    pub span_buffering: SpanBufferConfig,
     pub ingest_engine: IngestEngineConfig,
     pub compaction: CompactionConfig,
     pub duckdb: DuckDBConfig,
@@ -74,48 +73,22 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanBufferConfig {
-    pub max_buffer_bytes: usize,     // 128MB - hard limit on buffer size
-    pub max_buffer_spans: usize,     // 1000 - alternative span count limit
-    pub flush_interval_seconds: u64, // 60 - flush every minute
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestEngineConfig {
-    #[serde(default = "default_wal_bucket")]
-    pub wal_bucket: String,
-    #[serde(default = "default_wal_prefix")]
-    pub wal_prefix: String,
     #[serde(default = "default_ingest_cache_dir")]
     pub cache_dir: Option<String>,
-    #[serde(default = "default_wal_dir")]
-    pub wal_dir: Option<String>,
-    #[serde(default = "default_wal_manifest_update_interval_seconds")]
-    pub wal_manifest_update_interval_seconds: u64,
-    #[serde(default = "default_wal_manifest_max_pending_files")]
-    pub wal_manifest_max_pending_files: usize,
-    #[serde(default = "default_optimizer_interval_seconds")]
-    pub optimizer_interval_seconds: u64,
-    #[serde(default)]
-    pub replay_wal_on_startup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     pub enabled: bool,
-    pub min_files_to_compact: usize,      // 5
     pub target_file_size_bytes: usize,    // 64MB
     pub compaction_interval_seconds: u64, // 3600 (1 hour)
     #[serde(default = "default_metadata_maintenance_enabled")]
     pub metadata_maintenance_enabled: bool,
     #[serde(default = "default_metadata_maintenance_interval_seconds")]
     pub metadata_maintenance_interval_seconds: u64,
-    #[serde(default = "default_metadata_min_snapshots_to_keep")]
-    pub metadata_min_snapshots_to_keep: usize,
     #[serde(default = "default_metadata_max_snapshot_age_seconds")]
     pub metadata_max_snapshot_age_seconds: u64,
-    #[serde(default = "default_metadata_rewrite_manifests_enabled")]
-    pub metadata_rewrite_manifests_enabled: bool,
     #[serde(default = "default_metadata_remove_orphan_files_enabled")]
     pub metadata_remove_orphan_files_enabled: bool,
     #[serde(default = "default_metadata_remove_orphan_older_than_seconds")]
@@ -150,7 +123,7 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
-    #[serde(default)]
+    #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
 }
 
@@ -174,52 +147,24 @@ fn default_ducklake_metadata_schema() -> String {
     "main".to_string()
 }
 
+fn default_data_inlining_row_limit() -> Option<u64> {
+    Some(10_000)
+}
+
 fn default_metadata_maintenance_enabled() -> bool {
     true
-}
-
-fn default_wal_bucket() -> String {
-    "warehouse".to_string()
-}
-
-fn default_wal_prefix() -> String {
-    "wal".to_string()
 }
 
 fn default_ingest_cache_dir() -> Option<String> {
     Some("/var/tmp/softprobe/duckdb".to_string())
 }
 
-fn default_wal_dir() -> Option<String> {
-    default_ingest_cache_dir()
-}
-
-fn default_wal_manifest_update_interval_seconds() -> u64 {
-    10
-}
-
-fn default_wal_manifest_max_pending_files() -> usize {
-    500
-}
-
-fn default_optimizer_interval_seconds() -> u64 {
-    300
-}
-
 fn default_metadata_maintenance_interval_seconds() -> u64 {
     3600
 }
 
-fn default_metadata_min_snapshots_to_keep() -> usize {
-    5
-}
-
 fn default_metadata_max_snapshot_age_seconds() -> u64 {
     7 * 24 * 3600
-}
-
-fn default_metadata_rewrite_manifests_enabled() -> bool {
-    true
 }
 
 fn default_metadata_remove_orphan_files_enabled() -> bool {
@@ -242,32 +187,16 @@ impl Default for Config {
             storage: StorageConfig {
                 s3_region: "us-east-1".to_string(),
             },
-            span_buffering: SpanBufferConfig {
-                max_buffer_bytes: 128 * 1024 * 1024, // 128MB
-                max_buffer_spans: 10000,             // 10K spans
-                flush_interval_seconds: 60,
-            },
             ingest_engine: IngestEngineConfig {
-                wal_bucket: "warehouse".to_string(),
-                wal_prefix: "wal".to_string(),
                 cache_dir: default_ingest_cache_dir(),
-                wal_dir: default_wal_dir(),
-                wal_manifest_update_interval_seconds: default_wal_manifest_update_interval_seconds(
-                ),
-                wal_manifest_max_pending_files: default_wal_manifest_max_pending_files(),
-                optimizer_interval_seconds: 300,
-                replay_wal_on_startup: false,
             },
             compaction: CompactionConfig {
                 enabled: true,
-                min_files_to_compact: 5,
                 target_file_size_bytes: 64 * 1024 * 1024, // 64MB
                 compaction_interval_seconds: 3600,
                 metadata_maintenance_enabled: true,
                 metadata_maintenance_interval_seconds: 3600,
-                metadata_min_snapshots_to_keep: 5,
                 metadata_max_snapshot_age_seconds: 7 * 24 * 3600,
-                metadata_rewrite_manifests_enabled: true,
                 metadata_remove_orphan_files_enabled: true,
                 metadata_remove_orphan_older_than_seconds: 3600,
             },
@@ -289,7 +218,7 @@ impl Default for Config {
                 data_path: default_ducklake_data_path(),
                 catalog_alias: default_ducklake_catalog_alias(),
                 metadata_schema: default_ducklake_metadata_schema(),
-                data_inlining_row_limit: Some(0),
+                data_inlining_row_limit: default_data_inlining_row_limit(),
             }),
             dropdown_catalog: DropdownCatalogConfig::default(),
         }
@@ -304,7 +233,7 @@ impl Config {
             data_path: default_ducklake_data_path(),
             catalog_alias: default_ducklake_catalog_alias(),
             metadata_schema: default_ducklake_metadata_schema(),
-            data_inlining_row_limit: Some(0),
+            data_inlining_row_limit: default_data_inlining_row_limit(),
         })
     }
 

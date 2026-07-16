@@ -1,10 +1,9 @@
-use crate::storage::buffer::Bufferable;
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Log domain model - unified representation across all layers
-/// Used for: OTLP ingestion → buffering → DuckLake storage → query results → JSON responses
+/// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
 /// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
 /// (legacy path; Arrow/DuckLake column order).
@@ -41,32 +40,23 @@ pub struct Log {
     // Derived from timestamp at write time in arrow.rs
 }
 
-impl Bufferable for Log {
-    fn partition_key(&self) -> chrono::NaiveDate {
+impl Log {
+    pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
 
-    fn grouping_key(&self) -> String {
-        // Use session_id if available, otherwise "unknown"
+    pub fn grouping_key(&self) -> String {
         self.session_id
             .clone()
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    fn compare_for_sort(&self, other: &Self) -> Ordering {
-        // Sort by session_id first, then timestamp
-        // Sort order matches telemetry table sort keys (session_id, timestamp)
+    pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.session_id
             .cmp(&other.session_id)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
-        self.timestamp
-    }
-}
-
-impl Log {
     /// Convert a batch of Logs to Arrow RecordBatch for DuckLake storage
     pub fn to_record_batch(
         logs: &[Log],
@@ -250,7 +240,6 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::Log;
-    use crate::storage::buffer::Bufferable;
     use chrono::{TimeZone, Utc};
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs};
     use std::cmp::Ordering;

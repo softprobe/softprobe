@@ -1,4 +1,3 @@
-use crate::storage::buffer::Bufferable;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -321,28 +320,19 @@ impl Metric {
     }
 }
 
-impl Bufferable for Metric {
-    /// Partition key based on the date from timestamp
-    fn partition_key(&self) -> chrono::NaiveDate {
+impl Metric {
+    pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
 
-    /// Group by metric_name (NOT session_id - metrics are aggregations)
-    fn grouping_key(&self) -> String {
+    pub fn grouping_key(&self) -> String {
         self.metric_name.clone()
     }
 
-    /// Sort by metric_name first, then timestamp
-    /// This matches telemetry table sort keys (metric_name, timestamp)
-    fn compare_for_sort(&self, other: &Self) -> Ordering {
+    pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.metric_name
             .cmp(&other.metric_name)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
-    }
-
-    /// Return the timestamp for time-based operations
-    fn timestamp(&self) -> DateTime<Utc> {
-        self.timestamp
     }
 }
 

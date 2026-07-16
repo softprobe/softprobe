@@ -15,10 +15,6 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
     config.compaction.enabled = false;
     config.compaction.metadata_maintenance_enabled = false;
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().into_owned());
-    config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().into_owned());
-    config.ingest_engine.optimizer_interval_seconds = 3600;
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.flush_interval_seconds = 3600;
 
     let duck_dir = temp.path().join("ducklake");
     std::fs::create_dir_all(duck_dir.join("data")).expect("ducklake data");
@@ -44,9 +40,6 @@ pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempD
         config.clone(),
         app.storage,
         app.query_engine,
-        Some(app.span_buffer),
-        Some(app.log_buffer),
-        Some(app.metric_buffer),
         post(ingest_traces),
         None,
         None,
@@ -61,7 +54,7 @@ pub async fn local_router() -> anyhow::Result<(Router, TempDir)> {
     Ok((router, temp))
 }
 
-/// [`crate::storage::Storage`] for unit tests that need tiered storage without building a router.
+/// [`crate::storage::Storage`] for unit tests that need storage without building a router.
 pub async fn sample_storage() -> anyhow::Result<(crate::storage::Storage, TempDir)> {
     let temp = TempDir::new()?;
     let config = file_backed_test_config(&temp);

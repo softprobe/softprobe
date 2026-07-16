@@ -11,10 +11,6 @@ server:
 storage:
   s3_region: us-east-1
 
-span_buffering:
-  max_buffer_spans: 1
-  flush_interval_seconds: 1
-
 ingest_engine:
   cache_dir: /tmp/softprobe-shell
 

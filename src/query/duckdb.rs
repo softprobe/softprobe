@@ -2,25 +2,17 @@ use crate::config::Config;
 use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::ducklake_qualified_table_name;
-use crate::storage::schema::arrow::{
-    logs_to_record_batch, metrics_to_record_batch, spans_to_record_batch,
-};
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use duckdb::types::Value as DuckValue;
 use duckdb::{Connection, ToSql};
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub struct DuckDBQueryEngine {
     _shared_connection: Arc<Mutex<Connection>>,
@@ -33,22 +25,8 @@ pub struct DuckDBQueryEngine {
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
 /// When a DuckLake catalog is attached, DuckDB treats identifiers containing substrings like
-/// `union_spans` / `committed_spans` as special. That breaks `TEMP VIEW`s and even derived-table
-/// aliases over native DuckLake tables. The `spb_` prefix is also reserved by DuckLake in this
-/// DuckDB build. Rewrite the public `union_*` / `committed_*` surface to neutral `tm_*` names.
-fn telemetry_view_names(kind: &str) -> (&'static str, &'static str, &'static str, &'static str) {
-    match kind {
-        "logs" => ("tm_cq_log", "tm_buf_log", "tm_all_log", "tm_icb_log"),
-        "metrics" => (
-            "tm_cq_metric",
-            "tm_buf_metric",
-            "tm_all_metric",
-            "tm_icb_metric",
-        ),
-        _ => ("tm_cq_span", "tm_buf_span", "tm_all_span", "tm_icb_span"),
-    }
-}
-
+/// `union_spans` / `committed_spans` as special. Rewrite the public surface to neutral `tm_*` names.
+/// Buffer/staged aliases map to the committed tier (ingest is flush-through).
 fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -84,19 +62,19 @@ fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
     const PAIRS: &[(&str, &str)] = &[
         ("union_metrics", "tm_all_metric"),
         ("committed_metrics", "tm_cq_metric"),
-        ("buffer_metrics", "tm_buf_metric"),
+        ("buffer_metrics", "tm_cq_metric"),
         ("iceberg_metrics", "tm_cq_metric"),
-        ("staged_metrics", "tm_stg_metric"),
+        ("staged_metrics", "tm_cq_metric"),
         ("union_logs", "tm_all_log"),
         ("committed_logs", "tm_cq_log"),
-        ("buffer_logs", "tm_buf_log"),
+        ("buffer_logs", "tm_cq_log"),
         ("iceberg_logs", "tm_cq_log"),
-        ("staged_logs", "tm_stg_log"),
+        ("staged_logs", "tm_cq_log"),
         ("union_spans", "tm_all_span"),
         ("committed_spans", "tm_cq_span"),
-        ("buffer_spans", "tm_buf_span"),
+        ("buffer_spans", "tm_cq_span"),
         ("iceberg_spans", "tm_cq_span"),
-        ("staged_spans", "tm_stg_span"),
+        ("staged_spans", "tm_cq_span"),
     ];
     for &(from, to) in PAIRS {
         s = replace_standalone_ident(&s, from, to);
@@ -151,8 +129,6 @@ struct QueryRequest {
 
 struct ConnectionState {
     conn: Connection,
-    prepared_kinds: HashSet<String>,
-    staged_signatures: HashMap<String, String>,
     tiered_storage: Arc<dyn TieredStorage>,
     /// Last `TieredStorage::catalog_write_generation()` applied after reattach for this worker.
     last_seen_catalog_write_generation: u64,
@@ -166,7 +142,6 @@ struct DuckDBCore {
     config: Config,
     cache: CacheSettings,
     tiered_storage: Arc<dyn TieredStorage>,
-    runtime_handle: tokio::runtime::Handle,
 }
 
 /// Query result containing columns and rows
@@ -182,7 +157,6 @@ impl DuckDBQueryEngine {
             config: config.clone(),
             cache: CacheSettings::new(config),
             tiered_storage: tiered_storage.clone(),
-            runtime_handle: tokio::runtime::Handle::current(),
         };
         // Install extensions once to ensure they're available
         let temp_conn = core.open_connection()?;
@@ -278,7 +252,6 @@ impl DuckDBQueryEngine {
             cache: CacheSettings::new(&config),
             config,
             tiered_storage: self.tiered_storage.clone(),
-            runtime_handle: tokio::runtime::Handle::current(),
         };
         let conn = core.open_connection()?;
         let mut state = core.init_connection_state_with(conn)?;
@@ -335,8 +308,6 @@ impl DuckDBCore {
         self.attach_catalog_if_needed(&conn)?;
         Ok(ConnectionState {
             conn,
-            prepared_kinds: HashSet::new(),
-            staged_signatures: HashMap::new(),
             tiered_storage: self.tiered_storage.clone(),
             last_seen_catalog_write_generation: 0,
             cache_httpfs_wrap_supported: true,
@@ -353,10 +324,19 @@ impl DuckDBCore {
         if self.config.ducklake.is_some() {
             let gen = state.tiered_storage.catalog_write_generation();
             if gen != state.last_seen_catalog_write_generation {
-                self.force_reattach_catalog(&state.conn)?;
-                state.prepared_kinds.clear();
-                state.staged_signatures.clear();
-                state.last_seen_catalog_write_generation = gen;
+                let catalog_type = self.ducklake_config().catalog_type;
+                if catalog_type == "postgres" {
+                    // Postgres metadata catalog: new commits are visible without DETACH.
+                    state.last_seen_catalog_write_generation = gen;
+                } else {
+                    // File-backed DuckLake: workers that attached before the first commit need a
+                    // fresh ATTACH. Avoid Drop/DETACH of the old connection (can SIGSEGV / FATAL
+                    // after concurrent writer commits); leak the old handle for process lifetime.
+                    let new_state = self.init_connection_state_with(self.open_connection()?)?;
+                    let old = std::mem::replace(state, new_state);
+                    std::mem::forget(old);
+                    state.last_seen_catalog_write_generation = gen;
+                }
             }
         }
 
@@ -371,15 +351,8 @@ impl DuckDBCore {
         }
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
-            let prepare_start = std::time::Instant::now();
-            self.prepare_union_views_for_query(state, query_prep.as_str())?;
-            self.try_wrap_cache_httpfs_filesystems(state);
-            if diag {
-                let elapsed = prepare_start.elapsed();
-                println!("DIAG prepare_union_views: {:?}", elapsed);
-            }
-
             let query_start = std::time::Instant::now();
+            self.try_wrap_cache_httpfs_filesystems(state);
             let mut stmt = state.conn.prepare(query_run.as_str())?;
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
@@ -418,16 +391,12 @@ impl DuckDBCore {
             Ok(result) => Ok(result),
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("__ducklake_metadata_")
-                    && message.contains("does not exist")
-                    && self.config.ducklake.is_some()
-                {
+                if message.contains("No snapshot found in DuckLake") {
                     warn!(
-                        "DuckLake metadata catalog missing during query; force reattaching catalog and retrying once"
+                        "DuckLake snapshot not visible yet; retrying query once: {}",
+                        message
                     );
-                    self.force_reattach_catalog(&state.conn)?;
-                    state.prepared_kinds.clear();
-                    state.staged_signatures.clear();
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                     return run_once(state);
                 }
                 Err(err)
@@ -588,134 +557,27 @@ impl DuckDBCore {
         Ok(())
     }
 
-    fn prepare_union_views_for_query(
-        &self,
-        state: &mut ConnectionState,
-        query: &str,
-    ) -> Result<()> {
-        let sql = query.to_lowercase();
-
-        let uses_spans = sql.contains("tm_all_span")
-            || sql.contains("tm_cq_span")
-            || sql.contains("tm_icb_span")
-            || sql.contains("tm_stg_span")
-            || sql.contains("tm_buf_span");
-        if uses_spans {
-            let ducklake_need_buffer = sql.contains("tm_buf_span") || sql.contains("tm_all_span");
-            self.prepare_union_view(state, "spans", "traces", ducklake_need_buffer)?;
-        }
-
-        let uses_logs = sql.contains("tm_all_log")
-            || sql.contains("tm_cq_log")
-            || sql.contains("tm_icb_log")
-            || sql.contains("tm_stg_log")
-            || sql.contains("tm_buf_log");
-        if uses_logs {
-            let ducklake_need_buffer = sql.contains("tm_buf_log") || sql.contains("tm_all_log");
-            self.prepare_union_view(state, "logs", "logs", ducklake_need_buffer)?;
-        }
-
-        let uses_metrics = sql.contains("tm_all_metric")
-            || sql.contains("tm_cq_metric")
-            || sql.contains("tm_icb_metric")
-            || sql.contains("tm_stg_metric")
-            || sql.contains("tm_buf_metric");
-        if uses_metrics {
-            let ducklake_need_buffer =
-                sql.contains("tm_buf_metric") || sql.contains("tm_all_metric");
-            self.prepare_union_view(state, "metrics", "metrics", ducklake_need_buffer)?;
-        }
-
-        Ok(())
-    }
-
-    fn prepare_union_view(
-        &self,
-        state: &mut ConnectionState,
-        kind: &str,
-        table_name: &str,
-        materialize_buffer: bool,
-    ) -> Result<()> {
-        let kind_key = kind.to_string();
-        let kind_ready = state.prepared_kinds.contains(&kind_key);
-        let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
-        let start = std::time::Instant::now();
-        // Catalog is attached once in `init_connection_state_with`.
-        self.create_committed_catalog_view(&state.conn, kind, table_name)?;
-        if diag {
-            println!(
-                "DIAG committed_view({}) prepared in {:?}",
-                table_name,
-                start.elapsed()
-            );
-        }
-
-        // Create buffer view (snapshot of in-memory data)
-        // Uses sync snapshot (non-blocking) to access buffer data in real-time
-        if !kind_ready && materialize_buffer {
-            self.create_buffer_view_sync(&state.conn, kind, &state.tiered_storage)?;
-        }
-
-        // DuckLake: TEMP VIEW wrappers over attached tables break snapshot binding; union is
-        // expanded inline in `ducklake_inline_sql` instead.
-
-        state.prepared_kinds.insert(kind_key);
-
-        Ok(())
-    }
-
-    fn create_committed_catalog_view(
-        &self,
-        _conn: &Connection,
-        _kind: &str,
-        _table_name: &str,
-    ) -> Result<()> {
-        // DuckLake reads use fully qualified catalog tables inlined in `ducklake_inline_sql`.
-        Ok(())
-    }
-
     /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`] (writer DDL uses
     /// `catalog.table` when `metadata_schema` is `main`, not `catalog.main.table`).
     fn ducklake_qualified_table(&self, table: &str) -> String {
         ducklake_qualified_table_name(&self.ducklake_config(), table)
     }
 
-    /// Replace internal telemetry aliases with real DuckLake table refs (and inline unions).
+    /// Replace internal telemetry aliases with real DuckLake table refs.
     fn ducklake_inline_sql(&self, sql: &str) -> String {
         let traces = self.ducklake_qualified_table("traces");
         let logs = self.ducklake_qualified_table("logs");
         let metrics = self.ducklake_qualified_table("metrics");
         let mut s = sql.to_string();
-        s = replace_standalone_ident(&s, "tm_icb_metric", &metrics);
-        s = replace_standalone_ident(&s, "tm_cq_metric", &metrics);
-        s = replace_standalone_ident(
-            &s,
-            "tm_all_metric",
-            &format!(
-                "(SELECT * FROM {q} UNION ALL SELECT * FROM tm_buf_metric) AS __tm_u",
-                q = metrics
-            ),
-        );
-        s = replace_standalone_ident(&s, "tm_icb_log", &logs);
-        s = replace_standalone_ident(&s, "tm_cq_log", &logs);
-        s = replace_standalone_ident(
-            &s,
-            "tm_all_log",
-            &format!(
-                "(SELECT * FROM {q} UNION ALL SELECT * FROM tm_buf_log) AS __tm_u",
-                q = logs
-            ),
-        );
-        s = replace_standalone_ident(&s, "tm_icb_span", &traces);
-        s = replace_standalone_ident(&s, "tm_cq_span", &traces);
-        s = replace_standalone_ident(
-            &s,
-            "tm_all_span",
-            &format!(
-                "(SELECT * FROM {q} UNION ALL SELECT * FROM tm_buf_span) AS __tm_u",
-                q = traces
-            ),
-        );
+        for name in ["tm_icb_metric", "tm_cq_metric", "tm_all_metric", "tm_buf_metric"] {
+            s = replace_standalone_ident(&s, name, &metrics);
+        }
+        for name in ["tm_icb_log", "tm_cq_log", "tm_all_log", "tm_buf_log"] {
+            s = replace_standalone_ident(&s, name, &logs);
+        }
+        for name in ["tm_icb_span", "tm_cq_span", "tm_all_span", "tm_buf_span"] {
+            s = replace_standalone_ident(&s, name, &traces);
+        }
         s
     }
 
@@ -813,24 +675,6 @@ impl DuckDBCore {
         }
     }
 
-    fn force_reattach_catalog(&self, conn: &Connection) -> Result<()> {
-        if !self.use_attached_catalog() {
-            return Ok(());
-        }
-        let alias = self.catalog_alias();
-        let detach_sql = format!("DETACH {};", alias);
-        if let Err(err) = conn.execute_batch(&detach_sql) {
-            let message = err.to_string();
-            if !message.contains("not attached")
-                && !message.contains("does not exist")
-                && !message.contains("not found")
-            {
-                return Err(anyhow!("DuckDB DETACH failed for {}: {}", alias, err));
-            }
-        }
-        self.attach_catalog_if_needed(conn)
-    }
-
     fn prepare_local_ducklake_paths(
         &self,
         ducklake: &crate::config::DuckLakeConfig,
@@ -851,118 +695,6 @@ impl DuckDBCore {
             }
         }
         Ok(())
-    }
-
-    fn create_buffer_view_sync(
-        &self,
-        conn: &Connection,
-        kind: &str,
-        tiered_storage: &Arc<dyn TieredStorage>,
-    ) -> Result<()> {
-        // Get buffer snapshot and convert to RecordBatch (sync, non-blocking for snapshot)
-        let batch = match kind {
-            "spans" => {
-                let Some(items) = tiered_storage.snapshot_buffered_spans_sync() else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
-                if items.is_empty() {
-                    return self.create_empty_buffer_view(conn, kind);
-                }
-                // Get schema via shared runtime handle (cached, fast).
-                let schema = self
-                    .runtime_handle
-                    .block_on(tiered_storage.writer().spans_schema())?;
-                spans_to_record_batch(&items, schema.as_ref())?
-            }
-            "logs" => {
-                let Some(items) = tiered_storage.snapshot_buffered_logs_sync() else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
-                if items.is_empty() {
-                    return self.create_empty_buffer_view(conn, kind);
-                }
-                // Get schema via shared runtime handle (cached, fast).
-                let schema = self
-                    .runtime_handle
-                    .block_on(tiered_storage.writer().logs_schema())?;
-                logs_to_record_batch(&items, schema.as_ref())?
-            }
-            "metrics" => {
-                let Some(items) = tiered_storage.snapshot_buffered_metrics_sync() else {
-                    return self.create_empty_buffer_view(conn, kind);
-                };
-                if items.is_empty() {
-                    return self.create_empty_buffer_view(conn, kind);
-                }
-                // Get schema via shared runtime handle (cached, fast).
-                let schema = self
-                    .runtime_handle
-                    .block_on(tiered_storage.writer().metrics_schema())?;
-                metrics_to_record_batch(&items, schema.as_ref())?
-            }
-            _ => return self.create_empty_buffer_view(conn, kind),
-        };
-
-        // Write batch to temp Parquet file
-        let temp_path = format!(
-            "/tmp/buffer_{}_{}.parquet",
-            kind,
-            Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
-
-        let file = File::create(&temp_path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
-
-        // Create view from temp file
-        let (_, vb, _, _) = telemetry_view_names(kind);
-        conn.execute_batch(&format!(
-            "CREATE OR REPLACE TEMP VIEW {vb} AS SELECT * FROM read_parquet('{path}');",
-            vb = vb,
-            path = temp_path
-        ))?;
-
-        Ok(())
-    }
-
-    fn create_empty_buffer_view(&self, conn: &Connection, kind: &str) -> Result<()> {
-        let (vc, vb, _, _) = telemetry_view_names(kind);
-        if self.config.ducklake.is_some() {
-            let qual = self.ducklake_qualified_table(match kind {
-                "logs" => "logs",
-                "metrics" => "metrics",
-                _ => "traces",
-            });
-            // `CREATE TEMP TABLE AS SELECT` from DuckLake can hit the same broken binder as TEMP
-            // VIEW wrappers; `LIMIT 0` subquery-style reads work reliably.
-            conn.execute_batch(&format!(
-                "CREATE OR REPLACE TEMP VIEW {vb} AS SELECT * FROM {qual} LIMIT 0;",
-                vb = vb,
-                qual = qual,
-            ))?;
-        } else {
-            conn.execute_batch(&format!(
-                "CREATE OR REPLACE TEMP TABLE {vb} AS SELECT * FROM {vc} WHERE 1=0;",
-                vb = vb,
-                vc = vc,
-            ))?;
-        }
-        Ok(())
-    }
-
-    fn staged_files(&self, kind: &str) -> Vec<String> {
-        let mut files = match self.tiered_storage.list_staged_files(kind) {
-            Ok(files) => files,
-            Err(_) => return Vec::new(),
-        };
-        files.sort();
-        files.dedup();
-        files
-            .into_iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect()
     }
 
     fn ducklake_config(&self) -> crate::config::DuckLakeConfig {

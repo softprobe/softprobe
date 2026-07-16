@@ -18,21 +18,11 @@ server:
 storage:
   s3_region: "auto"  # R2 uses "auto" region
 
-span_buffering:
-  max_buffer_spans: 1  # Flush after each span for testing
-  max_buffer_bytes: 10485760  # 10MB
-  flush_interval_seconds: 1  # Flush every second
-
 ingest_engine:
-  wal_bucket: "your-bucket-name"
-  wal_prefix: "wal"
   cache_dir: "/var/tmp/softprobe/duckdb"
-  optimizer_interval_seconds: 2
-  replay_wal_on_startup: false
 
 compaction:
   enabled: false
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864  # 64MB
   compaction_interval_seconds: 3600
 

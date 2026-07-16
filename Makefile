@@ -6,12 +6,12 @@
 # - CI/CD environments
 #
 # Usage:
-#   make test           - Unit tests + full local integration (MinIO; integration-e2e)
+#   make test           - Unit tests + full local integration (MinIO + Postgres; integration-e2e)
 #   make test-smoke     - Alias of test-quick (library + lightweight tests/tests.rs)
-#   make test-local     - Full integration only (MinIO + integration-e2e)
+#   make test-local     - Full integration only (MinIO + Postgres + integration-e2e)
 #   make test-r2        - Integration tests with Cloudflare R2
-#   make test-ci        - CI: MinIO → lib + integration-e2e; else lib only
-#   make setup-local    - Start MinIO (+ DuckLake Postgres for postgres-catalog dev)
+#   make test-ci        - CI: MinIO+Postgres → lib + integration-e2e; else lib only
+#   make setup-local    - Start MinIO + DuckLake Postgres (required for make test)
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
@@ -42,12 +42,12 @@ help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
 	@echo ""
 	@echo "Test Targets:"
-	@echo "  make test            - Unit tests + full local integration (MinIO + integration-e2e)"
+	@echo "  make test            - Unit tests + full local integration (MinIO + Postgres + integration-e2e)"
 	@echo "  make test-all        - Same as make test"
-	@echo "  make test-local      - Full integration only (MinIO + integration-e2e)"
+	@echo "  make test-local      - Full integration only (MinIO + Postgres + integration-e2e)"
 	@echo "  make test-r2         - Integration tests with Cloudflare R2 (+ integration-e2e)"
-	@echo "  make test-ci         - CI: MinIO present → test-quick + integration-e2e; else test-quick only"
-	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no MinIO)"
+	@echo "  make test-ci         - CI: MinIO+Postgres present → test-quick + integration-e2e; else test-quick only"
+	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no Docker)"
 	@echo ""
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
@@ -58,10 +58,12 @@ help:
 	@echo "  make test-deployment-stress - Stress test local with large dataset"
 	@echo ""
 	@echo "Infrastructure:"
-	@echo "  make setup-local     - Start MinIO (+ DuckLake Postgres for dev)"
+	@echo "  make setup-local     - Start MinIO + DuckLake Postgres (required for make test)"
 	@echo "  make teardown-local  - Stop docker-compose stack in this directory"
 	@echo "  make check-local          - Verify MinIO (required for integration tests)"
-	@echo "  make check-local-postgres - Verify DuckLake Postgres (optional dev catalog)"
+	@echo "  make check-local-postgres - Verify DuckLake Postgres (required for make test / test-local)"
+	@echo "  make check-local-redis    - Verify Redis (required for make test / test-local)"
+	@echo "  make check-local-e2e      - Verify MinIO + Postgres + Redis"
 	@echo ""
 	@echo "Data & Verification:"
 	@echo "  make generate-telemetry - Generate demo OTLP data"
@@ -115,8 +117,8 @@ clean:
 # Local infrastructure management
 setup-local:
 	@echo "🚀 Starting local test infrastructure..."
-	@echo "📦 Starting MinIO and DuckLake Postgres catalog..."
-	@docker-compose up -d minio ducklake-postgres
+	@echo "📦 Starting MinIO, DuckLake Postgres, and Redis..."
+	@docker-compose up -d minio ducklake-postgres redis
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
@@ -129,12 +131,15 @@ setup-local:
 	@echo "✅ Bucket 'warehouse' is ready"
 	@echo "🦆 Checking DuckLake Postgres health..."
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "❌ DuckLake Postgres not ready" && exit 1)
+	@echo "🔴 Checking Redis health..."
+	@docker exec runtime-redis redis-cli ping > /dev/null 2>&1 || (echo "❌ Redis not ready" && exit 1)
 	@echo "✅ Local test infrastructure is ready!"
 	@echo ""
 	@echo "Services available:"
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  - MinIO API: http://localhost:9000"
 	@echo "  - DuckLake catalog DB: postgres://ducklake@localhost:5432/ducklake"
+	@echo "  - Redis: localhost:6379"
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."
@@ -165,11 +170,18 @@ check-minio:
 	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-minio')" && exit 1)
 
 check-local: check-minio
-	@echo "✅ Local test prerequisites satisfied (MinIO; integration tests use file DuckLake metadata + s3://warehouse data)"
+	@echo "✅ MinIO prerequisites satisfied"
 
 check-local-postgres:
 	@echo "🔍 Checking DuckLake Postgres..."
-	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local' from softprobe-runtime/)" && exit 1)
+	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local')" && exit 1)
+
+check-local-redis:
+	@echo "🔍 Checking Redis..."
+	@docker exec runtime-redis redis-cli ping > /dev/null 2>&1 && echo "✅ Redis is running" || (echo "❌ Redis is not running (run 'make setup-local')" && exit 1)
+
+check-local-e2e: check-local check-local-postgres check-local-redis
+	@echo "✅ Local e2e prerequisites satisfied (MinIO + DuckLake Postgres + Redis)"
 
 # Test targets
 # Single cargo run: #[cfg(test)] in src/ plus the default integration crate tests/tests.rs
@@ -178,10 +190,10 @@ test-quick:
 	@echo "🧪 Running library + lightweight integration tests (no integration-e2e)..."
 	cargo test --lib --test tests -- --test-threads=1
 
-test-local: check-local
-	@echo "🧪 Running full integration tests with local MinIO (integration-e2e)..."
+test-local: check-local-e2e
+	@echo "🧪 Running full integration tests with MinIO + DuckLake Postgres (integration-e2e)..."
 	@echo "📝 Configuration: tests/config/test.yaml"
-	@echo "🗄️  Backend: MinIO :9000 (DuckLake test data); metadata is per-run temp files"
+	@echo "🗄️  Backend: MinIO :9000 + Postgres catalog (ducklake-postgres)"
 	@echo ""
 	@for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
 		echo "🧪 Running integration $$test_name in an isolated process..."; \
@@ -228,26 +240,24 @@ test-r2:
 test-ci:
 	@echo "🧪 Running tests in CI environment..."
 	@echo "🔍 Auto-detecting environment and requirements..."
-	@# In CI, we expect services to be available via docker-compose or service containers
-	@if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then \
-		echo "✅ MinIO detected"; \
+	@if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 \
+		&& docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1; then \
+		echo "✅ MinIO + DuckLake Postgres detected"; \
 		$(MAKE) test-quick; \
-		echo "🧪 Running integration tests (integration-e2e)..."; \
-		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --test-threads=1; \
-		for test_name in $(INTEGRATION_PERF_TESTS); do \
-			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-			SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 || exit $$?; \
-		done; \
+		$(MAKE) test-local; \
 	else \
-		echo "⚠️  No local MinIO on :9000, running test-quick only"; \
+		echo "⚠️  MinIO and/or DuckLake Postgres missing; running test-quick only"; \
+		echo "   (pre-merge bar is make test with both services — run make setup-local)"; \
 		$(MAKE) test-quick; \
 	fi
 
 test-all: test-quick test-local
 	@echo "✅ All tests completed!"
 
-# Default pre-merge check: lib + full integration (requires MinIO).
+# Default pre-merge check: lib + full integration (requires MinIO + DuckLake Postgres + Redis).
 test: test-all
+
+.PHONY: check-local-e2e check-local-redis
 
 # Development workflow
 dev-check: check-fmt lint test-quick

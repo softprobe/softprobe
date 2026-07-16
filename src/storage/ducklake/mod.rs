@@ -73,6 +73,11 @@ pub struct DuckLakeWriter {
     dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
     /// When set with `catalog_type = postgres`, commits route to per-tenant metadata schemas.
     tenant_ducklake: Option<DuckLakeScopeResolver>,
+    /// When true, this writer is permanently bound to `ducklake.metadata_schema` / `data_path`
+    /// (built via [`IngestPipeline::build_tenant_storage`]). When false, postgres writers with a
+    /// registry resolver route each batch by `span.tenant_id` even if config carries a non-main
+    /// registry schema name.
+    scope_bound: bool,
     /// Bumped after each successful committed write so query-side DuckDB connections can reattach.
     catalog_write_generation: Arc<AtomicU64>,
 }
@@ -83,6 +88,24 @@ impl DuckLakeWriter {
         dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
         tenant_ducklake: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
+        Self::new_inner(config, dropdown_catalog, tenant_ducklake, false).await
+    }
+
+    /// Writer permanently bound to one DuckLake scope (per-tenant runtime engine).
+    pub async fn new_scope_bound(
+        config: &Config,
+        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+        tenant_ducklake: Option<DuckLakeScopeResolver>,
+    ) -> Result<Self> {
+        Self::new_inner(config, dropdown_catalog, tenant_ducklake, true).await
+    }
+
+    async fn new_inner(
+        config: &Config,
+        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
+        tenant_ducklake: Option<DuckLakeScopeResolver>,
+        scope_bound: bool,
+    ) -> Result<Self> {
         let ducklake = config.ducklake_or_default();
         let writer = Self {
             config: config.clone(),
@@ -90,10 +113,11 @@ impl DuckLakeWriter {
             cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
             dropdown_catalog,
             tenant_ducklake,
+            scope_bound,
             catalog_write_generation: Arc::new(AtomicU64::new(0)),
         };
         writer.initialize_catalog().await?;
-        info!("DuckLake writer initialized");
+        info!("DuckLake writer initialized (scope_bound={})", scope_bound);
         Ok(writer)
     }
 
@@ -132,7 +156,7 @@ impl DuckLakeWriter {
     }
 
     fn tenant_bound_scope(&self) -> Option<DuckLakeScope> {
-        if self.ducklake.catalog_type != "postgres" || self.ducklake.metadata_schema == "main" {
+        if !self.scope_bound || self.ducklake.catalog_type != "postgres" {
             return None;
         }
         Some(DuckLakeScope {
@@ -980,6 +1004,7 @@ mod tests {
             cache_dir: None,
             dropdown_catalog: None,
             tenant_ducklake: None,
+            scope_bound: false,
             catalog_write_generation: Arc::new(AtomicU64::new(0)),
         };
 

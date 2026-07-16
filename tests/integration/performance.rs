@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::util::pipeline::TestPipeline;
-use crate::util::storage_config::ensure_wal_bucket;
+use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
 
 // ========================================
 // Performance test goals (tunable via env):
@@ -202,7 +202,6 @@ async fn perf_union_read_latency() {
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
         config.duckdb.max_connections = 1;
     }
-    ensure_wal_bucket(&mut config);
 
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -408,7 +407,6 @@ async fn perf_union_read_concurrency() {
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
         config.duckdb.max_connections = 1;
     }
-    ensure_wal_bucket(&mut config);
 
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -621,7 +619,6 @@ async fn perf_union_read_concurrency() {
 #[tokio::test]
 async fn perf_view_recreate_stability() {
     let mut config = load_perf_config();
-    ensure_wal_bucket(&mut config);
 
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;

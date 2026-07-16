@@ -36,34 +36,6 @@ fn assign_unique_ducklake_paths(config: &mut Config) {
     }
 }
 
-pub fn ensure_wal_bucket(config: &mut Config) {
-    if config.ingest_engine.wal_bucket != "your-bucket-name" {
-        return;
-    }
-
-    // Prefer DuckLake object-store bucket, then S3-ish data path host segment, else "warehouse".
-    let mut candidate = String::new();
-    if let Some(dl) = config.ducklake.as_ref() {
-        let path = dl.data_path.trim();
-        if let Some(rest) = path
-            .strip_prefix("s3://")
-            .or_else(|| path.strip_prefix("gs://"))
-            .or_else(|| path.strip_prefix("r2://"))
-        {
-            candidate = rest.split('/').next().unwrap_or("").to_string();
-        }
-    }
-    if candidate.is_empty() {
-        candidate = "warehouse".to_string();
-    }
-
-    assert!(
-        !candidate.is_empty() && candidate != "your-bucket-name",
-        "wal_bucket is a placeholder and could not be derived from ducklake.data_path"
-    );
-    config.ingest_engine.wal_bucket = candidate;
-}
-
 /// Check if minio hostname resolves (needed for local testing when URLs use minio:9000)
 fn check_minio_hostname() -> bool {
     use std::net::ToSocketAddrs;

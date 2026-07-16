@@ -1,10 +1,9 @@
-use crate::storage::buffer::Bufferable;
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Span domain model - unified representation across all layers
-/// Used for: OTLP ingestion → buffering → DuckLake storage → query results → JSON responses
+/// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
 /// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
 /// (legacy path; Arrow/DuckLake column order).
@@ -67,31 +66,22 @@ pub struct SpanEvent {
     pub attributes: HashMap<String, String>,
 }
 
-impl Bufferable for Span {
-    fn partition_key(&self) -> chrono::NaiveDate {
+impl Span {
+    pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
 
-    fn grouping_key(&self) -> String {
-        // Use explicit session_id field (already populated from sp.session.id or trace_id)
+    pub fn grouping_key(&self) -> String {
         self.session_id.clone()
     }
 
-    fn compare_for_sort(&self, other: &Self) -> Ordering {
-        // Sort by session_id first, then trace_id, then timestamp
-        // Sort order matches telemetry table sort keys (session_id, trace_id, timestamp)
+    pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.session_id
             .cmp(&other.session_id)
             .then_with(|| self.trace_id.cmp(&other.trace_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
-        self.timestamp
-    }
-}
-
-impl Span {
     /// Convert a batch of Spans to Arrow RecordBatch for DuckLake storage
     ///
     /// This is a batch operation delegated to the arrow module since RecordBatch

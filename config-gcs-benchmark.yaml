@@ -16,22 +16,11 @@ server:
 storage:
   s3_region: "us-central1"  # GCP region (us-central1, us-east1, etc.)
 
-span_buffering:
-  max_buffer_bytes: 134217728  # 128MB
-  max_buffer_spans: 10000
-  flush_interval_seconds: 60
-
 ingest_engine:
-  wal_bucket: "YOUR-GCS-BUCKET-NAME"  # Update with your GCS bucket
-  wal_prefix: "wal"
   cache_dir: "/var/tmp/datalake/cache"  # Server-local cache directory
-  wal_dir: "/var/tmp/datalake/wal"  # WAL-only directory
-  optimizer_interval_seconds: 300
-  replay_wal_on_startup: false
 
 compaction:
   enabled: true
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864  # 64MB
   compaction_interval_seconds: 3600  # 1 hour
 
