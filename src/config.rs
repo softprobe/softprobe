@@ -126,8 +126,14 @@ pub struct DuckLakeConfig {
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
     /// Prefer inlining small collector batches into the catalog over tiny Parquet files.
+    /// Default 10000: validated on Postgres+GCS stress (near-zero data parquet for batches ≤10k).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
+    /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
+    /// Enables same-tenant concurrent commits (DuckLake/Postgres retries handle conflicts).
+    /// Default 4 (clamped 1..=16). Prefer ≤4 under heavy inlining; 8+ caused 503 storms in stress.
+    #[serde(default = "default_writer_pool_size")]
+    pub writer_pool_size: usize,
 }
 
 fn default_ducklake_catalog_type() -> String {
@@ -152,6 +158,17 @@ fn default_ducklake_metadata_schema() -> String {
 
 fn default_data_inlining_row_limit() -> Option<u64> {
     Some(10_000)
+}
+
+fn default_writer_pool_size() -> usize {
+    4
+}
+
+impl DuckLakeConfig {
+    /// Effective writer pool size, clamped to 1..=16.
+    pub fn effective_writer_pool_size(&self) -> usize {
+        self.writer_pool_size.clamp(1, 16)
+    }
 }
 
 fn default_metadata_maintenance_enabled() -> bool {
@@ -222,6 +239,7 @@ impl Default for Config {
                 catalog_alias: default_ducklake_catalog_alias(),
                 metadata_schema: default_ducklake_metadata_schema(),
                 data_inlining_row_limit: default_data_inlining_row_limit(),
+                writer_pool_size: default_writer_pool_size(),
             }),
             dropdown_catalog: DropdownCatalogConfig::default(),
         }
@@ -237,6 +255,7 @@ impl Config {
             catalog_alias: default_ducklake_catalog_alias(),
             metadata_schema: default_ducklake_metadata_schema(),
             data_inlining_row_limit: default_data_inlining_row_limit(),
+            writer_pool_size: default_writer_pool_size(),
         })
     }
 

@@ -24,6 +24,23 @@ Concurrent commit conflicts are retried inside the DuckLake extension (`ducklake
 
 Softprobe does **not** reattach / `mem::forget` query connections after writes. Visibility follows the catalog backend.
 
+### Writer pool + inlining
+
+Each catalog scope key (`catalog_type|metadata_path|metadata_schema|data_path`) owns a pool of already-`ATTACH`'d DuckDB connections (`ducklake.writer_pool_size`, default **4**, clamped 1..=16). Checkout → `INSERT`/`COMMIT` → release. Concurrent same-tenant commits are intended; DuckLake retries conflicts on the Postgres/sqlite catalog.
+
+`DATA_INLINING_ROW_LIMIT` (default **10000**) keeps collector-sized batches in the catalog instead of tiny object-store Parquet files. Raise the limit when OTLP batches regularly exceed it; keep pool size ≥1 so flush-through GCS/parquet paths can still parallelize when inlining does not apply.
+
+DuckDB SQL for writes runs on `spawn_blocking` so Tokio workers are not pinned during GCS/Postgres wait.
+
+**Postgres+GCS stress defaults (validated):**
+
+| Knob | Default | Notes |
+|------|---------|--------|
+| `data_inlining_row_limit` | **10000** | At batch ≤10k: near-zero data parquet; large latency win vs `0`. Keep unless collectors flush bigger than the limit. |
+| `writer_pool_size` | **4** | Fine with inlining; under pure inlining pool=1 is similar. Pool helps more when inserts spill to object storage. **Avoid 8+** — stress showed high HTTP 503 / catalog contention. |
+
+Sweep driver: `scripts/stress_writer_pool_inline.sh`.
+
 ## 3. Mental model
 
 | Belief | Reality |
@@ -50,6 +67,7 @@ make test                   # test-quick + full integration-e2e
 - [x] Inlining default 10000 kept as feature
 - [x] Local sqlite + prod postgres; duckdb catalog rejected
 - [x] Writer connection reuse; DuckLake retry defaults pinned
+- [x] Per-scope writer pool (`writer_pool_size`, default 4) + spawn_blocking ingest commits
 - [x] No Softprobe catalog reattach / metadata-pointer hacks
 - [x] Maintenance walks registry tenant scopes
 - [x] Write failures → HTTP 503

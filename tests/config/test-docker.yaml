@@ -34,3 +34,4 @@ ducklake:
   catalog_alias: softprobe
   metadata_schema: softprobe
   data_inlining_row_limit: 10000
+  writer_pool_size: 4

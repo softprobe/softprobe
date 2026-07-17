@@ -17,14 +17,16 @@ use opentelemetry_proto::tonic::trace::v1::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 
 use softprobe_runtime::models::{Log, Metric, Span};
 use tracing_subscriber;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(
     author = "SoftProbe Team",
     about = "Stress test the OTLP ingestion+query pipeline against DuckLake storage"
@@ -34,21 +36,29 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Duration of the stress run in seconds.
+    /// Duration of each stress phase in seconds.
     #[arg(long, default_value_t = 60)]
     duration: u64,
 
-    /// Spans per second to ingest through the pipeline.
+    /// Span events per second (offered load; open-loop).
     #[arg(long, default_value_t = 100)]
     span_qps: u32,
 
-    /// Logs per second to ingest through the pipeline.
+    /// Log events per second (offered load; open-loop).
     #[arg(long, default_value_t = 200)]
     log_qps: u32,
 
-    /// Metrics per second to ingest through the pipeline.
+    /// Metric events per second (offered load; open-loop).
     #[arg(long, default_value_t = 200)]
     metric_qps: u32,
+
+    /// Records per OTLP HTTP request (collector-style batching).
+    #[arg(long, default_value_t = 1)]
+    batch_size: u32,
+
+    /// Max in-flight ingest HTTP requests across all signals.
+    #[arg(long, default_value_t = 8)]
+    ingest_concurrency: usize,
 
     /// Number of concurrent SQL workers running against DuckDB.
     #[arg(long, default_value_t = 4)]
@@ -58,44 +68,154 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     query_interval_ms: u64,
 
-    /// Seconds to wait for warm-up before recording steady-state query stats.
+    /// Seconds to wait for warm-up before recording steady-state stats.
     #[arg(long, default_value_t = 10)]
     warmup_secs: u64,
+
+    /// Comma-separated phases: ingest, query, mixed (default: mixed).
+    #[arg(long, default_value = "mixed")]
+    phases: String,
 
     /// Service URL for API (e.g., http://localhost:8090). Required.
     #[arg(long)]
     service_url: String,
+
+    /// Bearer token for `/v1/*` auth (control-plane). Defaults to `test-token`
+    /// for local auth mocks; override with `--api-token` or `SOFTPROBE_API_TOKEN`.
+    #[arg(long, default_value = "test-token")]
+    api_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseKind {
+    Ingest,
+    Query,
+    Mixed,
+}
+
+impl PhaseKind {
+    fn parse_list(s: &str) -> Result<Vec<PhaseKind>> {
+        let mut out = Vec::new();
+        for part in s.split(',') {
+            let p = part.trim().to_ascii_lowercase();
+            if p.is_empty() {
+                continue;
+            }
+            out.push(match p.as_str() {
+                "ingest" | "ingest_only" | "ingest-only" => PhaseKind::Ingest,
+                "query" | "query_only" | "query-only" => PhaseKind::Query,
+                "mixed" => PhaseKind::Mixed,
+                other => anyhow::bail!(
+                    "unknown phase '{other}' (expected ingest, query, or mixed)"
+                ),
+            });
+        }
+        if out.is_empty() {
+            anyhow::bail!("--phases must list at least one of: ingest, query, mixed");
+        }
+        Ok(out)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PhaseKind::Ingest => "ingest_only",
+            PhaseKind::Query => "query_only",
+            PhaseKind::Mixed => "mixed",
+        }
+    }
+
+    fn enable_ingest(self) -> bool {
+        matches!(self, PhaseKind::Ingest | PhaseKind::Mixed)
+    }
+
+    fn enable_query(self) -> bool {
+        matches!(self, PhaseKind::Query | PhaseKind::Mixed)
+    }
 }
 
 #[derive(Default)]
 struct ProducerStats {
-    count: std::sync::atomic::AtomicU64,
-    errors: std::sync::atomic::AtomicU64,
+    offered: AtomicU64,
+    achieved: AtomicU64,
+    errors: AtomicU64,
+    drops: AtomicU64,
+    steady_durations: Mutex<Vec<Duration>>,
+    warmup_end: std::sync::OnceLock<Instant>,
 }
 
 impl ProducerStats {
-    fn inc_success(&self, delta: u64) {
-        self.count
-            .fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
+    fn set_warmup_end(&self, end: Instant) {
+        let _ = self.warmup_end.set(end);
+    }
+
+    fn inc_offered(&self, delta: u64) {
+        self.offered.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    fn inc_achieved(&self, delta: u64) {
+        self.achieved.fetch_add(delta, Ordering::Relaxed);
     }
 
     fn inc_error(&self) {
-        self.errors
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.errors.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn inc_drop(&self, delta: u64) {
+        self.drops.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    async fn record_latency(&self, duration: Duration) {
+        if let Some(end) = self.warmup_end.get() {
+            if Instant::now() >= *end {
+                self.steady_durations.lock().await.push(duration);
+            }
+        }
+    }
+
+    async fn snapshot(&self, duration_secs: f64) -> ProducerSnapshot {
+        let offered = self.offered.load(Ordering::Relaxed);
+        let achieved = self.achieved.load(Ordering::Relaxed);
+        let errors = self.errors.load(Ordering::Relaxed);
+        let drops = self.drops.load(Ordering::Relaxed);
+        let durations = self.steady_durations.lock().await.clone();
+        ProducerSnapshot {
+            offered,
+            achieved,
+            errors,
+            drops,
+            offered_eps: offered as f64 / duration_secs.max(0.001),
+            achieved_eps: achieved as f64 / duration_secs.max(0.001),
+            p50_ms: percentile(&durations, 50),
+            p95_ms: percentile(&durations, 95),
+            p99_ms: percentile(&durations, 99),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProducerSnapshot {
+    offered: u64,
+    achieved: u64,
+    errors: u64,
+    drops: u64,
+    offered_eps: f64,
+    achieved_eps: f64,
+    p50_ms: u128,
+    p95_ms: u128,
+    p99_ms: u128,
 }
 
 struct QueryStats {
     durations: Mutex<Vec<Duration>>,
     by_kind: Mutex<HashMap<String, PerQueryStats>>,
-    executed: std::sync::atomic::AtomicU64,
-    errors: std::sync::atomic::AtomicU64,
-    steady_executed: std::sync::atomic::AtomicU64,
-    steady_errors: std::sync::atomic::AtomicU64,
+    executed: AtomicU64,
+    errors: AtomicU64,
+    steady_executed: AtomicU64,
+    steady_errors: AtomicU64,
     warmup_end: Instant,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct PerQueryStats {
     durations: Vec<Duration>,
     executed: u64,
@@ -107,23 +227,21 @@ impl QueryStats {
         Self {
             durations: Mutex::new(Vec::new()),
             by_kind: Mutex::new(HashMap::new()),
-            executed: std::sync::atomic::AtomicU64::new(0),
-            errors: std::sync::atomic::AtomicU64::new(0),
-            steady_executed: std::sync::atomic::AtomicU64::new(0),
-            steady_errors: std::sync::atomic::AtomicU64::new(0),
+            executed: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            steady_executed: AtomicU64::new(0),
+            steady_errors: AtomicU64::new(0),
             warmup_end: warmup_start + warmup_duration,
         }
     }
 
     async fn record(&self, label: &str, duration: Duration) {
         let now = Instant::now();
-        self.executed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.executed.fetch_add(1, Ordering::Relaxed);
         if now >= self.warmup_end {
             let mut guard = self.durations.lock().await;
             guard.push(duration);
-            self.steady_executed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.steady_executed.fetch_add(1, Ordering::Relaxed);
 
             let mut by_kind = self.by_kind.lock().await;
             let entry = by_kind.entry(label.to_string()).or_default();
@@ -134,17 +252,56 @@ impl QueryStats {
 
     async fn record_error(&self, label: &str) {
         let now = Instant::now();
-        self.errors
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.errors.fetch_add(1, Ordering::Relaxed);
         if now >= self.warmup_end {
-            self.steady_errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.steady_errors.fetch_add(1, Ordering::Relaxed);
 
             let mut by_kind = self.by_kind.lock().await;
             let entry = by_kind.entry(label.to_string()).or_default();
             entry.errors += 1;
         }
     }
+
+    async fn snapshot(&self, duration_secs: f64) -> QuerySnapshot {
+        let durations = self.durations.lock().await.clone();
+        let by_kind = self.by_kind.lock().await.clone();
+        QuerySnapshot {
+            executed: self.executed.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            steady_executed: self.steady_executed.load(Ordering::Relaxed),
+            steady_errors: self.steady_errors.load(Ordering::Relaxed),
+            qps: self.steady_executed.load(Ordering::Relaxed) as f64 / duration_secs.max(0.001),
+            avg_ms: avg_ms(&durations),
+            p50_ms: percentile(&durations, 50),
+            p95_ms: percentile(&durations, 95),
+            p99_ms: percentile(&durations, 99),
+            by_kind,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QuerySnapshot {
+    executed: u64,
+    errors: u64,
+    steady_executed: u64,
+    steady_errors: u64,
+    qps: f64,
+    avg_ms: u128,
+    p50_ms: u128,
+    p95_ms: u128,
+    p99_ms: u128,
+    by_kind: HashMap<String, PerQueryStats>,
+}
+
+#[derive(Clone, Debug)]
+struct PhaseSnapshot {
+    kind: PhaseKind,
+    duration_secs: f64,
+    span: ProducerSnapshot,
+    log: ProducerSnapshot,
+    metric: ProducerSnapshot,
+    query: QuerySnapshot,
 }
 
 #[tokio::main]
@@ -159,69 +316,280 @@ async fn main() -> Result<()> {
     let base_url = args.service_url.trim_end_matches('/').to_string();
     println!("Using service API at: {}", base_url);
 
-    let http_client = reqwest::Client::new();
+    let api_token = std::env::var("SOFTPROBE_API_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| args.api_token.clone());
+    let mut headers = reqwest::header::HeaderMap::new();
+    let auth_value = format!("Bearer {}", api_token.trim());
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        auth_value
+            .parse()
+            .expect("api_token must form a valid Authorization header value"),
+    );
+    let http_client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?;
+
+    let phases = PhaseKind::parse_list(&args.phases)?;
+    println!(
+        "Phases: {}",
+        phases
+            .iter()
+            .map(|p| p.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "Batch size: {} | Ingest concurrency: {}",
+        args.batch_size.max(1),
+        args.ingest_concurrency.max(1)
+    );
+
+    let mut phase_results = Vec::new();
+    for phase in phases {
+        println!("\n########## PHASE: {} ##########", phase.label());
+        let snap = run_phase(&args, &http_client, &base_url, phase).await?;
+        print_phase_report(&args, &snap).await;
+        phase_results.push(snap);
+    }
+
+    print_interference_summary(&phase_results);
+    Ok(())
+}
+
+async fn run_phase(
+    args: &Args,
+    http_client: &reqwest::Client,
+    base_url: &str,
+    phase: PhaseKind,
+) -> Result<PhaseSnapshot> {
     let deadline = Instant::now() + Duration::from_secs(args.duration);
-    let span_stats = Arc::new(ProducerStats::default());
-    let log_stats = Arc::new(ProducerStats::default());
-    let metric_stats = Arc::new(ProducerStats::default());
     let warmup_secs = std::cmp::min(args.warmup_secs, args.duration);
     let warmup_duration = Duration::from_secs(warmup_secs);
     let warmup_start = Instant::now();
+    let warmup_end = warmup_start + warmup_duration;
+
+    let span_stats = Arc::new(ProducerStats::default());
+    let log_stats = Arc::new(ProducerStats::default());
+    let metric_stats = Arc::new(ProducerStats::default());
+    span_stats.set_warmup_end(warmup_end);
+    log_stats.set_warmup_end(warmup_end);
+    metric_stats.set_warmup_end(warmup_end);
     let query_stats = Arc::new(QueryStats::new(warmup_start, warmup_duration));
 
-    let mut tasks = Vec::new();
+    let batch_size = args.batch_size.max(1) as usize;
+    let ingest_concurrency = args.ingest_concurrency.max(1);
+    let semaphore = Arc::new(Semaphore::new(ingest_concurrency));
 
-    if args.span_qps > 0 {
-        tasks.push(tokio::spawn(run_span_writer_http(
-            http_client.clone(),
-            base_url.clone(),
-            args.span_qps,
-            deadline,
-            Arc::clone(&span_stats),
-        )));
-    }
-    if args.log_qps > 0 {
-        tasks.push(tokio::spawn(run_log_writer_http(
-            http_client.clone(),
-            base_url.clone(),
-            args.log_qps,
-            deadline,
-            Arc::clone(&log_stats),
-        )));
-    }
-    if args.metric_qps > 0 {
-        tasks.push(tokio::spawn(run_metric_writer_http(
-            http_client.clone(),
-            base_url.clone(),
-            args.metric_qps,
-            deadline,
-            Arc::clone(&metric_stats),
-        )));
+    let mut tasks = JoinSet::new();
+
+    if phase.enable_ingest() {
+        if args.span_qps > 0 {
+            tasks.spawn(run_open_loop_writer(
+                http_client.clone(),
+                format!("{}/v1/traces", base_url),
+                "span",
+                args.span_qps,
+                batch_size,
+                deadline,
+                Arc::clone(&semaphore),
+                Arc::clone(&span_stats),
+                SignalKind::Span,
+            ));
+        }
+        if args.log_qps > 0 {
+            tasks.spawn(run_open_loop_writer(
+                http_client.clone(),
+                format!("{}/v1/logs", base_url),
+                "log",
+                args.log_qps,
+                batch_size,
+                deadline,
+                Arc::clone(&semaphore),
+                Arc::clone(&log_stats),
+                SignalKind::Log,
+            ));
+        }
+        if args.metric_qps > 0 {
+            tasks.spawn(run_open_loop_writer(
+                http_client.clone(),
+                format!("{}/v1/metrics", base_url),
+                "metric",
+                args.metric_qps,
+                batch_size,
+                deadline,
+                Arc::clone(&semaphore),
+                Arc::clone(&metric_stats),
+                SignalKind::Metric,
+            ));
+        }
     }
 
-    for idx in 0..args.query_concurrency {
-        tasks.push(tokio::spawn(run_query_worker_http(
-            http_client.clone(),
-            base_url.clone(),
-            args.query_interval_ms,
-            deadline,
-            Arc::clone(&query_stats),
-            idx,
-        )));
+    if phase.enable_query() {
+        for idx in 0..args.query_concurrency {
+            tasks.spawn(run_query_worker_http(
+                http_client.clone(),
+                base_url.to_string(),
+                args.query_interval_ms,
+                deadline,
+                Arc::clone(&query_stats),
+                idx,
+            ));
+        }
     }
 
-    for task in tasks {
-        let _ = task.await?;
+    while let Some(res) = tasks.join_next().await {
+        res??;
     }
 
-    print_report(args, span_stats, log_stats, metric_stats, query_stats).await;
+    let duration_secs = args.duration as f64;
+    Ok(PhaseSnapshot {
+        kind: phase,
+        duration_secs,
+        span: span_stats.snapshot(duration_secs).await,
+        log: log_stats.snapshot(duration_secs).await,
+        metric: metric_stats.snapshot(duration_secs).await,
+        query: query_stats.snapshot((args.duration.saturating_sub(warmup_secs)) as f64).await,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum SignalKind {
+    Span,
+    Log,
+    Metric,
+}
+
+async fn run_open_loop_writer(
+    client: reqwest::Client,
+    url: String,
+    label: &'static str,
+    events_per_sec: u32,
+    batch_size: usize,
+    deadline: Instant,
+    semaphore: Arc<Semaphore>,
+    stats: Arc<ProducerStats>,
+    kind: SignalKind,
+) -> Result<()> {
+    let batches_per_sec = events_per_sec as f64 / batch_size as f64;
+    let interval = Duration::from_secs_f64((1.0 / batches_per_sec.max(0.001)).max(0.000_001));
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut counter = 0u64;
+    let mut in_flight: JoinSet<()> = JoinSet::new();
+
+    while Instant::now() < deadline {
+        ticker.tick().await;
+        if Instant::now() >= deadline {
+            break;
+        }
+        let batch_events = batch_size as u64;
+        stats.inc_offered(batch_events);
+
+        let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                stats.inc_drop(batch_events);
+                continue;
+            }
+        };
+
+        let start_counter = counter;
+        counter = counter.wrapping_add(batch_events);
+
+        let client = client.clone();
+        let url = url.clone();
+        let stats = Arc::clone(&stats);
+        in_flight.spawn(async move {
+            let _permit = permit;
+            let body = match kind {
+                SignalKind::Span => {
+                    let spans: Vec<Span> = (0..batch_size)
+                        .map(|i| sample_span(start_counter.wrapping_add(i as u64)))
+                        .collect();
+                    serde_json::to_value(spans_to_otlp(&spans)).ok()
+                }
+                SignalKind::Log => {
+                    let logs: Vec<Log> = (0..batch_size)
+                        .map(|i| sample_log(start_counter.wrapping_add(i as u64)))
+                        .collect();
+                    serde_json::to_value(logs_to_otlp(&logs)).ok()
+                }
+                SignalKind::Metric => {
+                    let metrics: Vec<Metric> = (0..batch_size)
+                        .map(|i| sample_metric(start_counter.wrapping_add(i as u64)))
+                        .collect();
+                    serde_json::to_value(metrics_to_otlp(&metrics)).ok()
+                }
+            };
+            let Some(body) = body else {
+                tracing::warn!("{label} batch serialize failed");
+                stats.inc_error();
+                return;
+            };
+            let start = Instant::now();
+            match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let elapsed = start.elapsed();
+                    stats.record_latency(elapsed).await;
+                    if response.status().is_success() {
+                        stats.inc_achieved(batch_events);
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        tracing::warn!("{label} write HTTP error {}: {}", status, error_text);
+                        stats.inc_error();
+                    }
+                }
+                Err(err) => {
+                    stats.record_latency(start.elapsed()).await;
+                    tracing::warn!("{label} write HTTP request error: {}", err);
+                    stats.inc_error();
+                }
+            }
+        });
+    }
+
+    while in_flight.join_next().await.is_some() {}
     Ok(())
+}
+
+fn spans_to_otlp(spans: &[Span]) -> ExportTraceServiceRequest {
+    let mut resource_spans = Vec::with_capacity(spans.len());
+    for span in spans {
+        resource_spans.extend(span_to_otlp(span).resource_spans);
+    }
+    ExportTraceServiceRequest { resource_spans }
+}
+
+fn logs_to_otlp(logs: &[Log]) -> ExportLogsServiceRequest {
+    let mut resource_logs = Vec::with_capacity(logs.len());
+    for log in logs {
+        resource_logs.extend(log_to_otlp(log).resource_logs);
+    }
+    ExportLogsServiceRequest { resource_logs }
+}
+
+fn metrics_to_otlp(metrics: &[Metric]) -> ExportMetricsServiceRequest {
+    let mut resource_metrics = Vec::with_capacity(metrics.len());
+    for metric in metrics {
+        resource_metrics.extend(metric_to_otlp(metric).resource_metrics);
+    }
+    ExportMetricsServiceRequest { resource_metrics }
 }
 
 // Helper functions to convert internal models to OTLP format
 fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
     let trace_id_bytes = hex::decode(&span.trace_id).unwrap_or_else(|_| {
-        // If not hex, treat as UUID string and convert
         uuid::Uuid::parse_str(&span.trace_id)
             .map(|u| u.as_bytes().to_vec())
             .unwrap_or_else(|_| vec![0u8; 16])
@@ -254,8 +622,8 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
     }
 
     let status_code = match span.status_code.as_deref() {
-        Some("ERROR") => 2, // Status_StatusCode_ERROR
-        _ => 1,             // Status_StatusCode_OK
+        Some("ERROR") => 2,
+        _ => 1,
     };
 
     let otlp_span = OtlpSpan {
@@ -498,138 +866,6 @@ fn metric_to_otlp(metric: &Metric) -> ExportMetricsServiceRequest {
     }
 }
 
-async fn run_span_writer_http(
-    client: reqwest::Client,
-    base_url: String,
-    qps: u32,
-    deadline: Instant,
-    stats: Arc<ProducerStats>,
-) -> Result<()> {
-    let interval =
-        std::time::Duration::from_micros((1_000_000.0 / qps.max(1) as f64).max(1.0) as u64);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut counter = 0u64;
-    let url = format!("{}/v1/traces", base_url);
-    while Instant::now() < deadline {
-        ticker.tick().await;
-        let span = sample_span(counter);
-        let request = span_to_otlp(&span);
-        match client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    stats.inc_success(1);
-                } else {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    tracing::warn!("span write HTTP error {}: {}", status, error_text);
-                    stats.inc_error();
-                }
-            }
-            Err(err) => {
-                tracing::warn!("span write HTTP request error: {}", err);
-                stats.inc_error();
-            }
-        }
-        counter += 1;
-    }
-    Ok(())
-}
-
-async fn run_log_writer_http(
-    client: reqwest::Client,
-    base_url: String,
-    qps: u32,
-    deadline: Instant,
-    stats: Arc<ProducerStats>,
-) -> Result<()> {
-    let interval =
-        std::time::Duration::from_micros((1_000_000.0 / qps.max(1) as f64).max(1.0) as u64);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut counter = 0u64;
-    let url = format!("{}/v1/logs", base_url);
-    while Instant::now() < deadline {
-        ticker.tick().await;
-        let log = sample_log(counter);
-        let request = log_to_otlp(&log);
-        match client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    stats.inc_success(1);
-                } else {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    tracing::warn!("log write HTTP error {}: {}", status, error_text);
-                    stats.inc_error();
-                }
-            }
-            Err(err) => {
-                tracing::warn!("log write HTTP request error: {}", err);
-                stats.inc_error();
-            }
-        }
-        counter += 1;
-    }
-    Ok(())
-}
-
-async fn run_metric_writer_http(
-    client: reqwest::Client,
-    base_url: String,
-    qps: u32,
-    deadline: Instant,
-    stats: Arc<ProducerStats>,
-) -> Result<()> {
-    let interval =
-        std::time::Duration::from_micros((1_000_000.0 / qps.max(1) as f64).max(1.0) as u64);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut counter = 0u64;
-    let url = format!("{}/v1/metrics", base_url);
-    while Instant::now() < deadline {
-        ticker.tick().await;
-        let metric = sample_metric(counter);
-        let request = metric_to_otlp(&metric);
-        match client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    stats.inc_success(1);
-                } else {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    tracing::warn!("metric write HTTP error {}: {}", status, error_text);
-                    stats.inc_error();
-                }
-            }
-            Err(err) => {
-                tracing::warn!("metric write HTTP request error: {}", err);
-                stats.inc_error();
-            }
-        }
-        counter += 1;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 struct SqlQueryRequest {
     sql: String,
@@ -697,7 +933,6 @@ async fn run_query_worker_http(
             }
             Err(err) => {
                 let elapsed = start.elapsed();
-                // Record latency even for failures: alerts still pay the cost, and we want to see it.
                 stats.record(label, elapsed).await;
                 eprintln!(
                     "ERROR: query worker {worker_id} {label} HTTP request error: {}",
@@ -731,8 +966,6 @@ enum QueryCase {
 }
 
 fn pick_query_case(seed: u64) -> QueryCase {
-    // Deterministic, interleaved schedule so short runs (or slow queries) still cover
-    // many query types instead of getting "stuck" on the first weight bucket.
     const SCHEDULE: [QueryCase; 18] = [
         QueryCase::SpanErrorRate5m,
         QueryCase::LogErrorRate5m,
@@ -758,10 +991,8 @@ fn pick_query_case(seed: u64) -> QueryCase {
 
 fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
     let date_filter = (Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d");
-    // DuckDB returns CURRENT_TIMESTAMP as TIMESTAMP WITH TIME ZONE; subtracting INTERVAL from that
-    // is not supported in some builds. Cast to TIMESTAMP for stable interval arithmetic.
     let now_ts = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)";
-    let hit = seed % 5 != 0; // 80/20 hit/miss drilldowns
+    let hit = seed % 5 != 0;
     let session = if hit {
         format!("stress-session-{}", seed % 256)
     } else {
@@ -916,7 +1147,6 @@ fn sample_span(counter: u64) -> Span {
         _ => "/healthz",
     };
 
-    // Deterministic "bursty" error/latency pattern to mimic real alerting scenarios.
     let burst = (counter / 200) % 10 == 0;
     let is_error = burst && (counter % 10 == 0);
     let http_status = if is_error { 500 } else { 200 };
@@ -1042,78 +1272,60 @@ fn sample_metric(counter: u64) -> Metric {
     }
 }
 
-async fn print_report(
-    args: Args,
-    span_stats: Arc<ProducerStats>,
-    log_stats: Arc<ProducerStats>,
-    metric_stats: Arc<ProducerStats>,
-    query_stats: Arc<QueryStats>,
-) {
-    println!("\n========== Stress Test Report ==========");
+async fn print_phase_report(args: &Args, snap: &PhaseSnapshot) {
+    println!("\n========== Phase Report: {} ==========", snap.kind.label());
     println!("Duration: {} seconds", args.duration);
-    println!("Span QPS: {}/s", args.span_qps);
-    println!("Log QPS: {}/s", args.log_qps);
-    println!("Metric QPS: {}/s", args.metric_qps);
-    println!("Query workers: {}", args.query_concurrency);
-
-    print_producer_summary("span", span_stats);
-    print_producer_summary("log", log_stats);
-    print_producer_summary("metric", metric_stats);
-
-    let total_queries = query_stats
-        .executed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let query_errors = query_stats
-        .errors
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let durations = query_stats.durations.lock().await;
-    let avg = durations
-        .iter()
-        .map(|d| d.as_millis())
-        .sum::<u128>()
-        .checked_div(durations.len().max(1) as u128)
-        .unwrap_or(0);
-    let p95 = percentile(&durations, 95);
-    drop(durations);
-
-    let steady_queries = query_stats
-        .steady_executed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let steady_errors = query_stats
-        .steady_errors
-        .load(std::sync::atomic::Ordering::Relaxed);
-
-    println!("Warm-up period: {} seconds", args.warmup_secs);
-    println!("Total queries executed: {}", total_queries);
-    println!("Total query errors: {}", query_errors);
     println!(
-        "Steady-state queries recorded (post-warmup): {}",
-        steady_queries
+        "Offered events/s: span={} log={} metric={} | batch_size={}",
+        args.span_qps, args.log_qps, args.metric_qps, args.batch_size
     );
-    println!("Steady-state query errors: {}", steady_errors);
-    println!("Steady-state avg latency: {} ms", avg);
-    println!("Steady-state p95 latency: {} ms", p95);
+    println!(
+        "Query workers: {} (interval {}ms)",
+        args.query_concurrency, args.query_interval_ms
+    );
+    println!("Warm-up period: {} seconds", args.warmup_secs);
 
-    // Per-query-type breakdown (post-warmup)
-    let by_kind = query_stats.by_kind.lock().await.clone();
-    if !by_kind.is_empty() {
+    print_producer_snapshot("span", &snap.span);
+    print_producer_snapshot("log", &snap.log);
+    print_producer_snapshot("metric", &snap.metric);
+
+    let total_achieved = snap.span.achieved + snap.log.achieved + snap.metric.achieved;
+    let total_offered = snap.span.offered + snap.log.offered + snap.metric.offered;
+    println!(
+        "Total ingest: offered={:.1}/s achieved={:.1}/s ({}/{} events)",
+        total_offered as f64 / snap.duration_secs.max(0.001),
+        total_achieved as f64 / snap.duration_secs.max(0.001),
+        total_achieved,
+        total_offered
+    );
+
+    println!(
+        "Queries: executed={} errors={} steady={} steady_errors={} qps={:.2}",
+        snap.query.executed,
+        snap.query.errors,
+        snap.query.steady_executed,
+        snap.query.steady_errors,
+        snap.query.qps
+    );
+    println!(
+        "Steady-state query latency: avg={}ms p50={}ms p95={}ms p99={}ms",
+        snap.query.avg_ms, snap.query.p50_ms, snap.query.p95_ms, snap.query.p99_ms
+    );
+
+    if !snap.query.by_kind.is_empty() {
         println!("\n---- Query Breakdown (post-warmup) ----");
         let mut ordered: BTreeMap<String, PerQueryStats> = BTreeMap::new();
-        for (k, v) in by_kind {
-            ordered.insert(k, v);
+        for (k, v) in &snap.query.by_kind {
+            ordered.insert(k.clone(), v.clone());
         }
         for (label, stats) in ordered {
-            let avg = stats
-                .durations
-                .iter()
-                .map(|d| d.as_millis())
-                .sum::<u128>()
-                .checked_div(stats.durations.len().max(1) as u128)
-                .unwrap_or(0);
-            let p95 = percentile(&stats.durations, 95);
             println!(
                 "{:<30} executed={} errors={} avg={}ms p95={}ms",
-                label, stats.executed, stats.errors, avg, p95
+                label,
+                stats.executed,
+                stats.errors,
+                avg_ms(&stats.durations),
+                percentile(&stats.durations, 95)
             );
         }
         println!("---------------------------------------");
@@ -1121,13 +1333,86 @@ async fn print_report(
     println!("=========================================");
 }
 
-fn print_producer_summary(label: &str, stats: Arc<ProducerStats>) {
-    let produced = stats.count.load(std::sync::atomic::Ordering::Relaxed);
-    let errors = stats.errors.load(std::sync::atomic::Ordering::Relaxed);
+fn print_producer_snapshot(label: &str, snap: &ProducerSnapshot) {
     println!(
-        "{} records produced: {} (errors: {})",
-        label, produced, errors
+        "{label}: offered={:.1}/s achieved={:.1}/s events={}/{} http_errors={} drops={} latency p50={}ms p95={}ms p99={}ms",
+        snap.offered_eps,
+        snap.achieved_eps,
+        snap.achieved,
+        snap.offered,
+        snap.errors,
+        snap.drops,
+        snap.p50_ms,
+        snap.p95_ms,
+        snap.p99_ms
     );
+}
+
+fn print_interference_summary(phases: &[PhaseSnapshot]) {
+    let ingest = phases.iter().find(|p| p.kind == PhaseKind::Ingest);
+    let query = phases.iter().find(|p| p.kind == PhaseKind::Query);
+    let mixed = phases.iter().find(|p| p.kind == PhaseKind::Mixed);
+    if ingest.is_none() && query.is_none() {
+        return;
+    }
+
+    println!("\n========== Interference Summary ==========");
+    if let (Some(ingest), Some(mixed)) = (ingest, mixed) {
+        let ingest_total = ingest.span.achieved_eps + ingest.log.achieved_eps + ingest.metric.achieved_eps;
+        let mixed_total = mixed.span.achieved_eps + mixed.log.achieved_eps + mixed.metric.achieved_eps;
+        let delta = mixed_total - ingest_total;
+        let pct = if ingest_total > 0.0 {
+            100.0 * delta / ingest_total
+        } else {
+            0.0
+        };
+        println!(
+            "Ingest achieved events/s: ingest_only={:.1} mixed={:.1} Δ={:+.1} ({:+.1}%)",
+            ingest_total, mixed_total, delta, pct
+        );
+        println!(
+            "Ingest p95 latency (span/log/metric): ingest_only={}/{}/{}ms mixed={}/{}/{}ms",
+            ingest.span.p95_ms,
+            ingest.log.p95_ms,
+            ingest.metric.p95_ms,
+            mixed.span.p95_ms,
+            mixed.log.p95_ms,
+            mixed.metric.p95_ms
+        );
+    }
+    if let (Some(query), Some(mixed)) = (query, mixed) {
+        let delta = mixed.query.p95_ms as i128 - query.query.p95_ms as i128;
+        let pct = if query.query.p95_ms > 0 {
+            100.0 * delta as f64 / query.query.p95_ms as f64
+        } else {
+            0.0
+        };
+        println!(
+            "Query p95: query_only={}ms mixed={}ms Δ={:+}ms ({:+.1}%)",
+            query.query.p95_ms, mixed.query.p95_ms, delta, pct
+        );
+        println!(
+            "Query avg: query_only={}ms mixed={}ms",
+            query.query.avg_ms, mixed.query.avg_ms
+        );
+        println!(
+            "Query steady errors: query_only={} mixed={}",
+            query.query.steady_errors, mixed.query.steady_errors
+        );
+    }
+    println!("==========================================");
+}
+
+fn avg_ms(durations: &[Duration]) -> u128 {
+    if durations.is_empty() {
+        return 0;
+    }
+    durations
+        .iter()
+        .map(|d| d.as_millis())
+        .sum::<u128>()
+        .checked_div(durations.len() as u128)
+        .unwrap_or(0)
 }
 
 fn percentile(durations: &[Duration], percentile: usize) -> u128 {
