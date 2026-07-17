@@ -113,8 +113,10 @@ pub struct S3Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuckLakeConfig {
+    /// Catalog backend: `postgres` (production / multi-tenant) or `sqlite` (local multi-client).
+    /// `duckdb` is rejected — DuckLake documents it as single-client only.
     #[serde(default = "default_ducklake_catalog_type")]
-    pub catalog_type: String, // duckdb, postgres, sqlite
+    pub catalog_type: String,
     #[serde(default = "default_ducklake_metadata_path")]
     pub metadata_path: String,
     #[serde(default = "default_ducklake_data_path")]
@@ -123,16 +125,17 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
+    /// Prefer inlining small collector batches into the catalog over tiny Parquet files.
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
 }
 
 fn default_ducklake_catalog_type() -> String {
-    "duckdb".to_string()
+    "sqlite".to_string()
 }
 
 fn default_ducklake_metadata_path() -> String {
-    "./warehouse/ducklake/metadata.ducklake".to_string()
+    "./warehouse/ducklake/metadata.sqlite".to_string()
 }
 
 fn default_ducklake_data_path() -> String {
@@ -237,6 +240,21 @@ impl Config {
         })
     }
 
+    /// Reject unsupported DuckLake catalog backends (official multi-client = postgres or sqlite).
+    pub fn validate_ducklake_catalog(&self) -> anyhow::Result<()> {
+        let catalog_type = self.ducklake_or_default().catalog_type;
+        match catalog_type.as_str() {
+            "postgres" | "sqlite" => Ok(()),
+            "duckdb" => anyhow::bail!(
+                "ducklake.catalog_type=duckdb is unsupported (DuckLake single-client only). \
+                 Use sqlite for local multi-client concurrency or postgres for production."
+            ),
+            other => anyhow::bail!(
+                "unsupported ducklake.catalog_type={other}; use postgres or sqlite"
+            ),
+        }
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         // Load from environment variables or config file
         // Priority: environment > config file > defaults
@@ -251,12 +269,14 @@ impl Config {
 
             // Override with environment variables if present
             config.apply_env_overrides();
+            config.validate_ducklake_catalog()?;
 
             Ok(config)
         } else {
             // Use defaults with environment overrides
             let mut config = Config::default();
             config.apply_env_overrides();
+            config.validate_ducklake_catalog()?;
             Ok(config)
         }
     }
@@ -360,5 +380,15 @@ mod tests {
             None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
         }
         assert_eq!(c.server.max_body_size, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn reject_duckdb_catalog_type() {
+        let mut c = Config::default();
+        let mut dl = c.ducklake_or_default();
+        dl.catalog_type = "duckdb".to_string();
+        c.ducklake = Some(dl);
+        let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
+        assert!(err.to_string().contains("unsupported"));
     }
 }

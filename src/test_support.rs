@@ -20,8 +20,9 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
     std::fs::create_dir_all(duck_dir.join("data")).expect("ducklake data");
 
     let mut dl = config.ducklake_or_default();
+    dl.catalog_type = "sqlite".to_string();
     dl.metadata_path = duck_dir
-        .join("metadata.ducklake")
+        .join("metadata.sqlite")
         .to_string_lossy()
         .into_owned();
     dl.data_path = duck_dir.join("data").to_string_lossy().into_owned() + "/";

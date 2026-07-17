@@ -181,7 +181,7 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
         Bytes::from(body),
     )
     .await;
-    assert!(res.0.success);
+    assert_eq!(res.status(), StatusCode::OK);
 
     let mut buf = Vec::new();
     ExportTraceServiceRequest::default()
@@ -189,7 +189,7 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
         .expect("encode");
     let res =
         ingest_traces_protobuf(State(state.clone()), Some(tenant.clone()), Bytes::from(buf)).await;
-    assert!(res.0.success);
+    assert_eq!(res.status(), StatusCode::OK);
 
     let body = json!({ "resourceMetrics": [] }).to_string();
     let res = ingest_metrics_json(
@@ -198,14 +198,14 @@ async fn unit_ingest_traces_json_and_protobuf_handlers() {
         Bytes::from(body),
     )
     .await;
-    assert!(res.0.success);
+    assert_eq!(res.status(), StatusCode::OK);
 
     let mut buf = Vec::new();
     ExportMetricsServiceRequest::default()
         .encode(&mut buf)
         .unwrap();
     let res = ingest_metrics_protobuf(State(state), Some(tenant), Bytes::from(buf)).await;
-    assert!(res.0.success);
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]

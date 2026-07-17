@@ -1099,26 +1099,22 @@ async fn test_pinned_metadata_updates_on_commit() {
         .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
 
-    let pointer_path = test_pipeline
+    let pointer_dir = test_pipeline
         .cache_dir
         .path()
-        .join("catalog_metadata")
-        .join("traces.json");
-    let first = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
-    let first_json: serde_json::Value = serde_json::from_str(&first).expect("metadata json");
-    let first_snapshot = first_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let first_location = first_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .join("catalog_metadata");
     assert!(
-        first_snapshot.is_some(),
-        "expected snapshot_id in metadata pointer"
+        !pointer_dir.join("traces.json").exists(),
+        "legacy catalog_metadata pointer files must not be written"
     );
-    assert!(
-        first_location.is_some(),
-        "expected metadata_location in metadata pointer"
-    );
+
+    let count_sql = "SELECT COUNT(*) AS count FROM union_spans WHERE app_id = 'app-pin'";
+    let first = test_pipeline
+        .execute_query(count_sql)
+        .await
+        .expect("query after first flush");
+    let first_count = first.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(first_count, 10, "expected 10 spans after first flush");
 
     pipeline
         .add_spans(spans, 10 * 256)
@@ -1126,17 +1122,15 @@ async fn test_pinned_metadata_updates_on_commit() {
         .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
 
-    let second = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
-    let second_json: serde_json::Value = serde_json::from_str(&second).expect("metadata json");
-    let second_snapshot = second_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let second_location = second_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
+    let second = test_pipeline
+        .execute_query(count_sql)
+        .await
+        .expect("query after second flush");
+    let second_count = second.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(second_count, 20, "expected 20 spans after second flush");
     assert!(
-        second_snapshot != first_snapshot || second_location != first_location,
-        "expected pinned metadata to update after commit"
+        !pointer_dir.join("traces.json").exists(),
+        "legacy catalog_metadata pointer files must not be written"
     );
 }
 
@@ -1389,7 +1383,7 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
         config.ducklake.is_some(),
         "DuckLake required for maintenance smoke"
     );
-    let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
+    let executor = MaintenanceExecutor::new(&config, None, None).await.unwrap();
     let _ = executor.run_once().await.unwrap();
 }
 
@@ -1579,78 +1573,19 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         union_count_before
     );
 
-    // Step 4: Get initial catalog metadata pointer state
-    println!("📌 Step 4: Capturing initial catalog metadata pointer state...");
+    // Step 4-7: Legacy catalog_metadata pointer files are gone; durable data is DuckLake only.
+    println!("📌 Step 4-7: Confirming no legacy catalog_metadata pointer files...");
     let pointer_path = test_pipeline
         .cache_dir
         .path()
         .join("catalog_metadata")
         .join("traces.json");
-
-    let initial_metadata = if pointer_path.exists() {
-        let contents = std::fs::read_to_string(&pointer_path).expect("read metadata pointer");
-        let json: serde_json::Value = serde_json::from_str(&contents).expect("parse metadata json");
-        Some((
-            json.get("snapshot_id").and_then(|v| v.as_i64()),
-            json.get("metadata_location")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        ))
-    } else {
-        None
-    };
-    println!("✅ Initial metadata state: {:?}", initial_metadata);
-
-    // Step 5-6: Flush-through already committed; no staged optimizer tier
+    assert!(
+        !pointer_path.exists(),
+        "legacy catalog_metadata pointer files must not be written"
+    );
     println!("⚙️  Step 5-6: Ingest is flush-through (no staged optimizer)");
-
-    // Step 7: Verify catalog metadata pointer exists after commit
-    println!("📌 Step 7: Verifying catalog metadata pointer is updated...");
-    assert!(
-        pointer_path.exists(),
-        "Expected catalog metadata pointer file to exist after commit"
-    );
-    let updated_contents =
-        std::fs::read_to_string(&pointer_path).expect("read updated metadata pointer");
-    let updated_json: serde_json::Value =
-        serde_json::from_str(&updated_contents).expect("parse updated metadata json");
-    let updated_snapshot = updated_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let updated_location = updated_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    assert!(
-        updated_snapshot.is_some(),
-        "Expected snapshot_id in updated metadata pointer"
-    );
-    assert!(
-        updated_location.is_some(),
-        "Expected metadata_location in updated metadata pointer"
-    );
-
-    if let Some((initial_snapshot, initial_location)) = initial_metadata {
-        let metadata_updated =
-            updated_snapshot != initial_snapshot || updated_location != initial_location;
-        if metadata_updated {
-            println!(
-                "✅ Metadata pinning updated: snapshot_id {:?} -> {:?}, location changed: {}",
-                initial_snapshot,
-                updated_snapshot,
-                updated_location != initial_location
-            );
-        } else {
-            println!(
-                "✅ Metadata pinning stable after flush-through: {:?}",
-                (updated_snapshot, updated_location)
-            );
-        }
-    } else {
-        println!(
-            "✅ Metadata pinning created: snapshot_id {:?}",
-            updated_snapshot
-        );
-    }
+    println!("✅ No Softprobe metadata pointer files (DuckLake catalog owns snapshots)");
 
     // Step 8: Verify union view doesn't double count (should still be expected_count, not 2x)
     println!("🔍 Step 8: Verifying union view doesn't double count...");

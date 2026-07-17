@@ -1,15 +1,17 @@
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;
+use crate::runtime_engine::DuckLakeScopeResolver;
 use anyhow::{anyhow, Result};
 use duckdb::{Connection, ToSql};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MaintenanceExecutor {
     config: Config,
     ducklake: crate::config::DuckLakeConfig,
     dropdown_catalog: Option<Arc<DropdownCatalog>>,
+    scope_registry: Option<DuckLakeScopeResolver>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,11 +62,13 @@ impl MaintenanceExecutor {
     pub async fn new(
         config: &Config,
         dropdown_catalog: Option<Arc<DropdownCatalog>>,
+        scope_registry: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
             ducklake: config.ducklake_or_default(),
             dropdown_catalog,
+            scope_registry,
         })
     }
 
@@ -72,50 +76,106 @@ impl MaintenanceExecutor {
         self.run_once_ducklake().await
     }
 
+    async fn maintenance_scopes(&self) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
+        let mut scopes = Vec::new();
+        let default = self.ducklake.clone();
+        scopes.push((
+            format!("default:{}", default.metadata_schema),
+            default.clone(),
+        ));
+        if let Some(registry) = &self.scope_registry {
+            for scope in registry.list_scopes().await? {
+                if scope.metadata_schema == default.metadata_schema
+                    && scope.data_path == default.data_path
+                {
+                    continue;
+                }
+                let mut dk = default.clone();
+                dk.metadata_schema = scope.metadata_schema;
+                dk.data_path = scope.data_path;
+                scopes.push((format!("registry:{}", dk.metadata_schema), dk));
+            }
+        }
+        Ok(scopes)
+    }
+
     async fn run_once_ducklake(&self) -> Result<MaintenanceSummary> {
-        let ducklake = &self.ducklake;
-        let conn = self.open_ducklake_connection(ducklake)?;
-        self.attach_ducklake(&conn, ducklake)?;
-
-        let tables = vec!["traces", "logs", "metrics"];
+        let tables = ["traces", "logs", "metrics"];
         let mut results = Vec::new();
-        for table in tables {
-            let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
-            let compaction = if self.config.compaction.enabled {
-                CompactionResult {
-                    status: self.ducklake_compact_table(&conn, ducklake, table)?,
-                }
-            } else {
-                CompactionResult {
-                    status: CompactionStatus::Skipped,
+
+        for (label, ducklake) in self.maintenance_scopes().await? {
+            let conn = match self.open_ducklake_connection(&ducklake) {
+                Ok(c) => c,
+                Err(err) => {
+                    warn!("Maintenance skip scope {}: open failed: {}", label, err);
+                    continue;
                 }
             };
+            if let Err(err) = self.attach_ducklake(&conn, &ducklake) {
+                warn!("Maintenance skip scope {}: attach failed: {}", label, err);
+                continue;
+            }
 
-            let metadata = if self.config.compaction.metadata_maintenance_enabled {
-                let expired = self.ducklake_expire_snapshots(&conn, ducklake)?;
-                self.ducklake_cleanup_files(&conn, ducklake)?;
-                MetadataMaintenanceResult {
-                    expired_snapshots: expired,
-                    skipped: false,
-                }
-            } else {
-                MetadataMaintenanceResult {
-                    expired_snapshots: 0,
-                    skipped: true,
-                }
-            };
+            for table in tables {
+                let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
+                let compaction = if self.config.compaction.enabled {
+                    CompactionResult {
+                        status: match self.ducklake_compact_table(&conn, &ducklake, table) {
+                            Ok(status) => status,
+                            Err(err) => {
+                                warn!(
+                                    "Maintenance compaction failed for {} ({}): {}",
+                                    table_ident, label, err
+                                );
+                                CompactionStatus::Skipped
+                            }
+                        },
+                    }
+                } else {
+                    CompactionResult {
+                        status: CompactionStatus::Skipped,
+                    }
+                };
 
-            results.push(TableMaintenanceResult {
-                table: table_ident,
-                metadata,
-                compaction,
-                rewrite_manifests: ActionResult {
-                    status: ActionStatus::Unsupported,
-                },
-                remove_orphan_files: ActionResult {
-                    status: ActionStatus::Unsupported,
-                },
-            });
+                let metadata = if self.config.compaction.metadata_maintenance_enabled {
+                    match (
+                        self.ducklake_expire_snapshots(&conn, &ducklake),
+                        self.ducklake_cleanup_files(&conn, &ducklake),
+                    ) {
+                        (Ok(expired), Ok(())) => MetadataMaintenanceResult {
+                            expired_snapshots: expired,
+                            skipped: false,
+                        },
+                        (Err(err), _) | (_, Err(err)) => {
+                            warn!(
+                                "Maintenance metadata failed for {} ({}): {}",
+                                table_ident, label, err
+                            );
+                            MetadataMaintenanceResult {
+                                expired_snapshots: 0,
+                                skipped: true,
+                            }
+                        }
+                    }
+                } else {
+                    MetadataMaintenanceResult {
+                        expired_snapshots: 0,
+                        skipped: true,
+                    }
+                };
+
+                results.push(TableMaintenanceResult {
+                    table: table_ident,
+                    metadata,
+                    compaction,
+                    rewrite_manifests: ActionResult {
+                        status: ActionStatus::Unsupported,
+                    },
+                    remove_orphan_files: ActionResult {
+                        status: ActionStatus::Unsupported,
+                    },
+                });
+            }
         }
 
         if let Some(ref dc) = self.dropdown_catalog {
@@ -177,33 +237,9 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<()> {
-        let attach_target = match ducklake.catalog_type.as_str() {
-            "postgres" => {
-                if ducklake.metadata_path.starts_with("postgres:") {
-                    ducklake.metadata_path.clone()
-                } else {
-                    format!("postgres:{}", ducklake.metadata_path)
-                }
-            }
-            "sqlite" => {
-                if ducklake.metadata_path.starts_with("sqlite:") {
-                    ducklake.metadata_path.clone()
-                } else {
-                    format!("sqlite:{}", ducklake.metadata_path)
-                }
-            }
-            _ => ducklake.metadata_path.clone(),
-        };
+        let attach_target = crate::storage::ducklake::ducklake_attach_target(ducklake);
         self.prepare_local_ducklake_paths(ducklake, &attach_target)?;
-        let mut opts = vec![format!(
-            "DATA_PATH '{}'",
-            ducklake.data_path.replace('\'', "''")
-        )];
-        if ducklake.catalog_type == "postgres" && ducklake.metadata_schema != "main" {
-            let schema = ducklake.metadata_schema.replace('\'', "''");
-            opts.push(format!("METADATA_SCHEMA '{}'", schema));
-            opts.push(format!("META_SCHEMA '{}'", schema));
-        }
+        let opts = crate::storage::ducklake::ducklake_attach_options(ducklake);
         let attach_sql = format!(
             "ATTACH 'ducklake:{}' AS {} ({});",
             attach_target.replace('\'', "''"),
@@ -219,11 +255,9 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
         attach_target: &str,
     ) -> Result<()> {
-        if ducklake.catalog_type == "duckdb" || ducklake.catalog_type == "sqlite" {
+        if ducklake.catalog_type == "sqlite" {
             let raw = attach_target
                 .strip_prefix("sqlite:")
-                .unwrap_or(attach_target)
-                .strip_prefix("duckdb:")
                 .unwrap_or(attach_target);
             let metadata_path = std::path::PathBuf::from(raw);
             if let Some(parent) = metadata_path.parent() {

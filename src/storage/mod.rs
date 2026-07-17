@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 pub use ducklake::DuckLakeWriter;
 
-/// Storage interface for query-time access to the durable DuckLake writer.
+/// Shared ingest↔query handle to the durable DuckLake writer.
+///
+/// Name is historical (buffer/staged tiers are gone). Concurrency and catalog visibility are
+/// handled by DuckLake + catalog choice (`postgres` / `sqlite`), not Softprobe reattach hacks.
 pub trait TieredStorage: Send + Sync {
     fn writer(&self) -> Arc<DuckLakeWriter>;
-    /// Monotonic counter bumped after each successful DuckLake table mutation; query workers use it
-    /// to reattach so catalog metadata matches the writer connection.
-    fn catalog_write_generation(&self) -> u64;
 }
 
 /// Storage components for flush-through DuckLake durable commit.
@@ -30,10 +30,6 @@ impl TieredStorage for Storage {
     fn writer(&self) -> Arc<DuckLakeWriter> {
         self.writer.clone()
     }
-
-    fn catalog_write_generation(&self) -> u64 {
-        self.writer.catalog_write_generation()
-    }
 }
 
 #[cfg(test)]
@@ -46,6 +42,5 @@ mod tests {
             .await
             .expect("storage");
         let _ = storage.writer();
-        let _ = storage.catalog_write_generation();
     }
 }

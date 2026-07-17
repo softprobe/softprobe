@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
         config.as_ref(),
         dropdown_catalog.clone(),
+        storage.writer.scope_registry().cloned(),
     )
     .await?
     {

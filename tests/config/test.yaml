@@ -28,8 +28,8 @@ s3:
   secret_access_key: minioadmin
 
 ducklake:
-  catalog_type: duckdb
-  metadata_path: /tmp/softprobe-test-ducklake/metadata.ducklake
+  catalog_type: sqlite
+  metadata_path: /tmp/softprobe-test-ducklake/metadata.sqlite
   data_path: s3://warehouse/ducklake/data/
   catalog_alias: softprobe
   metadata_schema: main

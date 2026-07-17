@@ -37,7 +37,7 @@ Configuration can be provided via:
 Tune via `config.yaml` (see comments there) or the env var above:
 
 - **HTTP request bodies:** OTLP and control JSON payloads larger than `max_body_size` are rejected (HTTP 413).
-- **Ingest:** flush-through to DuckLake per OTLP request (collector owns batching). `ducklake.data_inlining_row_limit` controls Postgres row inlining vs Parquet.
+- **Ingest:** flush-through to DuckLake per OTLP request (collector owns batching). `ducklake.data_inlining_row_limit` (default 10000) prefers catalog inlining over tiny Parquet files. Concurrent commits use DuckLake’s built-in retries; catalog concurrency is **postgres** (prod) or **sqlite** (local).
 - **DuckLake maintenance:** compaction and metadata retention settings bound catalog growth; see [`docs/design.md`](../docs/design.md) (runtime ingest and storage limits).
 
 ## Development

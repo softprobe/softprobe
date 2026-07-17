@@ -417,6 +417,27 @@ RETURNING scope_id;"#,
         Ok(scope)
     }
 
+    /// List all provisioned DuckLake scopes from the registry (for maintenance).
+    pub async fn list_scopes(&self) -> Result<Vec<DuckLakeScope>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT ducklake_metadata_schema, data_path FROM {}.scope_registry ORDER BY scope_id;",
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| DuckLakeScope {
+                metadata_schema: row.get(0),
+                data_path: row.get(1),
+            })
+            .collect())
+    }
+
     /// Resolve scope and load active telemetry column manifests from Postgres.
     pub async fn load_active_telemetry_columns_manifests(
         &self,

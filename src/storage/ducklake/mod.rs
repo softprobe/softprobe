@@ -23,8 +23,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 /// DuckDB `httpfs` uses GCS **HMAC interoperability keys** for `gs://` paths, not OAuth /
@@ -69,7 +68,6 @@ pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) ->
 pub struct DuckLakeWriter {
     config: Config,
     ducklake: DuckLakeConfig,
-    cache_dir: Option<PathBuf>,
     dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
     /// When set with `catalog_type = postgres`, commits route to per-tenant metadata schemas.
     tenant_ducklake: Option<DuckLakeScopeResolver>,
@@ -78,8 +76,8 @@ pub struct DuckLakeWriter {
     /// registry resolver route each batch by `span.tenant_id` even if config carries a non-main
     /// registry schema name.
     scope_bound: bool,
-    /// Bumped after each successful committed write so query-side DuckDB connections can reattach.
-    catalog_write_generation: Arc<AtomicU64>,
+    /// Reused DuckDB connections keyed by catalog attach identity (type|path|schema|data_path).
+    writer_conns: Mutex<HashMap<String, Connection>>,
 }
 
 impl DuckLakeWriter {
@@ -106,17 +104,17 @@ impl DuckLakeWriter {
         tenant_ducklake: Option<DuckLakeScopeResolver>,
         scope_bound: bool,
     ) -> Result<Self> {
+        config.validate_ducklake_catalog()?;
         let ducklake = config.ducklake_or_default();
         let writer = Self {
             config: config.clone(),
             ducklake,
-            cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
             dropdown_catalog,
             tenant_ducklake,
             scope_bound,
-            catalog_write_generation: Arc::new(AtomicU64::new(0)),
+            writer_conns: Mutex::new(HashMap::new()),
         };
-        writer.initialize_catalog().await?;
+        writer.initialize_catalog()?;
         info!("DuckLake writer initialized (scope_bound={})", scope_bound);
         Ok(writer)
     }
@@ -125,8 +123,8 @@ impl DuckLakeWriter {
         self.dropdown_catalog.clone()
     }
 
-    pub fn catalog_write_generation(&self) -> u64 {
-        self.catalog_write_generation.load(Ordering::Acquire)
+    pub fn scope_registry(&self) -> Option<&DuckLakeScopeResolver> {
+        self.tenant_ducklake.as_ref()
     }
 
     /// `true` when DuckLake writes are partitioned per authenticated tenant (Postgres catalog + registry).
@@ -134,14 +132,44 @@ impl DuckLakeWriter {
         self.use_tenant_scoped_ducklake()
     }
 
-    async fn initialize_catalog(&self) -> Result<()> {
-        let conn = self.open_connection()?;
-        self.attach_ducklake(&conn)?;
-        self.ensure_schema(&conn)?;
-        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
-            self.reset_tables_for_dev(&conn)?;
+    fn initialize_catalog(&self) -> Result<()> {
+        self.with_attached_conn(&self.ducklake, |conn| {
+            if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
+                self.reset_tables_for_dev(conn)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn conn_cache_key(dk: &DuckLakeConfig) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            dk.catalog_type, dk.metadata_path, dk.metadata_schema, dk.data_path
+        )
+    }
+
+    /// Borrow a long-lived attached DuckDB connection for `dk` (ATTACH once per scope key).
+    fn with_attached_conn<R>(
+        &self,
+        dk: &DuckLakeConfig,
+        f: impl FnOnce(&Connection) -> Result<R>,
+    ) -> Result<R> {
+        let key = Self::conn_cache_key(dk);
+        let mut guard = self
+            .writer_conns
+            .lock()
+            .map_err(|_| anyhow!("DuckLake writer connection lock poisoned"))?;
+        if !guard.contains_key(&key) {
+            let conn = self.open_connection_for(dk)?;
+            apply_ducklake_retry_settings(&conn)?;
+            self.attach_ducklake_for(&conn, dk)?;
+            self.ensure_schema_for(&conn, dk)?;
+            guard.insert(key.clone(), conn);
         }
-        Ok(())
+        let conn = guard
+            .get(&key)
+            .ok_or_else(|| anyhow!("DuckLake writer connection missing after insert"))?;
+        f(conn)
     }
 
     fn use_tenant_scoped_ducklake(&self) -> bool {
@@ -503,25 +531,23 @@ impl DuckLakeWriter {
         for table in &spec.target.tables {
             self.ensure_telemetry_table_for(&dk, table).await?;
         }
-        let conn = self.open_connection()?;
-        self.attach_ducklake_for(&conn, &dk)?;
-        self.ensure_schema_for(&conn, &dk)?;
-        let prefix = if dk.metadata_schema == "main" {
-            dk.catalog_alias.clone()
-        } else {
-            format!(
-                "{}.{}",
-                quote_duckdb_ident(&dk.catalog_alias),
-                quote_duckdb_ident(&dk.metadata_schema)
-            )
-        };
-        let ddls = telemetry_column_add_ddls(&prefix, spec)
-            .map_err(|err| anyhow!("telemetry promotion validation failed: {err}"))?;
-        for ddl in &ddls {
-            conn.execute_batch(ddl)?;
-        }
-        self.catalog_write_generation
-            .fetch_add(1, Ordering::Release);
+        let ddls = self.with_attached_conn(&dk, |conn| {
+            let prefix = if dk.metadata_schema == "main" {
+                dk.catalog_alias.clone()
+            } else {
+                format!(
+                    "{}.{}",
+                    quote_duckdb_ident(&dk.catalog_alias),
+                    quote_duckdb_ident(&dk.metadata_schema)
+                )
+            };
+            let ddls = telemetry_column_add_ddls(&prefix, spec)
+                .map_err(|err| anyhow!("telemetry promotion validation failed: {err}"))?;
+            for ddl in &ddls {
+                conn.execute_batch(ddl)?;
+            }
+            Ok(ddls)
+        })?;
         Ok(ddls)
     }
 
@@ -535,25 +561,23 @@ impl DuckLakeWriter {
         spec: &BusinessTableManifest,
     ) -> Result<Vec<String>> {
         let dk = self.effective_ducklake(scope);
-        let conn = self.open_connection()?;
-        self.attach_ducklake_for(&conn, &dk)?;
-        self.ensure_schema_for(&conn, &dk)?;
-        let prefix = if dk.metadata_schema == "main" {
-            dk.catalog_alias.clone()
-        } else {
-            format!(
-                "{}.{}",
-                quote_duckdb_ident(&dk.catalog_alias),
-                quote_duckdb_ident(&dk.metadata_schema)
-            )
-        };
-        let ddls = business_table_create_ddls(&prefix, spec)
-            .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
-        for ddl in &ddls {
-            conn.execute_batch(ddl)?;
-        }
-        self.catalog_write_generation
-            .fetch_add(1, Ordering::Release);
+        let ddls = self.with_attached_conn(&dk, |conn| {
+            let prefix = if dk.metadata_schema == "main" {
+                dk.catalog_alias.clone()
+            } else {
+                format!(
+                    "{}.{}",
+                    quote_duckdb_ident(&dk.catalog_alias),
+                    quote_duckdb_ident(&dk.metadata_schema)
+                )
+            };
+            let ddls = business_table_create_ddls(&prefix, spec)
+                .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
+            for ddl in &ddls {
+                conn.execute_batch(ddl)?;
+            }
+            Ok(ddls)
+        })?;
         Ok(ddls)
     }
 
@@ -616,55 +640,49 @@ impl DuckLakeWriter {
         }
 
         let temp_path = self.write_temp_parquet(table_name, &record_batches)?;
-        let conn = self.open_connection()?;
-        self.attach_ducklake_for(&conn, dk)?;
-        self.ensure_schema_for(&conn, dk)?;
-
-        let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-        let candidates = self.table_name_candidates_for(table_name, dk);
-        let mut last_err: Option<anyhow::Error> = None;
-        let mut wrote = false;
-        for qualified_table in candidates {
-            let ddl = format!(
-                "CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM read_parquet('{path}') LIMIT 0;",
-                table = qualified_table,
-                path = escaped_path
-            );
-            let insert = format!(
-                "INSERT INTO {table} SELECT * FROM read_parquet('{path}') {order_clause};",
-                table = qualified_table,
-                path = escaped_path,
-                order_clause = self.insert_order_clause(table_name),
-            );
-            conn.execute_batch("BEGIN TRANSACTION;")?;
-            match conn
-                .execute_batch(&ddl)
-                .and_then(|_| conn.execute_batch(&insert))
-            {
-                Ok(_) => {
-                    conn.execute_batch("COMMIT;")?;
-                    self.apply_table_options(&conn, &qualified_table);
-                    wrote = true;
-                    break;
-                }
-                Err(err) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    last_err = Some(anyhow!(
-                        "DuckLake write failed for {}: {}",
-                        qualified_table,
-                        err
-                    ));
+        let write_result = self.with_attached_conn(dk, |conn| {
+            let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
+            let candidates = self.table_name_candidates_for(table_name, dk);
+            let mut last_err: Option<anyhow::Error> = None;
+            for qualified_table in candidates {
+                let ddl = format!(
+                    "CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM read_parquet('{path}') LIMIT 0;",
+                    table = qualified_table,
+                    path = escaped_path
+                );
+                let insert = format!(
+                    "INSERT INTO {table} SELECT * FROM read_parquet('{path}') {order_clause};",
+                    table = qualified_table,
+                    path = escaped_path,
+                    order_clause = self.insert_order_clause(table_name),
+                );
+                conn.execute_batch("BEGIN TRANSACTION;")?;
+                match conn
+                    .execute_batch(&ddl)
+                    .and_then(|_| conn.execute_batch(&insert))
+                {
+                    Ok(_) => {
+                        conn.execute_batch("COMMIT;")?;
+                        self.apply_table_options(conn, &qualified_table);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        last_err = Some(anyhow!(
+                            "DuckLake write failed for {}: {}",
+                            qualified_table,
+                            err
+                        ));
+                    }
                 }
             }
-        }
-        if !wrote {
+            Err(last_err.unwrap_or_else(|| anyhow!("DuckLake write failed")))
+        });
+        if write_result.is_err() {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(last_err.unwrap_or_else(|| anyhow!("DuckLake write failed")));
+            return write_result;
         }
-        self.update_metadata_pointer_for(table_name, dk)?;
         let _ = std::fs::remove_file(&temp_path);
-        self.catalog_write_generation
-            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -689,16 +707,16 @@ impl DuckLakeWriter {
         Ok(temp_path)
     }
 
-    fn open_connection(&self) -> Result<Connection> {
+    fn open_connection_for(&self, dk: &DuckLakeConfig) -> Result<Connection> {
         let conn =
             Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
-        configure_httpfs_gcs_for_data_path(&conn, &self.ducklake.data_path)?;
+        configure_httpfs_gcs_for_data_path(&conn, &dk.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
-        if self.ducklake.catalog_type == "postgres" {
+        if dk.catalog_type == "postgres" {
             conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
         }
-        if self.ducklake.catalog_type == "sqlite" {
+        if dk.catalog_type == "sqlite" {
             conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
         }
         self.apply_s3_settings(&conn)?;
@@ -731,39 +749,11 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    fn attach_ducklake(&self, conn: &Connection) -> Result<()> {
-        self.attach_ducklake_for(conn, &self.ducklake)
-    }
-
     fn attach_ducklake_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
-        let attach_target = match dk.catalog_type.as_str() {
-            "postgres" => {
-                if dk.metadata_path.starts_with("postgres:") {
-                    dk.metadata_path.clone()
-                } else {
-                    format!("postgres:{}", dk.metadata_path)
-                }
-            }
-            "sqlite" => {
-                if dk.metadata_path.starts_with("sqlite:") {
-                    dk.metadata_path.clone()
-                } else {
-                    format!("sqlite:{}", dk.metadata_path)
-                }
-            }
-            _ => dk.metadata_path.clone(),
-        };
+        let attach_target = ducklake_attach_target(dk);
         self.prepare_local_ducklake_paths_for(&attach_target, dk)?;
 
-        let mut options = vec![format!("DATA_PATH '{}'", escape_sql_literal(&dk.data_path))];
-        if dk.catalog_type == "postgres" && dk.metadata_schema != "main" {
-            let schema = escape_sql_literal(&dk.metadata_schema);
-            options.push(format!("METADATA_SCHEMA '{}'", schema));
-            options.push(format!("META_SCHEMA '{}'", schema));
-        }
-        if let Some(limit) = dk.data_inlining_row_limit {
-            options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
-        }
+        let options = ducklake_attach_options(dk);
         let sql = format!(
             "ATTACH 'ducklake:{target}' AS {alias} ({opts});",
             target = escape_sql_literal(&attach_target),
@@ -787,11 +777,9 @@ impl DuckLakeWriter {
         attach_target: &str,
         dk: &DuckLakeConfig,
     ) -> Result<()> {
-        if dk.catalog_type == "duckdb" || dk.catalog_type == "sqlite" {
+        if dk.catalog_type == "sqlite" {
             let raw = attach_target
                 .strip_prefix("sqlite:")
-                .unwrap_or(attach_target)
-                .strip_prefix("duckdb:")
                 .unwrap_or(attach_target);
             let metadata_path = PathBuf::from(raw);
             if let Some(parent) = metadata_path.parent() {
@@ -802,10 +790,6 @@ impl DuckLakeWriter {
             }
         }
         Ok(())
-    }
-
-    fn ensure_schema(&self, conn: &Connection) -> Result<()> {
-        self.ensure_schema_for(conn, &self.ducklake)
     }
 
     fn ensure_schema_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
@@ -835,32 +819,6 @@ impl DuckLakeWriter {
             self.qualified_table_name_for(table_name, dk),
             format!("{}.{}", dk.catalog_alias, table_name),
         ]
-    }
-
-    fn update_metadata_pointer_for(&self, table_name: &str, dk: &DuckLakeConfig) -> Result<()> {
-        let Some(cache_dir) = self.cache_dir.as_ref() else {
-            return Ok(());
-        };
-        let metadata_dir = cache_dir.join("catalog_metadata");
-        std::fs::create_dir_all(&metadata_dir)?;
-        let pointer_path = metadata_dir.join(format!("{table_name}.json"));
-        let mut next_snapshot = chrono::Utc::now().timestamp_millis();
-        if let Ok(existing) = std::fs::read_to_string(&pointer_path) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&existing) {
-                if let Some(snapshot) = value.get("snapshot_id").and_then(|v| v.as_i64()) {
-                    next_snapshot = std::cmp::max(next_snapshot, snapshot + 1);
-                }
-            }
-        }
-        let payload = serde_json::json!({
-            "table_location": dk.data_path,
-            "metadata_file": format!("{table_name}-ducklake-metadata.json"),
-            "metadata_location": format!("ducklake://{}/{}/{}", dk.catalog_alias, dk.metadata_schema, table_name),
-            "snapshot_id": next_snapshot,
-            "data_files_path": serde_json::Value::Null,
-        });
-        std::fs::write(pointer_path, payload.to_string())?;
-        Ok(())
     }
 
     fn apply_table_options(&self, conn: &Connection, qualified_table: &str) {
@@ -913,6 +871,55 @@ impl DuckLakeWriter {
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+/// Pin DuckLake extension conflict-retry defaults (official concurrent-write mechanism).
+fn apply_ducklake_retry_settings(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "SET ducklake_max_retry_count = 10;\n\
+         SET ducklake_retry_backoff = 1.5;\n\
+         SET ducklake_retry_wait_ms = 100;",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn ducklake_attach_target(dk: &DuckLakeConfig) -> String {
+    match dk.catalog_type.as_str() {
+        "postgres" => {
+            if dk.metadata_path.starts_with("postgres:") {
+                dk.metadata_path.clone()
+            } else {
+                format!("postgres:{}", dk.metadata_path)
+            }
+        }
+        "sqlite" => {
+            if dk.metadata_path.starts_with("sqlite:") {
+                dk.metadata_path.clone()
+            } else {
+                format!("sqlite:{}", dk.metadata_path)
+            }
+        }
+        _ => dk.metadata_path.clone(),
+    }
+}
+
+/// ATTACH options shared by writer / query / compaction.
+pub(crate) fn ducklake_attach_options(dk: &DuckLakeConfig) -> Vec<String> {
+    let mut options = vec![format!("DATA_PATH '{}'", escape_sql_literal(&dk.data_path))];
+    if dk.catalog_type == "postgres" && dk.metadata_schema != "main" {
+        let schema = escape_sql_literal(&dk.metadata_schema);
+        options.push(format!("METADATA_SCHEMA '{}'", schema));
+        options.push(format!("META_SCHEMA '{}'", schema));
+    }
+    // Official SQLite multi-client guidance: WAL + busy timeout (DuckLake / sqlite extension).
+    if dk.catalog_type == "sqlite" {
+        options.push("META_JOURNAL_MODE 'WAL'".to_string());
+        options.push("META_BUSY_TIMEOUT 500".to_string());
+    }
+    if let Some(limit) = dk.data_inlining_row_limit {
+        options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
+    }
+    options
 }
 
 fn quote_duckdb_ident(input: &str) -> String {
@@ -994,18 +1001,17 @@ mod tests {
         let writer = DuckLakeWriter {
             config,
             ducklake: DuckLakeConfig {
-                catalog_type: "duckdb".to_string(),
+                catalog_type: "sqlite".to_string(),
                 metadata_path: ":memory:".to_string(),
                 data_path: "/tmp/unused".to_string(),
                 catalog_alias: "softprobe".to_string(),
                 metadata_schema: "main".to_string(),
                 data_inlining_row_limit: None,
             },
-            cache_dir: None,
             dropdown_catalog: None,
             tenant_ducklake: None,
             scope_bound: false,
-            catalog_write_generation: Arc::new(AtomicU64::new(0)),
+            writer_conns: Mutex::new(HashMap::new()),
         };
 
         let schema = writer.spans_schema().await.expect("schema");

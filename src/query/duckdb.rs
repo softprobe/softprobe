@@ -19,7 +19,6 @@ pub struct DuckDBQueryEngine {
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
     config: Config,
-    tiered_storage: Arc<dyn TieredStorage>,
 }
 
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
@@ -95,7 +94,6 @@ struct ViewCounters {
 
 static VIEW_COUNTERS: Lazy<ViewCounters> = Lazy::new(ViewCounters::default);
 static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-static PINNED_MODE_OPTION_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 #[derive(Debug, Clone)]
 pub struct ViewCounterSnapshot {
     pub committed_recreates: u64,
@@ -129,9 +127,6 @@ struct QueryRequest {
 
 struct ConnectionState {
     conn: Connection,
-    tiered_storage: Arc<dyn TieredStorage>,
-    /// Last `TieredStorage::catalog_write_generation()` applied after reattach for this worker.
-    last_seen_catalog_write_generation: u64,
     cache_httpfs_wrap_supported: bool,
     cache_httpfs_wrapped_s3: bool,
     cache_httpfs_wrapped_httpfs: bool,
@@ -141,7 +136,6 @@ struct ConnectionState {
 struct DuckDBCore {
     config: Config,
     cache: CacheSettings,
-    tiered_storage: Arc<dyn TieredStorage>,
 }
 
 /// Query result containing columns and rows
@@ -152,11 +146,10 @@ pub struct QueryResult {
 }
 
 impl DuckDBQueryEngine {
-    pub async fn new(config: &Config, tiered_storage: Arc<dyn TieredStorage>) -> Result<Self> {
+    pub async fn new(config: &Config, _tiered_storage: Arc<dyn TieredStorage>) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
             cache: CacheSettings::new(config),
-            tiered_storage: tiered_storage.clone(),
         };
         // Install extensions once to ensure they're available
         let temp_conn = core.open_connection()?;
@@ -206,7 +199,6 @@ impl DuckDBQueryEngine {
             workers,
             next_worker: AtomicUsize::new(0),
             config: config.clone(),
-            tiered_storage,
         })
     }
 
@@ -251,7 +243,6 @@ impl DuckDBQueryEngine {
         let core = DuckDBCore {
             cache: CacheSettings::new(&config),
             config,
-            tiered_storage: self.tiered_storage.clone(),
         };
         let conn = core.open_connection()?;
         let mut state = core.init_connection_state_with(conn)?;
@@ -308,8 +299,6 @@ impl DuckDBCore {
         self.attach_catalog_if_needed(&conn)?;
         Ok(ConnectionState {
             conn,
-            tiered_storage: self.tiered_storage.clone(),
-            last_seen_catalog_write_generation: 0,
             cache_httpfs_wrap_supported: true,
             cache_httpfs_wrapped_s3: false,
             cache_httpfs_wrapped_httpfs: false,
@@ -321,24 +310,9 @@ impl DuckDBCore {
         state: &mut ConnectionState,
         query: &str,
     ) -> Result<QueryResult> {
-        if self.config.ducklake.is_some() {
-            let gen = state.tiered_storage.catalog_write_generation();
-            if gen != state.last_seen_catalog_write_generation {
-                let catalog_type = self.ducklake_config().catalog_type;
-                if catalog_type == "postgres" {
-                    // Postgres metadata catalog: new commits are visible without DETACH.
-                    state.last_seen_catalog_write_generation = gen;
-                } else {
-                    // File-backed DuckLake: workers that attached before the first commit need a
-                    // fresh ATTACH. Avoid Drop/DETACH of the old connection (can SIGSEGV / FATAL
-                    // after concurrent writer commits); leak the old handle for process lifetime.
-                    let new_state = self.init_connection_state_with(self.open_connection()?)?;
-                    let old = std::mem::replace(state, new_state);
-                    std::mem::forget(old);
-                    state.last_seen_catalog_write_generation = gen;
-                }
-            }
-        }
+        // Catalog visibility: postgres metadata is visible without reconnect; sqlite concurrency
+        // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
+        // reattach or mem::forget connections after writes.
 
         let query_prep = rewrite_reserved_telemetry_view_names(query);
         let query_run = if self.use_attached_catalog() {
@@ -588,36 +562,9 @@ impl DuckDBCore {
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
         let sql = {
             let ducklake = self.ducklake_config();
-            let attach_target = match ducklake.catalog_type.as_str() {
-                "postgres" => {
-                    if ducklake.metadata_path.starts_with("postgres:") {
-                        ducklake.metadata_path.clone()
-                    } else {
-                        format!("postgres:{}", ducklake.metadata_path)
-                    }
-                }
-                "sqlite" => {
-                    if ducklake.metadata_path.starts_with("sqlite:") {
-                        ducklake.metadata_path.clone()
-                    } else {
-                        format!("sqlite:{}", ducklake.metadata_path)
-                    }
-                }
-                _ => ducklake.metadata_path.clone(),
-            };
+            let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
             self.prepare_local_ducklake_paths(&ducklake, &attach_target)?;
-            let mut options = vec![format!(
-                "DATA_PATH '{}'",
-                escape_sql_literal(&ducklake.data_path)
-            )];
-            if let Some(limit) = ducklake.data_inlining_row_limit {
-                options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
-            }
-            if ducklake.catalog_type == "postgres" && ducklake.metadata_schema != "main" {
-                let schema = escape_sql_literal(&ducklake.metadata_schema);
-                options.push(format!("METADATA_SCHEMA '{}'", schema));
-                options.push(format!("META_SCHEMA '{}'", schema));
-            }
+            let options = crate::storage::ducklake::ducklake_attach_options(&ducklake);
             format!(
                 "ATTACH 'ducklake:{}' AS {} ({});",
                 escape_sql_literal(&attach_target),
@@ -636,27 +583,15 @@ impl DuckDBCore {
                 {
                     let ducklake = self.ducklake_config();
                     // Backward-compatible fallback for catalogs initialized without custom metadata schema.
-                    let attach_target = match ducklake.catalog_type.as_str() {
-                        "postgres" => {
-                            if ducklake.metadata_path.starts_with("postgres:") {
-                                ducklake.metadata_path.clone()
-                            } else {
-                                format!("postgres:{}", ducklake.metadata_path)
-                            }
-                        }
-                        "sqlite" => {
-                            if ducklake.metadata_path.starts_with("sqlite:") {
-                                ducklake.metadata_path.clone()
-                            } else {
-                                format!("sqlite:{}", ducklake.metadata_path)
-                            }
-                        }
-                        _ => ducklake.metadata_path.clone(),
-                    };
+                    let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
                     let mut fallback_options = vec![format!(
                         "DATA_PATH '{}'",
                         escape_sql_literal(&ducklake.data_path)
                     )];
+                    if ducklake.catalog_type == "sqlite" {
+                        fallback_options.push("META_JOURNAL_MODE 'WAL'".to_string());
+                        fallback_options.push("META_BUSY_TIMEOUT 500".to_string());
+                    }
                     if let Some(limit) = ducklake.data_inlining_row_limit {
                         fallback_options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
                     }
@@ -680,11 +615,9 @@ impl DuckDBCore {
         ducklake: &crate::config::DuckLakeConfig,
         attach_target: &str,
     ) -> Result<()> {
-        if ducklake.catalog_type == "duckdb" || ducklake.catalog_type == "sqlite" {
+        if ducklake.catalog_type == "sqlite" {
             let raw = attach_target
                 .strip_prefix("sqlite:")
-                .unwrap_or(attach_target)
-                .strip_prefix("duckdb:")
                 .unwrap_or(attach_target);
             let metadata_path = std::path::PathBuf::from(raw);
             if let Some(parent) = metadata_path.parent() {
