@@ -18,21 +18,11 @@ server:
 storage:
   s3_region: "us-central1"  # GCP region
 
-span_buffering:
-  max_buffer_spans: 10000  # Production: 10K spans
-  max_buffer_bytes: 134217728  # Production: 128MB
-  flush_interval_seconds: 60  # Production: 60s timeout
-
 ingest_engine:
-  wal_bucket: "softprobe-iceberg-warehouse"
-  wal_prefix: "wal"
   cache_dir: "/var/tmp/softprobe/duckdb"
-  optimizer_interval_seconds: 300
-  replay_wal_on_startup: false
 
 compaction:
   enabled: true
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864  # 64MB
   compaction_interval_seconds: 3600
 
@@ -50,13 +40,3 @@ s3:
   access_key_id: null
   secret_access_key: null
 
-iceberg:
-  catalog_type: "rest"
-  # GCP-deployed catalog URI (set via environment)
-  catalog_uri: "https://i.softprobe.ai/catalog"  # Placeholder
-  catalog_token: null
-  warehouse: "gs://softprobe-iceberg-warehouse"  # GCP Cloud Storage
-  write_target_file_size_bytes: 134217728  # 128MB for production
-  write_row_group_size_bytes: 134217728  # 128MB
-  write_page_size_bytes: 1048576  # 1MB
-  force_close_after_append: false  # Production: buffered writes

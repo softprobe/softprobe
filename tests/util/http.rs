@@ -11,11 +11,6 @@ use uuid::Uuid;
 
 pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
-    config.iceberg.catalog_type = "rest".to_string();
-    config.iceberg.catalog_uri = "http://localhost:8181/catalog".to_string();
-    config.iceberg.warehouse = "default".to_string();
-    config.iceberg.force_close_after_append = true;
-    config.ingest_engine.optimizer_interval_seconds = 1;
     config.s3.endpoint = Some("http://localhost:9000".to_string());
     config.s3.access_key_id = Some("minioadmin".to_string());
     config.s3.secret_access_key = Some("minioadmin".to_string());
@@ -28,7 +23,6 @@ pub async fn start_test_server() -> (String, TempDir) {
 
     let cache_dir = TempDir::new().expect("tempdir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
     if config.ducklake.is_none() {
         config.ducklake = Some(config.ducklake_or_default());
     }
@@ -44,19 +38,20 @@ pub async fn start_test_server() -> (String, TempDir) {
     }
 
     let config = Arc::new(config);
-    let pipeline = IngestPipeline::new(config.as_ref()).await.expect("pipeline");
-    let query_engine =
-        query::create_query_engine(config.as_ref(), std::sync::Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
+    let pipeline = IngestPipeline::new(config.as_ref())
+        .await
+        .expect("pipeline");
+    let query_engine = query::create_query_engine(
+        config.as_ref(),
+        std::sync::Arc::new(pipeline.storage.clone()),
+    )
+    .await
+    .expect("query engine");
 
     let (app, _) = api::create_router(
         config.clone(),
         pipeline.storage.clone(),
         query_engine,
-        Some(pipeline.storage.span_buffer.clone()),
-        Some(pipeline.storage.log_buffer.clone()),
-        Some(pipeline.storage.metric_buffer.clone()),
         post(ingest_traces),
         None,
         None,

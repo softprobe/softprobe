@@ -2,8 +2,8 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::promotion::{
     business_table_create_ddls, parse_promotion_manifest, PromotionManifest,
 };
-use softprobe_runtime::storage::ducklake::DuckLakeWriter;
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::storage::ducklake::DuckLakeWriter;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -85,7 +85,6 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     ducklake.data_inlining_row_limit = Some(0);
     config.ducklake = Some(ducklake);
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().to_string());
 
     let resolver = DuckLakeScopeResolver::connect(&config)
         .await
@@ -95,7 +94,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     let business_metadata_schema = format!("softprobe_business_apply_data_{suffix}");
     resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: business_tenant_id.clone(),
+            scope_id: business_tenant_id.clone(),
             metadata_schema: business_metadata_schema.clone(),
             data_path: business_data_path,
         })

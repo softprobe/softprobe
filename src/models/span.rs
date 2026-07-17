@@ -1,16 +1,15 @@
-use crate::storage::buffer::Bufferable;
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Span domain model - unified representation across all layers
-/// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
+/// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
-/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
-/// Field order matches Iceberg field IDs for consistency
+/// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
+/// (legacy path; Arrow/DuckLake column order).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Span {
-    // Field 1: session_id (REQUIRED in Iceberg)
+    // Field 1: session_id (REQUIRED)
     // Extracted from sp.session.id attribute or defaults to trace_id
     pub session_id: String,
 
@@ -67,40 +66,31 @@ pub struct SpanEvent {
     pub attributes: HashMap<String, String>,
 }
 
-impl Bufferable for Span {
-    fn partition_key(&self) -> chrono::NaiveDate {
+impl Span {
+    pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
 
-    fn grouping_key(&self) -> String {
-        // Use explicit session_id field (already populated from sp.session.id or trace_id)
+    pub fn grouping_key(&self) -> String {
         self.session_id.clone()
     }
 
-    fn compare_for_sort(&self, other: &Self) -> Ordering {
-        // Sort by session_id first, then trace_id, then timestamp
-        // This matches Iceberg sort order (field 1, 2, 10)
+    pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.session_id
             .cmp(&other.session_id)
             .then_with(|| self.trace_id.cmp(&other.trace_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
-        self.timestamp
-    }
-}
-
-impl Span {
-    /// Convert a batch of Spans to Arrow RecordBatch for Iceberg storage
+    /// Convert a batch of Spans to Arrow RecordBatch for DuckLake storage
     ///
     /// This is a batch operation delegated to the arrow module since RecordBatch
     /// creation requires schema context and columnar array building
     pub fn to_record_batch(
         spans: &[Span],
-        iceberg_schema: &iceberg::spec::Schema,
+        schema: &arrow::datatypes::Schema,
     ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-        crate::storage::iceberg::arrow::spans_to_record_batch(spans, iceberg_schema)
+        crate::storage::schema::arrow::spans_to_record_batch(spans, schema)
     }
 
     /// Create a Span from an OTLP span and resource attributes

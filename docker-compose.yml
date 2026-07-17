@@ -75,74 +75,11 @@ services:
     networks:
       - backend_net
 
-
-  db:
-    image: postgres:17
-    container_name: lakekeeper-db
-    environment:
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_DB=postgres
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -p 5432 -d postgres"]
-      interval: 2s
-      timeout: 10s
-      retries: 10
-      start_period: 10s
-    networks:
-      - backend_net
-    volumes:
-      - lakekeeper-postgres:/var/lib/postgresql/data
-
-
-  migrate:
-    image: ${LAKEKEEPER_IMAGE:-vakamo/lakekeeper:latest}
-    container_name: lakekeeper-migrate
-    environment:
-      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
-      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@db:5432/postgres
-      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@db:5432/postgres
-      - RUST_LOG=info
-    command: ["migrate"]
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - backend_net
-
-
-  lakekeeper:
-    image: ${LAKEKEEPER_IMAGE:-vakamo/lakekeeper:latest}
-    container_name: lakekeeper
-    ports:
-      - "8181:8181"
-    environment:
-      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
-      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@db:5432/postgres
-      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@db:5432/postgres
-      - RUST_LOG=info
-    command: ["serve"]
-    depends_on:
-      minio:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    networks:
-      - backend_net
-    healthcheck:
-      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
-      interval: 5s
-      timeout: 10s
-      retries: 10
-      start_period: 5s
-
   otlp-backend:
     build: .
     container_name: otlp-backend
     depends_on:
-      lakekeeper:
+      ducklake-postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
@@ -171,7 +108,6 @@ services:
       - "4317:4317"  # OTLP gRPC
       - "8090:8090"  # Runtime HTTP API
 
-
   grafana:
     image: grafana/grafana:10.4.0-ubuntu  # Ubuntu-based for glibc/libstdc++ compatibility
     platform: linux/amd64  # Force x86_64 for DuckDB plugin compatibility
@@ -194,5 +130,4 @@ services:
 
 volumes:
   grafana-storage:
-  lakekeeper-postgres:
   ducklake-postgres-data:

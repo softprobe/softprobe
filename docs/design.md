@@ -1,8 +1,10 @@
 # OpenTelemetry Collector with Apache Iceberg Storage
 
+> **Historical / pre-DuckLake.** Durable storage is now **DuckLake**. See [adhoc-duckdb-ducklake.md](adhoc-duckdb-ducklake.md) and [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md). ADR-001 is superseded by ADR-014 in [decision_log.md](decision_log.md).
+
 **Version**: 2.0
 **Date**: 2025-01-31
-**Status**: Active
+**Status**: Historical (superseded for runtime storage)
 **Project Type**: Standalone OTLP Collector
 
 > **See Also**: [Softprobe Business Vision & Strategic Goals](goals.md) - Understand the broader business context and long-term vision for this project.

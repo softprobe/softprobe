@@ -323,7 +323,7 @@ fn telemetry_table_bare_name(table: &TelemetryTable) -> &'static str {
     }
 }
 
-/// Canonical Iceberg / DuckLake column names that must not be re-declared via telemetry promotion.
+/// Canonical DuckLake telemetry column names that must not be re-declared via telemetry promotion.
 fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static str] {
     match table {
         TelemetryTable::Traces => &[

@@ -1,16 +1,15 @@
-use crate::storage::buffer::Bufferable;
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Log domain model - unified representation across all layers
-/// Used for: OTLP ingestion → buffering → Iceberg storage → query results → JSON responses
+/// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
-/// This struct EXACTLY matches the Iceberg schema defined in src/storage/iceberg/tables.rs
-/// Field order matches Iceberg field IDs for consistency
+/// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
+/// (legacy path; Arrow/DuckLake column order).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Log {
-    // Field 1: session_id (OPTIONAL in Iceberg)
+    // Field 1: session_id (OPTIONAL)
     // Extracted from log attributes (session.id, session_id, sp.session.id) or resource attributes
     pub session_id: Option<String>,
 
@@ -37,43 +36,33 @@ pub struct Log {
     // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
-
     // Field 15: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
 
-impl Bufferable for Log {
-    fn partition_key(&self) -> chrono::NaiveDate {
+impl Log {
+    pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
 
-    fn grouping_key(&self) -> String {
-        // Use session_id if available, otherwise "unknown"
+    pub fn grouping_key(&self) -> String {
         self.session_id
             .clone()
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    fn compare_for_sort(&self, other: &Self) -> Ordering {
-        // Sort by session_id first, then timestamp
-        // This matches Iceberg sort order (field 1, 2)
+    pub fn compare_for_sort(&self, other: &Self) -> Ordering {
         self.session_id
             .cmp(&other.session_id)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
     }
 
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
-        self.timestamp
-    }
-}
-
-impl Log {
-    /// Convert a batch of Logs to Arrow RecordBatch for Iceberg storage
+    /// Convert a batch of Logs to Arrow RecordBatch for DuckLake storage
     pub fn to_record_batch(
         logs: &[Log],
-        iceberg_schema: &iceberg::spec::Schema,
+        schema: &arrow::datatypes::Schema,
     ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-        crate::storage::iceberg::arrow::logs_to_record_batch(logs, iceberg_schema)
+        crate::storage::schema::arrow::logs_to_record_batch(logs, schema)
     }
 
     /// Create a Log from an OTLP LogRecord and resource attributes
@@ -251,7 +240,6 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::Log;
-    use crate::storage::buffer::Bufferable;
     use chrono::{TimeZone, Utc};
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs};
     use std::cmp::Ordering;

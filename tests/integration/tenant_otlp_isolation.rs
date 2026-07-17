@@ -13,8 +13,8 @@ use softprobe_runtime::grpc_otlp::GrpcTraceService;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span as ModelSpan;
 use softprobe_runtime::runtime_api::runtime_export_trace_request;
-use softprobe_runtime::session_redis::RedisStore;
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::session_redis::RedisStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,8 +29,6 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     config.compaction.enabled = false;
     config.compaction.metadata_maintenance_enabled = false;
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
-    config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().into());
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let mut ducklake = config.ducklake_or_default();
     ducklake.catalog_type = "postgres".to_string();
@@ -139,7 +137,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
 
     resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_a.clone(),
+            scope_id: tenant_a.clone(),
             metadata_schema: meta_a.clone(),
             data_path: path_a.clone(),
         })
@@ -147,7 +145,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .expect("provision A");
     resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_b.clone(),
+            scope_id: tenant_b.clone(),
             metadata_schema: meta_b.clone(),
             data_path: path_b.clone(),
         })
@@ -279,7 +277,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         .expect("postgres resolver");
     resolver_reg
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_id.clone(),
+            scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
             data_path: tenant_data_path.clone(),
         })
@@ -318,9 +316,6 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         config.clone(),
         pipeline.storage.clone(),
         query_engine,
-        Some(pipeline.storage.span_buffer.clone()),
-        Some(pipeline.storage.log_buffer.clone()),
-        Some(pipeline.storage.metric_buffer.clone()),
         post(ingest_traces),
         Some(control),
         None,

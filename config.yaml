@@ -7,18 +7,13 @@ server:
 storage:
   s3_region: "us-east-1"
 
-# Span buffering configuration
-span_buffering:
-  max_buffer_bytes: 134217728  # 128MB
-  max_buffer_spans: 10000
-  flush_interval_seconds: 60
+# Span buffering configuration removed — ingest is flush-through (OTel collector batches).
 
 ingest_engine:
   cache_dir: "/tmp/ingest-cache"
 
 compaction:
   enabled: true
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864  # 64MB
   compaction_interval_seconds: 3600  # 1 hour
 
@@ -40,7 +35,12 @@ ducklake:
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
+  # Inline collector-sized batches into Postgres catalog (avoid tiny GCS/S3 parquet).
+  # Keep >= max OTLP rows per request; default 10000 validated on Postgres+GCS stress.
   data_inlining_row_limit: 10000
+  # Per-scope DuckDB writer connections (1..=16). Default 4; avoid 8+ under heavy inlining
+  # (catalog contention / 503s observed in stress). Pool helps most when writes hit object storage.
+  writer_pool_size: 4
 
 # UI dropdown EAV (Postgres); requires ducklake.catalog_type=postgres
 dropdown_catalog:

@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::storage::TieredStorage;
 use crate::runtime_engine::DuckLakeScope;
+use crate::storage::TieredStorage;
 use std::sync::Arc;
 
 pub mod cache;

@@ -6,10 +6,10 @@
 
 //! Per-tenant [`RuntimeEngine`] cache and tenant-bound session helper.
 
-use crate::control_plane::ControlPlaneRuntime;
 use crate::authn::TenantInfo;
 use crate::catalog::DropdownCatalog;
 use crate::config::{Config, DuckLakeConfig};
+use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
     ensure_promotion_metadata_tables, load_active_telemetry_columns_manifests,
@@ -23,11 +23,11 @@ use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub type TenantId = String;
 
@@ -43,11 +43,7 @@ impl TenantSessionStore {
     }
 
     pub async fn create(&self, mode: &str) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .create(&self.tenant_id, mode)
-            .await
+        self.store.lock().await.create(&self.tenant_id, mode).await
     }
 
     pub async fn list(&self) -> Vec<Session> {
@@ -348,7 +344,10 @@ impl DuckLakeScopeResolver {
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.
-    pub async fn provision_scope(&self, request: ScopeProvisioningRequest) -> Result<DuckLakeScope> {
+    pub async fn provision_scope(
+        &self,
+        request: ScopeProvisioningRequest,
+    ) -> Result<DuckLakeScope> {
         if request.scope_id.trim().is_empty() {
             bail!("scope_id is required");
         }
@@ -416,6 +415,27 @@ RETURNING scope_id;"#,
         };
         self.ensure_scope_tables(&scope).await?;
         Ok(scope)
+    }
+
+    /// List all provisioned DuckLake scopes from the registry (for maintenance).
+    pub async fn list_scopes(&self) -> Result<Vec<DuckLakeScope>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT ducklake_metadata_schema, data_path FROM {}.scope_registry ORDER BY scope_id;",
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| DuckLakeScope {
+                metadata_schema: row.get(0),
+                data_path: row.get(1),
+            })
+            .collect())
     }
 
     /// Resolve scope and load active telemetry column manifests from Postgres.

@@ -6,6 +6,6 @@
 
 | File | Notes |
 |------|--------|
-| `legacy_verify_iceberg.sql` | DuckLake SQL samples only (name is historical) |
+| `verify_ducklake.sql` | DuckLake SQL samples |
 | `legacy_verify_session.sql` | Session UNION template for DuckLake |
 | `legacy_verify_e2e.md` | Why old bash/Lakekeeper checks were removed |

@@ -1,4 +1,4 @@
-use crate::api::ingestion::IngestResponse;
+use crate::api::ingestion::{ingest_write_failed, IngestResponse};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::Span as SpanData;
@@ -15,7 +15,7 @@ pub async fn ingest_traces_json(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
-) -> Json<IngestResponse> {
+) -> Response {
     let body_size = body.len();
     let auth_tid = tenant.map(|t| t.0.tenant_id.clone());
     match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
@@ -24,23 +24,24 @@ pub async fn ingest_traces_json(
                 success: true,
                 ingested_count: count,
                 message: format!("Successfully ingested {} spans", count),
-            }),
+            })
+            .into_response(),
             Err(e) => {
                 error!("Failed to process OTLP traces: {}", e);
-                Json(IngestResponse {
-                    success: false,
-                    ingested_count: 0,
-                    message: format!("Ingestion failed: {}", e),
-                })
+                ingest_write_failed(format!("Ingestion failed: {}", e))
             }
         },
         Err(e) => {
             error!("Failed to decode JSON: {}", e);
-            Json(IngestResponse {
-                success: false,
-                ingested_count: 0,
-                message: format!("JSON decode failed: {}", e),
-            })
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IngestResponse {
+                    success: false,
+                    ingested_count: 0,
+                    message: format!("JSON decode failed: {}", e),
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -50,7 +51,7 @@ pub async fn ingest_traces_protobuf(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
-) -> Json<IngestResponse> {
+) -> Response {
     let body_size = body.len();
     let auth_tid = tenant.map(|t| t.0.tenant_id.clone());
     match prost::Message::decode(body.as_ref()) {
@@ -59,23 +60,24 @@ pub async fn ingest_traces_protobuf(
                 success: true,
                 ingested_count: count,
                 message: format!("Successfully ingested {} spans", count),
-            }),
+            })
+            .into_response(),
             Err(e) => {
                 error!("Failed to process OTLP traces: {}", e);
-                Json(IngestResponse {
-                    success: false,
-                    ingested_count: 0,
-                    message: format!("Ingestion failed: {}", e),
-                })
+                ingest_write_failed(format!("Ingestion failed: {}", e))
             }
         },
         Err(e) => {
             error!("Failed to decode protobuf: {}", e);
-            Json(IngestResponse {
-                success: false,
-                ingested_count: 0,
-                message: format!("Protobuf decode failed: {}", e),
-            })
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IngestResponse {
+                    success: false,
+                    ingested_count: 0,
+                    message: format!("Protobuf decode failed: {}", e),
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -108,12 +110,7 @@ pub async fn ingest_traces(
                     .into_response(),
                     Err(e) => {
                         error!("Failed to process OTLP traces: {}", e);
-                        Json(IngestResponse {
-                            success: false,
-                            ingested_count: 0,
-                            message: format!("Ingestion failed: {}", e),
-                        })
-                        .into_response()
+                        ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
                 }
             }
@@ -135,12 +132,7 @@ pub async fn ingest_traces(
                     .into_response(),
                     Err(e) => {
                         error!("Failed to process OTLP traces: {}", e);
-                        Json(IngestResponse {
-                            success: false,
-                            ingested_count: 0,
-                            message: format!("Ingestion failed: {}", e),
-                        })
-                        .into_response()
+                        ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
                 }
             }

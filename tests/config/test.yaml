@@ -7,21 +7,11 @@ server:
 storage:
   s3_region: us-east-1
 
-span_buffering:
-  max_buffer_bytes: 134217728  # 128MB
-  max_buffer_spans: 1  # Flush after 1 span for testing
-  flush_interval_seconds: 1  # Flush every second
-
 ingest_engine:
-  wal_bucket: warehouse
-  wal_prefix: wal
   cache_dir: /var/tmp/softprobe/duckdb
-  optimizer_interval_seconds: 2
-  replay_wal_on_startup: false
 
 compaction:
   enabled: false
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864
   compaction_interval_seconds: 3600
 
@@ -37,11 +27,10 @@ s3:
   access_key_id: minioadmin
   secret_access_key: minioadmin
 
-iceberg:
-  catalog_type: rest
-  catalog_uri: http://localhost:8181/catalog
-  warehouse: default  # Lakekeeper warehouse name
-  write_target_file_size_bytes: 67108864
-  write_row_group_size_bytes: 134217728
-  write_page_size_bytes: 1048576
-  force_close_after_append: true
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/softprobe-test-ducklake/metadata.sqlite
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: main
+  data_inlining_row_limit: 0

@@ -5,14 +5,10 @@ use std::net::IpAddr;
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
-    pub span_buffering: SpanBufferConfig,
     pub ingest_engine: IngestEngineConfig,
     pub compaction: CompactionConfig,
     pub duckdb: DuckDBConfig,
     pub s3: S3Config,
-    /// Omitted in YAML uses `IcebergConfig::default` (DuckLake deployments do not need a real Iceberg catalog).
-    #[serde(default)]
-    pub iceberg: IcebergConfig,
     #[serde(default)]
     pub ducklake: Option<DuckLakeConfig>,
     #[serde(default)]
@@ -77,48 +73,22 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanBufferConfig {
-    pub max_buffer_bytes: usize,     // 128MB - hard limit on buffer size
-    pub max_buffer_spans: usize,     // 1000 - alternative span count limit
-    pub flush_interval_seconds: u64, // 60 - flush every minute
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestEngineConfig {
-    #[serde(default = "default_wal_bucket")]
-    pub wal_bucket: String,
-    #[serde(default = "default_wal_prefix")]
-    pub wal_prefix: String,
     #[serde(default = "default_ingest_cache_dir")]
     pub cache_dir: Option<String>,
-    #[serde(default = "default_wal_dir")]
-    pub wal_dir: Option<String>,
-    #[serde(default = "default_wal_manifest_update_interval_seconds")]
-    pub wal_manifest_update_interval_seconds: u64,
-    #[serde(default = "default_wal_manifest_max_pending_files")]
-    pub wal_manifest_max_pending_files: usize,
-    #[serde(default = "default_optimizer_interval_seconds")]
-    pub optimizer_interval_seconds: u64,
-    #[serde(default)]
-    pub replay_wal_on_startup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     pub enabled: bool,
-    pub min_files_to_compact: usize,      // 5
     pub target_file_size_bytes: usize,    // 64MB
     pub compaction_interval_seconds: u64, // 3600 (1 hour)
     #[serde(default = "default_metadata_maintenance_enabled")]
     pub metadata_maintenance_enabled: bool,
     #[serde(default = "default_metadata_maintenance_interval_seconds")]
     pub metadata_maintenance_interval_seconds: u64,
-    #[serde(default = "default_metadata_min_snapshots_to_keep")]
-    pub metadata_min_snapshots_to_keep: usize,
     #[serde(default = "default_metadata_max_snapshot_age_seconds")]
     pub metadata_max_snapshot_age_seconds: u64,
-    #[serde(default = "default_metadata_rewrite_manifests_enabled")]
-    pub metadata_rewrite_manifests_enabled: bool,
     #[serde(default = "default_metadata_remove_orphan_files_enabled")]
     pub metadata_remove_orphan_files_enabled: bool,
     #[serde(default = "default_metadata_remove_orphan_older_than_seconds")]
@@ -142,41 +112,11 @@ pub struct S3Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IcebergConfig {
-    pub catalog_type: String, // "s3", "glue", or "rest"
-    pub catalog_uri: String,
-    #[serde(default)]
-    pub catalog_token: Option<String>, // Bearer token for REST catalog (e.g., Cloudflare R2)
-    #[serde(default = "default_iceberg_namespace")]
-    pub namespace: String,
-    #[serde(default = "default_warehouse")]
-    pub warehouse: String, // Warehouse location (s3://path or warehouse ID)
-    pub write_target_file_size_bytes: usize, // 64MB
-    pub write_row_group_size_bytes: usize,   // 128MB
-    pub write_page_size_bytes: usize,        // 1MB
-    pub force_close_after_append: bool,      // testing: close file after each append
-}
-
-impl Default for IcebergConfig {
-    fn default() -> Self {
-        Self {
-            catalog_type: "s3".to_string(),
-            catalog_uri: "s3://softprobe-recordings".to_string(),
-            catalog_token: None,
-            namespace: default_iceberg_namespace(),
-            warehouse: "s3://warehouse".to_string(),
-            write_target_file_size_bytes: 64 * 1024 * 1024,
-            write_row_group_size_bytes: 128 * 1024 * 1024,
-            write_page_size_bytes: 1024 * 1024,
-            force_close_after_append: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuckLakeConfig {
+    /// Catalog backend: `postgres` (production / multi-tenant) or `sqlite` (local multi-client).
+    /// `duckdb` is rejected — DuckLake documents it as single-client only.
     #[serde(default = "default_ducklake_catalog_type")]
-    pub catalog_type: String, // duckdb, postgres, sqlite
+    pub catalog_type: String,
     #[serde(default = "default_ducklake_metadata_path")]
     pub metadata_path: String,
     #[serde(default = "default_ducklake_data_path")]
@@ -185,24 +125,23 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
-    #[serde(default)]
+    /// Prefer inlining small collector batches into the catalog over tiny Parquet files.
+    /// Default 10000: validated on Postgres+GCS stress (near-zero data parquet for batches ≤10k).
+    #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
-}
-
-fn default_warehouse() -> String {
-    "s3://warehouse".to_string()
-}
-
-fn default_iceberg_namespace() -> String {
-    "default".to_string()
+    /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
+    /// Enables same-tenant concurrent commits (DuckLake/Postgres retries handle conflicts).
+    /// Default 4 (clamped 1..=16). Prefer ≤4 under heavy inlining; 8+ caused 503 storms in stress.
+    #[serde(default = "default_writer_pool_size")]
+    pub writer_pool_size: usize,
 }
 
 fn default_ducklake_catalog_type() -> String {
-    "duckdb".to_string()
+    "sqlite".to_string()
 }
 
 fn default_ducklake_metadata_path() -> String {
-    "./warehouse/ducklake/metadata.ducklake".to_string()
+    "./warehouse/ducklake/metadata.sqlite".to_string()
 }
 
 fn default_ducklake_data_path() -> String {
@@ -217,52 +156,35 @@ fn default_ducklake_metadata_schema() -> String {
     "main".to_string()
 }
 
+fn default_data_inlining_row_limit() -> Option<u64> {
+    Some(10_000)
+}
+
+fn default_writer_pool_size() -> usize {
+    4
+}
+
+impl DuckLakeConfig {
+    /// Effective writer pool size, clamped to 1..=16.
+    pub fn effective_writer_pool_size(&self) -> usize {
+        self.writer_pool_size.clamp(1, 16)
+    }
+}
+
 fn default_metadata_maintenance_enabled() -> bool {
     true
-}
-
-fn default_wal_bucket() -> String {
-    "warehouse".to_string()
-}
-
-fn default_wal_prefix() -> String {
-    "wal".to_string()
 }
 
 fn default_ingest_cache_dir() -> Option<String> {
     Some("/var/tmp/softprobe/duckdb".to_string())
 }
 
-fn default_wal_dir() -> Option<String> {
-    default_ingest_cache_dir()
-}
-
-fn default_wal_manifest_update_interval_seconds() -> u64 {
-    10
-}
-
-fn default_wal_manifest_max_pending_files() -> usize {
-    500
-}
-
-fn default_optimizer_interval_seconds() -> u64 {
-    300
-}
-
 fn default_metadata_maintenance_interval_seconds() -> u64 {
     3600
 }
 
-fn default_metadata_min_snapshots_to_keep() -> usize {
-    5
-}
-
 fn default_metadata_max_snapshot_age_seconds() -> u64 {
     7 * 24 * 3600
-}
-
-fn default_metadata_rewrite_manifests_enabled() -> bool {
-    true
 }
 
 fn default_metadata_remove_orphan_files_enabled() -> bool {
@@ -285,32 +207,16 @@ impl Default for Config {
             storage: StorageConfig {
                 s3_region: "us-east-1".to_string(),
             },
-            span_buffering: SpanBufferConfig {
-                max_buffer_bytes: 128 * 1024 * 1024, // 128MB
-                max_buffer_spans: 10000,             // 10K spans
-                flush_interval_seconds: 60,
-            },
             ingest_engine: IngestEngineConfig {
-                wal_bucket: "warehouse".to_string(),
-                wal_prefix: "wal".to_string(),
                 cache_dir: default_ingest_cache_dir(),
-                wal_dir: default_wal_dir(),
-                wal_manifest_update_interval_seconds: default_wal_manifest_update_interval_seconds(
-                ),
-                wal_manifest_max_pending_files: default_wal_manifest_max_pending_files(),
-                optimizer_interval_seconds: 300,
-                replay_wal_on_startup: false,
             },
             compaction: CompactionConfig {
                 enabled: true,
-                min_files_to_compact: 5,
                 target_file_size_bytes: 64 * 1024 * 1024, // 64MB
                 compaction_interval_seconds: 3600,
                 metadata_maintenance_enabled: true,
                 metadata_maintenance_interval_seconds: 3600,
-                metadata_min_snapshots_to_keep: 5,
                 metadata_max_snapshot_age_seconds: 7 * 24 * 3600,
-                metadata_rewrite_manifests_enabled: true,
                 metadata_remove_orphan_files_enabled: true,
                 metadata_remove_orphan_older_than_seconds: 3600,
             },
@@ -326,14 +232,14 @@ impl Default for Config {
                 access_key_id: None,
                 secret_access_key: None,
             },
-            iceberg: IcebergConfig::default(),
             ducklake: Some(DuckLakeConfig {
                 catalog_type: default_ducklake_catalog_type(),
                 metadata_path: default_ducklake_metadata_path(),
                 data_path: default_ducklake_data_path(),
                 catalog_alias: default_ducklake_catalog_alias(),
                 metadata_schema: default_ducklake_metadata_schema(),
-                data_inlining_row_limit: Some(0),
+                data_inlining_row_limit: default_data_inlining_row_limit(),
+                writer_pool_size: default_writer_pool_size(),
             }),
             dropdown_catalog: DropdownCatalogConfig::default(),
         }
@@ -348,8 +254,24 @@ impl Config {
             data_path: default_ducklake_data_path(),
             catalog_alias: default_ducklake_catalog_alias(),
             metadata_schema: default_ducklake_metadata_schema(),
-            data_inlining_row_limit: Some(0),
+            data_inlining_row_limit: default_data_inlining_row_limit(),
+            writer_pool_size: default_writer_pool_size(),
         })
+    }
+
+    /// Reject unsupported DuckLake catalog backends (official multi-client = postgres or sqlite).
+    pub fn validate_ducklake_catalog(&self) -> anyhow::Result<()> {
+        let catalog_type = self.ducklake_or_default().catalog_type;
+        match catalog_type.as_str() {
+            "postgres" | "sqlite" => Ok(()),
+            "duckdb" => anyhow::bail!(
+                "ducklake.catalog_type=duckdb is unsupported (DuckLake single-client only). \
+                 Use sqlite for local multi-client concurrency or postgres for production."
+            ),
+            other => anyhow::bail!(
+                "unsupported ducklake.catalog_type={other}; use postgres or sqlite"
+            ),
+        }
     }
 
     pub fn load() -> anyhow::Result<Self> {
@@ -366,12 +288,14 @@ impl Config {
 
             // Override with environment variables if present
             config.apply_env_overrides();
+            config.validate_ducklake_catalog()?;
 
             Ok(config)
         } else {
             // Use defaults with environment overrides
             let mut config = Config::default();
             config.apply_env_overrides();
+            config.validate_ducklake_catalog()?;
             Ok(config)
         }
     }
@@ -385,12 +309,6 @@ impl Config {
 
         if let Ok(region) = std::env::var("S3_REGION") {
             self.storage.s3_region = region;
-        }
-
-        if let Ok(namespace) = std::env::var("ICEBERG_NAMESPACE") {
-            if !namespace.trim().is_empty() {
-                self.iceberg.namespace = namespace;
-            }
         }
 
         if let Ok(raw) = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES") {
@@ -443,12 +361,10 @@ mod tests {
         let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
         let prev_port = std::env::var("PORT").ok();
         let prev_region = std::env::var("S3_REGION").ok();
-        let prev_ns = std::env::var("ICEBERG_NAMESPACE").ok();
         let prev_body = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES").ok();
 
         std::env::set_var("PORT", "9191");
         std::env::set_var("S3_REGION", "eu-west-1");
-        std::env::set_var("ICEBERG_NAMESPACE", "acctests");
         std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES");
 
         let mut c = Config::default();
@@ -462,10 +378,6 @@ mod tests {
             Some(p) => std::env::set_var("S3_REGION", p),
             None => std::env::remove_var("S3_REGION"),
         }
-        match prev_ns {
-            Some(p) => std::env::set_var("ICEBERG_NAMESPACE", p),
-            None => std::env::remove_var("ICEBERG_NAMESPACE"),
-        }
         match prev_body {
             Some(p) => std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", p),
             None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
@@ -473,7 +385,6 @@ mod tests {
 
         assert_eq!(c.server.port, 9191);
         assert_eq!(c.storage.s3_region, "eu-west-1");
-        assert_eq!(c.iceberg.namespace, "acctests");
     }
 
     #[test]
@@ -488,5 +399,15 @@ mod tests {
             None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
         }
         assert_eq!(c.server.max_body_size, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn reject_duckdb_catalog_type() {
+        let mut c = Config::default();
+        let mut dl = c.ducklake_or_default();
+        dl.catalog_type = "duckdb".to_string();
+        c.ducklake = Some(dl);
+        let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
+        assert!(err.to_string().contains("unsupported"));
     }
 }

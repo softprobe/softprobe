@@ -4,7 +4,7 @@
 # Prerequisites:
 #   1. GCS bucket created and accessible
 #   2. Service account JSON key file with Storage Admin permissions
-#   3. Iceberg REST catalog endpoint (if using REST catalog)
+#   3. DuckLake catalog / object store endpoint (if using REST catalog)
 #   4. Rust/Cargo installed on server
 #
 # Usage:
@@ -13,7 +13,7 @@
 # Environment Variables:
 #   GOOGLE_APPLICATION_CREDENTIALS - Path to GCS service account JSON key
 #   GCS_BUCKET - GCS bucket name (overrides config file)
-#   CATALOG_URI - Iceberg REST catalog URI (overrides config file)
+#   CATALOG_URI - DuckLake catalog / object store URI (overrides config file)
 #   BENCHMARK_DURATION - Test duration in seconds (default: 300)
 #   BENCHMARK_WARMUP - Warmup period in seconds (default: 60)
 

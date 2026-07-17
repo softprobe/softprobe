@@ -37,7 +37,7 @@ Configuration can be provided via:
 Tune via `config.yaml` (see comments there) or the env var above:
 
 - **HTTP request bodies:** OTLP and control JSON payloads larger than `max_body_size` are rejected (HTTP 413).
-- **Span / log / metric buffers:** `span_buffering.max_buffer_bytes` and `max_buffer_spans` cap RAM before flush to the ingest pipeline.
+- **Ingest:** flush-through to DuckLake per OTLP request (collector owns batching). `ducklake.data_inlining_row_limit` (default **10000**) prefers catalog inlining over tiny Parquet files. `ducklake.writer_pool_size` (default **4**, avoid 8+) allows concurrent same-tenant commits via DuckLake retries; catalog concurrency is **postgres** (prod) or **sqlite** (local). See [`docs/ducklake-ingest-cleanup.md`](docs/ducklake-ingest-cleanup.md).
 - **DuckLake maintenance:** compaction and metadata retention settings bound catalog growth; see [`docs/design.md`](../docs/design.md) (runtime ingest and storage limits).
 
 ## Development
@@ -155,7 +155,7 @@ Event values still take precedence over attribute fallback when both are present
    ```
 3. Review the printed report (records produced, errors, query latency p95) and adjust the QPS or duration until you meet your real-time goals.
 
-Use this tool locally or in GCP/AWS to validate DuckLake query/write performance before deploying to production. Tune `ducklake.data_inlining_row_limit` during perf runs to compare hot-data behavior.
+Use this tool locally or in GCP/AWS to validate DuckLake query/write performance before deploying to production. Tune `ducklake.data_inlining_row_limit` and `ducklake.writer_pool_size` during perf runs (`scripts/stress_writer_pool_inline.sh` for a Postgres+GCS matrix).
 
 ## Make Commands (Holistic View)
 
@@ -252,7 +252,7 @@ Content-Type: application/json
 ## Design Document
 
 All implementation follows the design document:
-- **Location**: `../docs/migration-to-iceberg-design.md`
+- **Location**: `docs/iceberg-legacy-cleanup.md`
 - **Version**: 1.7 (latest)
 - **Status**: Reviewed and approved
 

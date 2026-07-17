@@ -1,7 +1,9 @@
-use crate::util::iceberg::{ensure_wal_bucket, load_test_config, warn_if_minio_unresolvable};
 use crate::util::perf::{PerformanceMetrics, Timer};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
+use crate::util::storage_config::{
+    load_test_config, warn_if_minio_unresolvable,
+};
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
@@ -12,71 +14,15 @@ use std::time::Instant;
 // Note: perf + config helpers live under `tests/util/`.
 
 async fn build_test_pipeline(mut config: Config) -> TestPipeline {
-    ensure_wal_bucket(&mut config);
     TestPipeline::new(config).await
 }
 
 #[tokio::test]
-async fn test_iceberg_writer_initialization() {
-    let config = load_test_config();
-    if config.ducklake.is_some() {
-        // Under DuckLake migration, this Iceberg-specific initialization test is not applicable.
-        return;
-    }
-
-    println!("Testing with catalog URI: {}", config.iceberg.catalog_uri);
-
-    // Performance tracking: measure initialization time
-    let timer = Timer::start("Iceberg Writer Initialization");
-
-    // Test that the Iceberg writer can be initialized with real REST catalog
-    let result = softprobe_runtime::storage::iceberg::IcebergWriter::new(&config).await;
-
-    let init_duration = timer.stop();
-
-    match result {
-        Ok(_) => {
-            println!("✅ Iceberg writer initialized successfully with REST catalog");
-
-            // Report initialization performance
-            let metrics = PerformanceMetrics::new("Writer Initialization")
-                .with_duration(init_duration)
-                .with_rows(0);
-            metrics.print_report();
-
-            // Assert initialization is reasonably fast (should be < 5 seconds for catalog connection)
-            metrics.assert_performance_target(5000, "Initialization time");
-        }
-        Err(e) => {
-            println!("❌ Iceberg writer failed to initialize: {}", e);
-
-            // Print full error chain to see the REAL error (anyhow provides chain())
-            println!("\n🔍 Full error chain:");
-            for (i, cause) in e.chain().enumerate() {
-                if i == 0 {
-                    println!("  Error: {}", cause);
-                } else {
-                    println!("  {}. Caused by: {}", i, cause);
-                }
-            }
-
-            // If this fails, it means either the catalog is not running or there's a real issue
-            panic!("Expected Iceberg writer to initialize successfully with local REST catalog");
-        }
-    }
-}
-
-#[tokio::test]
 async fn test_config_loading() {
-    // Test that test config can be loaded and has valid iceberg section
     let config = load_test_config();
     assert!(
-        !config.iceberg.catalog_uri.is_empty(),
-        "Catalog URI should not be empty"
-    );
-    assert_eq!(
-        config.span_buffering.max_buffer_spans, 1,
-        "Should have test buffer config"
+        config.ducklake.is_some(),
+        "DuckLake config should be present for local e2e"
     );
 }
 
@@ -84,9 +30,6 @@ async fn test_config_loading() {
 async fn test_ingestion_perf_5000_spans_under_one_second() {
     let mut config = load_test_config();
     // Allow buffering without forcing flush during perf check
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 128 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -142,10 +85,6 @@ async fn test_ingestion_perf_5000_spans_under_one_second() {
 async fn test_iceberg_writer_bulk_session_roundtrip() {
     let mut config = load_test_config();
     warn_if_minio_unresolvable();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -275,13 +214,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     write_metrics.assert_performance_target(5000, "Multi-session WAL write time");
 
     // Local staged/WAL paths are not always listed via `IngestPipeline` (flush goes to DuckLake writer).
-    let staged_files = pipeline.list_staged_files("spans").expect("staged files");
-    let wal_files = pipeline.list_wal_files("spans").expect("wal files");
-    println!(
-        "✅ Flush completed: {} staged paths reported, {} WAL paths reported (may be empty if not wired)",
-        staged_files.len(),
-        wal_files.len()
-    );
+    println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each session to verify row group isolation...");
 
     // Query each session individually to verify row group isolation
@@ -412,23 +345,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     println!("🔄 Forcing flush to staged local cache...");
     pipeline.force_flush_spans().await.expect("force flush");
 
-    let staged_files = pipeline.list_staged_files("spans").expect("staged files");
-    println!(
-        "📁 Staged span paths after flush (may be empty): {}",
-        staged_files.len()
-    );
-
     println!("⚙️  Running optimizer to commit staged spans to Iceberg...");
-    pipeline.run_optimizer_once().await.expect("optimizer");
-
-    let staged_files_after = pipeline
-        .list_staged_files("spans")
-        .expect("staged files after");
-    assert!(
-        staged_files_after.is_empty(),
-        "Expected staged cache cleanup after optimizer, found {:?}",
-        staged_files_after
-    );
 
     // After optimizer commits, data is in Iceberg and should be immediately queryable via union view.
     // For DuckLake-backed tests we currently validate staged cleanup and pre-optimizer union-read.
@@ -530,10 +447,6 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 #[tokio::test]
 async fn test_duckdb_union_read_realtime_performance() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 128 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -580,7 +493,6 @@ async fn test_duckdb_union_read_realtime_performance() {
         .await
         .expect("base add");
     pipeline.force_flush_spans().await.expect("base flush");
-    pipeline.run_optimizer_once().await.expect("base optimize");
 
     let mut staged_spans = Vec::new();
     for i in 0..100 {
@@ -703,16 +615,12 @@ async fn test_duckdb_union_read_realtime_performance() {
 async fn test_iceberg_writer_bulk_log_roundtrip() {
     let mut config = load_test_config();
     warn_if_minio_unresolvable();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with logs to test multi-session row groups
-    let test_type = std::env::var("ICEBERG_TEST_TYPE").unwrap_or_else(|_| "local".to_string());
+    let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     let (num_sessions, logs_per_session) = if test_type == "r2" {
         (2, 200)
     } else {
@@ -773,7 +681,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 resource_attributes,
                 trace_id,
                 span_id,
-                });
+            });
         }
     }
 
@@ -805,14 +713,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     .with_duration(write_duration)
     .with_rows(total_logs);
     write_metrics.print_report();
-
-    let staged_files = pipeline.list_staged_files("logs").expect("staged files");
-    let wal_files = pipeline.list_wal_files("logs").expect("wal files");
-    println!(
-        "✅ Flush completed: {} staged paths reported, {} WAL paths reported",
-        staged_files.len(),
-        wal_files.len()
-    );
+    println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each session through DuckDB union view...");
 
     if test_pipeline.config.ducklake.is_none() {
@@ -839,9 +740,6 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         println!("🔄 Forcing flush to staged local cache...");
         pipeline.force_flush_logs().await.expect("force flush");
 
-        let staged_files = pipeline.list_staged_files("logs").expect("staged files");
-        println!("📁 Staged log paths after flush: {}", staged_files.len());
-
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
@@ -858,16 +756,6 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         }
 
         println!("⚙️  Running optimizer to commit staged logs to Iceberg...");
-        pipeline.run_optimizer_once().await.expect("optimizer");
-
-        let staged_files_after = pipeline
-            .list_staged_files("logs")
-            .expect("staged files after");
-        assert!(
-            staged_files_after.is_empty(),
-            "Expected staged cache cleanup after optimizer, found {:?}",
-            staged_files_after
-        );
 
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
@@ -894,10 +782,6 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
     let mut config = load_test_config();
     warn_if_minio_unresolvable();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -951,7 +835,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
                 value,
                 attributes,
                 resource_attributes,
-                });
+            });
         }
         all_metric_batches.push(metric_data_points);
         expected_sums.push(expected_sum);
@@ -991,14 +875,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     .with_rows(total_metrics);
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-metric add time");
-
-    let staged_files = pipeline.list_staged_files("metrics").expect("staged files");
-    let wal_files = pipeline.list_wal_files("metrics").expect("wal files");
-    println!(
-        "✅ Flush completed: {} staged paths reported, {} WAL paths reported",
-        staged_files.len(),
-        wal_files.len()
-    );
+    println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each metric name via union_metrics...");
 
     // Query each metric name individually to verify row group isolation (WAL path)
@@ -1064,20 +941,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     println!("🔄 Forcing flush to staged local cache...");
     pipeline.force_flush_metrics().await.expect("force flush");
 
-    let staged_files = pipeline.list_staged_files("metrics").expect("staged files");
-    println!("📁 Staged metric paths after flush: {}", staged_files.len());
-
     println!("⚙️  Running optimizer to commit staged metrics to Iceberg...");
-    pipeline.run_optimizer_once().await.expect("optimizer");
-
-    let staged_files_after = pipeline
-        .list_staged_files("metrics")
-        .expect("staged files after");
-    assert!(
-        staged_files_after.is_empty(),
-        "Expected staged cache cleanup after optimizer, found {:?}",
-        staged_files_after
-    );
 
     for (metric_idx, metric_name) in metric_names.iter().enumerate() {
         let escaped = metric_name.replace('\'', "''");
@@ -1195,10 +1059,6 @@ async fn test_http_fields_in_span_model() {
 #[tokio::test]
 async fn test_pinned_metadata_updates_on_commit() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -1238,47 +1098,39 @@ async fn test_pinned_metadata_updates_on_commit() {
         .await
         .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
-    pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let pointer_path = test_pipeline
+    let pointer_dir = test_pipeline
         .cache_dir
         .path()
-        .join("iceberg_metadata")
-        .join("traces.json");
-    let first = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
-    let first_json: serde_json::Value = serde_json::from_str(&first).expect("metadata json");
-    let first_snapshot = first_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let first_location = first_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .join("catalog_metadata");
     assert!(
-        first_snapshot.is_some(),
-        "expected snapshot_id in metadata pointer"
+        !pointer_dir.join("traces.json").exists(),
+        "legacy catalog_metadata pointer files must not be written"
     );
-    assert!(
-        first_location.is_some(),
-        "expected metadata_location in metadata pointer"
-    );
+
+    let count_sql = "SELECT COUNT(*) AS count FROM union_spans WHERE app_id = 'app-pin'";
+    let first = test_pipeline
+        .execute_query(count_sql)
+        .await
+        .expect("query after first flush");
+    let first_count = first.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(first_count, 10, "expected 10 spans after first flush");
 
     pipeline
         .add_spans(spans, 10 * 256)
         .await
         .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
-    pipeline.run_optimizer_once().await.expect("optimizer");
 
-    let second = std::fs::read_to_string(&pointer_path).expect("metadata pointer");
-    let second_json: serde_json::Value = serde_json::from_str(&second).expect("metadata json");
-    let second_snapshot = second_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let second_location = second_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
+    let second = test_pipeline
+        .execute_query(count_sql)
+        .await
+        .expect("query after second flush");
+    let second_count = second.rows[0][0].as_i64().unwrap_or(0);
+    assert_eq!(second_count, 20, "expected 20 spans after second flush");
     assert!(
-        second_snapshot != first_snapshot || second_location != first_location,
-        "expected pinned metadata to update after commit"
+        !pointer_dir.join("traces.json").exists(),
+        "legacy catalog_metadata pointer files must not be written"
     );
 }
 
@@ -1381,10 +1233,6 @@ async fn test_duckdb_union_read_realtime_concurrency() {
 #[tokio::test]
 async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 1;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -1452,14 +1300,9 @@ async fn test_wal_replay_recovers_spans() {
         // another flush. Skip until replay + DuckLake bootstrap is aligned.
         return;
     }
-    ensure_wal_bucket(&mut config);
-    config.ingest_engine.optimizer_interval_seconds = 1;
-    config.ingest_engine.wal_prefix = format!("test-wal-{}", uuid::Uuid::new_v4().simple());
-    config.ingest_engine.replay_wal_on_startup = false;
 
     let cache_dir = tempdir().expect("tempdir");
     config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(cache_dir.path().join("wal").to_string_lossy().to_string());
 
     let session_id = format!("replay-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
@@ -1504,12 +1347,9 @@ async fn test_wal_replay_recovers_spans() {
 
     // Second pipeline: `replay_wal_on_startup` is honored by config; WAL listing is not exposed on
     // `IngestPipeline` (integration tests assert durability via DuckLake query after restart).
-    config.ingest_engine.replay_wal_on_startup = true;
     let pipeline = softprobe_runtime::ingest_engine::IngestPipeline::new(&config)
         .await
         .expect("pipeline");
-
-    pipeline.run_optimizer_once().await.expect("optimizer");
 
     let query_engine =
         query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
@@ -1536,164 +1376,20 @@ async fn test_wal_replay_recovers_spans() {
 
 #[tokio::test]
 async fn test_metadata_maintenance_job_expires_snapshots() {
-    use chrono::{Duration as ChronoDuration, Utc};
-    use iceberg::{Catalog, TableCreation, TableIdent};
-    use softprobe_runtime::compaction::executor::{
-        ActionStatus, CompactionStatus, MaintenanceExecutor,
-    };
-    use softprobe_runtime::storage::iceberg::{IcebergCatalog, TableWriter, TraceTable};
-    use std::collections::HashMap;
+    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
 
-    let mut config = load_test_config();
-    if config.ducklake.is_some() {
-        let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
-        let _ = executor.run_once().await.unwrap();
-        return;
-    }
-    ensure_wal_bucket(&mut config);
-    config.compaction.enabled = true;
-    config.compaction.min_files_to_compact = 1;
-    config.compaction.metadata_maintenance_enabled = true;
-    config.compaction.metadata_min_snapshots_to_keep = 1;
-    config.compaction.metadata_max_snapshot_age_seconds = 0;
-
-    let catalog = IcebergCatalog::new(&config).await.expect("catalog");
-    let namespace = iceberg::NamespaceIdent::from_strs([config.iceberg.namespace.as_str()])
-        .expect("namespace ident");
-    let _ = catalog
-        .catalog()
-        .create_namespace(&namespace, HashMap::new())
-        .await;
-
-    let table_name = format!("traces_maintenance_{}", uuid::Uuid::new_v4().simple());
-    let table_ident =
-        TableIdent::from_strs([config.iceberg.namespace.as_str(), table_name.as_str()])
-            .expect("table ident");
-
-    let schema = TraceTable::schema();
-    let partition_spec = TraceTable::partition_spec(&schema).unwrap();
-    let sort_order = TraceTable::sort_order(&schema).unwrap();
-    let properties = TraceTable::table_properties();
-    let creation = TableCreation::builder()
-        .name(table_name.clone())
-        .schema(schema)
-        .partition_spec(partition_spec)
-        .sort_order(sort_order)
-        .properties(properties)
-        .build();
-    catalog
-        .catalog()
-        .create_table(&namespace, creation)
-        .await
-        .unwrap();
-
-    let writer = TableWriter::new(catalog.catalog().clone(), table_ident.clone());
-    let base_time = Utc::now();
-    for offset in 0..3 {
-        let timestamp = base_time + ChronoDuration::seconds(offset);
-        let span = SpanData {
-            session_id: format!("maint-{}", offset),
-            trace_id: format!("trace-{}", offset),
-            span_id: format!("span-{}", offset),
-            parent_span_id: None,
-            app_id: "app-test".to_string(),
-            organization_id: None,
-            tenant_id: None,
-            message_type: "span".to_string(),
-            span_kind: Some("server".to_string()),
-            timestamp,
-            end_timestamp: Some(timestamp + ChronoDuration::seconds(1)),
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-            events: Vec::new(),
-            http_request_method: None,
-            http_request_path: None,
-            http_request_headers: None,
-            http_request_body: None,
-            http_response_status_code: None,
-            http_response_headers: None,
-            http_response_body: None,
-            status_code: Some("OK".to_string()),
-            status_message: None,
-        };
-        writer
-            .write_batches(vec![vec![span]], SpanData::to_record_batch)
-            .await
-            .unwrap();
-    }
-
-    let table_before = catalog.catalog().load_table(&table_ident).await.unwrap();
-    let snapshot_count_before = table_before.metadata().snapshots().count();
+    let config = load_test_config();
     assert!(
-        snapshot_count_before >= 3,
-        "expected at least 3 snapshots, found {}",
-        snapshot_count_before
+        config.ducklake.is_some(),
+        "DuckLake required for maintenance smoke"
     );
-
-    let executor = MaintenanceExecutor::new(&config, None).await.unwrap();
-    let summary = executor
-        .run_once_for_tables(&[table_ident.clone()])
-        .await
-        .unwrap();
-    let result = summary.tables.first().unwrap();
-    assert!(
-        result.metadata.expired_snapshots >= 2,
-        "expected at least 2 snapshots expired, found {}",
-        result.metadata.expired_snapshots
-    );
-    assert!(
-        matches!(
-            result.compaction.status,
-            CompactionStatus::Completed | CompactionStatus::Unsupported
-        ),
-        "unexpected compaction status"
-    );
-    assert!(
-        matches!(
-            result.rewrite_manifests.status,
-            ActionStatus::Completed | ActionStatus::Unsupported
-        ),
-        "unexpected rewrite manifests status"
-    );
-    let is_r2 = std::env::var("ICEBERG_TEST_TYPE").ok().as_deref() == Some("r2");
-    if is_r2 {
-        // Cloudflare R2 Data Catalog: orphan file cleanup is not supported yet.
-        // See: https://developers.cloudflare.com/r2/data-catalog/table-maintenance/
-        assert!(
-            matches!(result.remove_orphan_files.status, ActionStatus::Unsupported),
-            "expected remove orphan files to be Unsupported on R2"
-        );
-    } else {
-        assert!(
-            matches!(
-                result.remove_orphan_files.status,
-                ActionStatus::Completed | ActionStatus::Unsupported
-            ),
-            "unexpected remove orphan files status"
-        );
-    }
-
-    wait_for(
-        Duration::from_secs(5),
-        Duration::from_millis(200),
-        || async {
-            let table_after = catalog.catalog().load_table(&table_ident).await?;
-            let remaining = table_after.metadata().snapshots().count();
-            Ok(remaining <= config.compaction.metadata_min_snapshots_to_keep)
-        },
-    )
-    .await
-    .expect("snapshots should be expired down to configured minimum");
-
-    let _ = catalog.catalog().drop_table(&table_ident).await;
+    let executor = MaintenanceExecutor::new(&config, None, None).await.unwrap();
+    let _ = executor.run_once().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_wal_cleanup_after_flush() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 100;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -1734,11 +1430,7 @@ async fn test_wal_cleanup_after_flush() {
         .expect("first add");
     pipeline.force_flush_spans().await.expect("first flush");
 
-    let first_wal_files = pipeline.list_wal_files("spans").expect("first wal files");
-    println!(
-        "✅ First flush: {} WAL paths reported (listing may be empty)",
-        first_wal_files.len()
-    );
+    println!("✅ First flush completed (DuckLake flush-through)");
 
     // Wait a bit to ensure timestamps are different
     tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
@@ -1779,11 +1471,7 @@ async fn test_wal_cleanup_after_flush() {
         .expect("second add");
     pipeline.force_flush_spans().await.expect("second flush");
 
-    let second_wal_files = pipeline.list_wal_files("spans").expect("second wal files");
-    println!(
-        "✅ Second flush: {} WAL paths reported",
-        second_wal_files.len()
-    );
+    println!("✅ Second flush completed (DuckLake flush-through)");
 
     let sql1 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-1'";
     let sql2 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-2'";
@@ -1811,10 +1499,6 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     let mut config = load_test_config();
     warn_if_minio_unresolvable();
-    config.span_buffering.max_buffer_spans = 10_000;
-    config.span_buffering.max_buffer_bytes = 1024 * 1024 * 1024;
-    config.span_buffering.flush_interval_seconds = 3600;
-    config.ingest_engine.optimizer_interval_seconds = 3600;
 
     let test_pipeline = build_test_pipeline(config).await;
     let pipeline = &test_pipeline.pipeline;
@@ -1866,10 +1550,6 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     // Step 2: Local staged listing (may be empty; union view is authoritative)
     println!("📁 Step 2: Staged path listing after flush...");
-    let staged_files_before = pipeline
-        .list_staged_files("spans")
-        .expect("list staged files");
-    println!("✅ Reported {} staged paths", staged_files_before.len());
 
     // Step 3: Verify union view shows data from staged files
     println!("🔍 Step 3: Verifying union view shows data from staged files...");
@@ -1893,97 +1573,19 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         union_count_before
     );
 
-    // Step 4: Get initial metadata pinning state
-    println!("📌 Step 4: Capturing initial metadata pinning state...");
+    // Step 4-7: Legacy catalog_metadata pointer files are gone; durable data is DuckLake only.
+    println!("📌 Step 4-7: Confirming no legacy catalog_metadata pointer files...");
     let pointer_path = test_pipeline
         .cache_dir
         .path()
-        .join("iceberg_metadata")
+        .join("catalog_metadata")
         .join("traces.json");
-
-    let initial_metadata = if pointer_path.exists() {
-        let contents = std::fs::read_to_string(&pointer_path).expect("read metadata pointer");
-        let json: serde_json::Value = serde_json::from_str(&contents).expect("parse metadata json");
-        Some((
-            json.get("snapshot_id").and_then(|v| v.as_i64()),
-            json.get("metadata_location")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        ))
-    } else {
-        None
-    };
-    println!("✅ Initial metadata state: {:?}", initial_metadata);
-
-    // Step 5: Run optimizer to commit staged data to Iceberg
-    println!("⚙️  Step 5: Running optimizer to commit staged data to Iceberg...");
-    pipeline.run_optimizer_once().await.expect("optimizer");
-    println!("✅ Optimizer completed");
-
-    // Step 6: Verify staged files are removed
-    println!("🗑️  Step 6: Verifying staged files are removed...");
-    let staged_files_after = pipeline
-        .list_staged_files("spans")
-        .expect("list staged files after");
     assert!(
-        staged_files_after.is_empty(),
-        "Expected staged files to be removed after optimizer, found {:?}",
-        staged_files_after
+        !pointer_path.exists(),
+        "legacy catalog_metadata pointer files must not be written"
     );
-    println!(
-        "✅ Staged files removed (found {} files)",
-        staged_files_after.len()
-    );
-
-    // Step 7: Verify metadata pinning is updated
-    println!("📌 Step 7: Verifying metadata pinning is updated...");
-    assert!(
-        pointer_path.exists(),
-        "Expected metadata pointer file to exist after commit"
-    );
-    let updated_contents =
-        std::fs::read_to_string(&pointer_path).expect("read updated metadata pointer");
-    let updated_json: serde_json::Value =
-        serde_json::from_str(&updated_contents).expect("parse updated metadata json");
-    let updated_snapshot = updated_json.get("snapshot_id").and_then(|v| v.as_i64());
-    let updated_location = updated_json
-        .get("metadata_location")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    assert!(
-        updated_snapshot.is_some(),
-        "Expected snapshot_id in updated metadata pointer"
-    );
-    assert!(
-        updated_location.is_some(),
-        "Expected metadata_location in updated metadata pointer"
-    );
-
-    // Metadata pointer may already reflect the latest DuckLake snapshot after flush; the ingest
-    // `run_optimizer_once` hook is currently a no-op, so snapshot/location often stay unchanged here.
-    if let Some((initial_snapshot, initial_location)) = initial_metadata {
-        let metadata_updated =
-            updated_snapshot != initial_snapshot || updated_location != initial_location;
-        if metadata_updated {
-            println!(
-                "✅ Metadata pinning updated: snapshot_id {:?} -> {:?}, location changed: {}",
-                initial_snapshot,
-                updated_snapshot,
-                updated_location != initial_location
-            );
-        } else {
-            println!(
-                "✅ Metadata pinning stable after no-op optimizer (flush already advanced pointer): {:?}",
-                (updated_snapshot, updated_location)
-            );
-        }
-    } else {
-        println!(
-            "✅ Metadata pinning created: snapshot_id {:?}",
-            updated_snapshot
-        );
-    }
+    println!("⚙️  Step 5-6: Ingest is flush-through (no staged optimizer)");
+    println!("✅ No Softprobe metadata pointer files (DuckLake catalog owns snapshots)");
 
     // Step 8: Verify union view doesn't double count (should still be expected_count, not 2x)
     println!("🔍 Step 8: Verifying union view doesn't double count...");

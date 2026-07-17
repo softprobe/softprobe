@@ -5,7 +5,7 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
-use crate::api::ingestion::IngestResponse;
+use crate::api::ingestion::{ingest_write_failed, IngestResponse};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::Log as LogData;
@@ -45,12 +45,7 @@ pub async fn ingest_logs(
                     .into_response(),
                     Err(e) => {
                         error!("Failed to process OTLP logs: {}", e);
-                        Json(IngestResponse {
-                            success: false,
-                            ingested_count: 0,
-                            message: format!("Ingestion failed: {}", e),
-                        })
-                        .into_response()
+                        ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
                 }
             }
@@ -72,12 +67,7 @@ pub async fn ingest_logs(
                     .into_response(),
                     Err(e) => {
                         error!("Failed to process OTLP logs: {}", e);
-                        Json(IngestResponse {
-                            success: false,
-                            ingested_count: 0,
-                            message: format!("Ingestion failed: {}", e),
-                        })
-                        .into_response()
+                        ingest_write_failed(format!("Ingestion failed: {}", e))
                     }
                 }
             }

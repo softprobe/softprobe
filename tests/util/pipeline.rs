@@ -16,10 +16,6 @@ impl TestPipeline {
     pub async fn new(mut config: Config) -> Self {
         let cache_dir = TempDir::new().expect("tempdir");
         config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-        config.ingest_engine.wal_dir =
-            Some(cache_dir.path().join("wal").to_string_lossy().to_string());
-        // Avoid background optimizer races in integration tests that assert staged-file state.
-        config.ingest_engine.optimizer_interval_seconds = 3600;
         if config.ducklake.is_none() {
             config.ducklake = Some(config.ducklake_or_default());
         }
@@ -37,13 +33,11 @@ impl TestPipeline {
                 ducklake.data_path = format!("{}/tests/{}/", base, run_id);
             } else {
                 // Default to object storage for integration tests to validate committed data persistence.
-                let bucket = config.ingest_engine.wal_bucket.trim();
-                ducklake.data_path = format!("s3://{}/ducklake/tests/{}/", bucket, run_id);
+                ducklake.data_path = format!("s3://warehouse/ducklake/tests/{}/", run_id);
             }
         }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
 
-        // Pass tiered storage to query engine so it can access buffer snapshots
         let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");

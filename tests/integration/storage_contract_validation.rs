@@ -5,9 +5,9 @@
 //! Requirements: `integration-e2e` feature, local MinIO on the configured S3 endpoint, and
 //! `tests/config/test.yaml` (see `make test-local`).
 
-use crate::util::iceberg::{ensure_wal_bucket, load_test_config};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
+use crate::util::storage_config::{load_test_config};
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 async fn build_test_pipeline(mut config: Config) -> TestPipeline {
-    ensure_wal_bucket(&mut config);
     TestPipeline::new(config).await
 }
 
@@ -24,8 +23,6 @@ async fn build_test_pipeline(mut config: Config) -> TestPipeline {
 #[tokio::test]
 async fn strict_trace_union_shape_ducklake_contract() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 1;
-    config.span_buffering.flush_interval_seconds = 1;
 
     let session_id = format!("strict-trace-{}", uuid::Uuid::new_v4());
     let trace_id = format!("strict-tr-{}", uuid::Uuid::new_v4());
@@ -141,8 +138,6 @@ async fn strict_trace_union_shape_ducklake_contract() {
 #[tokio::test]
 async fn strict_session_correlates_traces_and_logs() {
     let mut config = load_test_config();
-    config.span_buffering.max_buffer_spans = 2;
-    config.span_buffering.flush_interval_seconds = 1;
 
     let session_id = format!("strict-sess-{}", uuid::Uuid::new_v4());
     let trace_id = format!("strict-tid-{}", uuid::Uuid::new_v4());

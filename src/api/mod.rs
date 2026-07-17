@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::storage::{LogBuffer, MetricBuffer, SpanBuffer, Storage};
+use crate::storage::Storage;
 use axum::{
     response::Html,
     routing::{get, post, MethodRouter},
@@ -77,9 +77,6 @@ impl AppState {
 pub struct AppPipeline {
     pub storage: Storage,
     pub query_engine: QueryEngine,
-    pub span_buffer: SpanBuffer,
-    pub log_buffer: LogBuffer,
-    pub metric_buffer: MetricBuffer,
 }
 
 impl AppPipeline {
@@ -91,9 +88,6 @@ impl AppPipeline {
         Ok(Self {
             storage,
             query_engine,
-            span_buffer: pipeline.storage.span_buffer,
-            log_buffer: pipeline.storage.log_buffer,
-            metric_buffer: pipeline.storage.metric_buffer,
         })
     }
 
@@ -103,9 +97,6 @@ impl AppPipeline {
             config,
             self.storage,
             self.query_engine,
-            Some(self.span_buffer),
-            Some(self.log_buffer),
-            Some(self.metric_buffer),
             post(ingestion::traces::ingest_traces),
             None,
             None,
@@ -119,9 +110,6 @@ pub async fn create_router(
     config: Arc<Config>,
     _storage: Storage,
     _query_engine: QueryEngine,
-    _span_buffer: Option<SpanBuffer>,
-    _log_buffer: Option<LogBuffer>,
-    _metric_buffer: Option<MetricBuffer>,
     traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
     _dropdown_catalog: Option<Arc<DropdownCatalog>>,

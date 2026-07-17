@@ -7,22 +7,11 @@ server:
 storage:
   s3_region: "us-east-1"
 
-span_buffering:
-  max_buffer_bytes: 134217728
-  max_buffer_spans: 10000
-  flush_interval_seconds: 60
-
 ingest_engine:
-  wal_bucket: "datalake-benchmark-1769296187"
-  wal_prefix: "wal"
   cache_dir: "/var/tmp/datalake/cache"
-  wal_dir: "/var/tmp/datalake/wal"
-  optimizer_interval_seconds: 300
-  replay_wal_on_startup: false
 
 compaction:
   enabled: true
-  min_files_to_compact: 5
   target_file_size_bytes: 67108864
   compaction_interval_seconds: 3600
 
@@ -38,13 +27,3 @@ s3:
   access_key_id: null
   secret_access_key: null
 
-iceberg:
-  catalog_type: "rest"
-  catalog_uri: "http://172.31.86.44:8181/catalog"
-  catalog_token: null
-  warehouse: "default"
-  namespace: "default"
-  write_target_file_size_bytes: 134217728
-  write_row_group_size_bytes: 134217728
-  write_page_size_bytes: 1048576
-  force_close_after_append: false

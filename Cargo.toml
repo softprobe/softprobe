@@ -3,7 +3,7 @@ name = "softprobe-runtime"
 version = "0.1.0"
 edition = "2021"
 authors = ["SoftProbe Team"]
-description = "Softprobe runtime: OTLP ingest (HTTP + gRPC), query, Iceberg, and control API"
+description = "Softprobe runtime: OTLP ingest (HTTP + gRPC), DuckLake query/storage, and control API"
 license = "Apache-2.0"
 repository = "https://github.com/softprobe/hybrid"
 
@@ -28,11 +28,6 @@ prost = "0.13"
 prost-types = "0.13"
 tonic = { version = "0.12", features = ["gzip"] }
 
-# Iceberg (optional integration via feature)
-iceberg = { version = "0.9", optional = true }
-iceberg-catalog-rest = { version = "0.9", optional = true }
-object_store = { version = "0.10", optional = true, features = ["aws"] }
-
 # Static linking to duckdb is tooooo slow!
 # DuckDB: keep dynamic linking.
 # Do NOT enable `bundled`/static linking here; this repo expects libduckdb artifacts
@@ -42,7 +37,7 @@ duckdb = { version = "1.10502.0" }
 # Configuration YAML
 serde_yaml = "0.9"
 
-# Arrow and Parquet (aligned with iceberg; duckdb may still pull a newer arrow internally)
+# Arrow and Parquet
 arrow = "57"
 parquet = { version = "57", features = ["zstd"] }
 
@@ -128,9 +123,8 @@ opt-level = 0
 debug = true
 
 [features]
-default = ["iceberg_catalog"]
-iceberg_catalog = ["iceberg", "iceberg-catalog-rest", "object_store"]
-# REST catalog + MinIO + full ingest/query integration tests (run in CI or with local stack on :8181)
+default = []
+# MinIO + full ingest/query integration tests
 integration-e2e = []
 
 [[test]]

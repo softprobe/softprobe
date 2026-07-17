@@ -343,8 +343,8 @@ fn collect_trace_catalog_pairs(
 mod tests {
     use super::*;
     use crate::models::Span;
-    use crate::storage::iceberg::tables::TraceTable;
-    use iceberg::spec::Schema as IcebergSchema;
+    use crate::storage::schema::tables::TraceTable;
+    use arrow::datatypes::Schema;
 
     fn sample_span(tenant: Option<&str>) -> Span {
         Span {
@@ -376,9 +376,9 @@ mod tests {
 
     #[test]
     fn collect_pairs_skips_ids_and_collects_dimensions() {
-        let schema: IcebergSchema = TraceTable::schema();
+        let schema: Schema = TraceTable::schema();
         let spans = vec![sample_span(Some("ten-1"))];
-        let batch = crate::storage::iceberg::arrow::spans_to_record_batch(&spans, &schema).unwrap();
+        let batch = crate::storage::schema::arrow::spans_to_record_batch(&spans, &schema).unwrap();
         let cfg = DropdownCatalogConfig::default();
         let pairs = collect_trace_catalog_pairs(std::slice::from_ref(&batch), &cfg).unwrap();
         let types: HashSet<_> = pairs.iter().map(|(a, _)| a.as_str()).collect();

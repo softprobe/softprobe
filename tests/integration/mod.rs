@@ -18,7 +18,7 @@ pub mod tenant_otlp_isolation;
 pub mod tenant_promotion_specs;
 
 #[cfg(feature = "integration-e2e")]
-pub mod iceberg;
+pub mod ingest_commit_query;
 #[cfg(feature = "integration-e2e")]
 pub mod integration;
 #[cfg(feature = "integration-e2e")]

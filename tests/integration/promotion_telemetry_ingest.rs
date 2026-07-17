@@ -19,7 +19,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     ducklake.catalog_alias = "softprobe".to_string();
-    ducklake.metadata_schema = format!("softprobe_test_{suffix}");
+    ducklake.metadata_schema = format!("softprobe_registry_{suffix}");
     let tenant_data_path = temp
         .path()
         .join("tenant-data")
@@ -31,7 +31,6 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let metadata_path = ducklake.metadata_path.clone();
     config.ducklake = Some(ducklake);
     config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
-    config.ingest_engine.wal_dir = Some(temp.path().join("wal").to_string_lossy().to_string());
 
     let tenant_id = format!("tenant-promoted-{suffix}");
     let resolver = DuckLakeScopeResolver::connect(&config)
@@ -40,7 +39,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .expect("postgres resolver");
     resolver
         .provision_scope(ScopeProvisioningRequest {
-            tenant_id: tenant_id.clone(),
+            scope_id: tenant_id.clone(),
             metadata_schema: format!("softprobe_promoted_data_{suffix}"),
             data_path: tenant_data_path,
         })
@@ -52,8 +51,18 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .expect("tenant scope");
     insert_active_trace_promotion_spec(&scope.metadata_schema).await;
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    pipeline
+    // Bind writer to the provisioned tenant scope (not the registry schema on config).
+    let storage = IngestPipeline::build_tenant_storage(
+        &config,
+        None,
+        Some(resolver),
+        tenant_id.clone(),
+        scope.clone(),
+    )
+    .await
+    .expect("tenant storage");
+    storage
+        .writer
         .write_span_batches(vec![vec![promoted_span(&tenant_id)]])
         .await
         .expect("write promoted span");

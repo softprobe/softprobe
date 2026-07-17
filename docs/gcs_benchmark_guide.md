@@ -1,3 +1,5 @@
+> **Historical / pre-DuckLake.** Prefer DuckLake + object store; Lakekeeper/Iceberg REST sections are legacy. See [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md).
+
 # GCS Server Benchmark Guide
 
 This guide explains how to run a full stress performance benchmark on a server with Google Cloud Storage (GCS).

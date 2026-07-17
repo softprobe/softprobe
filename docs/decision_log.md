@@ -22,7 +22,7 @@ Each decision follows this structure:
 ## ADR-001: Apache Iceberg as Table Format
 
 **Date**: 2025-12-31
-**Status**: Accepted
+**Status**: Superseded by [ADR-014: DuckLake as Runtime Table Format](#adr-014-ducklake-as-runtime-table-format)
 **Deciders**: Engineering Team, Executive Leadership
 
 ### Context
@@ -775,6 +775,45 @@ span.setAttribute('sp.order.id', 'ORD-456');
 - [Semantic conventions for HTTP spans | OpenTelemetry](https://opentelemetry.io/docs/specs/semconv/http/http-spans/)
 - [Semantic conventions for events | OpenTelemetry](https://opentelemetry.io/docs/specs/semconv/general/events/)
 - [OpenSpec Tasks Section 5](../openspec/changes/add-iceberg-otlp-migration/tasks.md#5-http-body-storage--business-attribute-indexing)
+
+---
+
+## ADR-014: DuckLake as Runtime Table Format
+
+**Date**: 2026-07-16
+**Status**: Accepted
+**Deciders**: Engineering Team
+
+### Context
+
+ADR-001 chose Apache Iceberg for durable telemetry storage. In practice, Iceberg REST catalog (Lakekeeper), snapshot/manifest maintenance, and pinned-metadata query paths created ongoing operational cost. DuckLake provides catalog + data-file management with less manual maintenance while keeping Parquet on object storage and DuckDB as the query engine.
+
+### Decision
+
+**Use DuckLake** as the Softprobe runtime table format for committed spans, logs, and metrics. Iceberg writer/catalog/query paths are legacy and are being removed ([iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md)).
+
+### Rationale
+
+- DuckLake reduces catalog and compaction maintenance vs Iceberg REST + manual expire/rewrite jobs
+- Runtime already centers on DuckDB; DuckLake ATTACH matches the query worker model
+- Multi-tenant scopes map cleanly to DuckLake metadata schemas + `data_path`
+- Parquet on S3-compatible storage preserves portability of data files
+
+### Alternatives Considered
+
+- Keep Iceberg with better automation — rejected; maintenance burden remained the primary pain
+- Delta Lake — rejected earlier (ADR-001); no change for Rust/DuckDB-first stack
+
+### Consequences
+
+**Positive**: Simpler local stack (MinIO + ducklake-postgres), fewer extensions/paths in query workers  
+**Negative**: Broader engine ecosystem for Iceberg tables is deferred; cleanup must remove dual paths carefully
+
+### References
+
+- [Iceberg Legacy Cleanup](iceberg-legacy-cleanup.md)
+- [Ad hoc DuckDB / DuckLake](adhoc-duckdb-ducklake.md)
+- Supersedes [ADR-001](#adr-001-apache-iceberg-as-table-format)
 
 ---
 
