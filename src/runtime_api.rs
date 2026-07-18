@@ -137,8 +137,13 @@ struct DuckLakeConnectionMaterial {
     ducklake_metadata_schema: String,
     ducklake_data_path: String,
     gcs_bucket: String,
+    /// Object-store access key (`GCS_HMAC_*` for `gs://`, `AWS_ACCESS_KEY_ID` for `s3://`).
     gcs_hmac_access_key_id: String,
+    /// Object-store secret (`GCS_HMAC_SECRET` / `AWS_SECRET_ACCESS_KEY`).
     gcs_hmac_secret: String,
+    /// Optional STS / EC2 role session token for `s3://` (`AWS_SESSION_TOKEN`).
+    /// Empty when unused (HMAC / static keys). Clients must `SET s3_session_token` when set.
+    session_token: String,
     schema_version: String,
 }
 
@@ -186,6 +191,7 @@ fn ducklake_connection_material(
         gcs_bucket: tenant.bucket_name.clone(),
         gcs_hmac_access_key_id: creds.access_key_id.unwrap_or_default(),
         gcs_hmac_secret: creds.secret_access_key.unwrap_or_default(),
+        session_token: creds.session_token.unwrap_or_default(),
         schema_version: "1".to_string(),
     })
 }
@@ -256,6 +262,7 @@ mod data_connection_tests {
         assert_eq!(material.gcs_bucket, "softprobe-tenant-bucket");
         assert_eq!(material.gcs_hmac_access_key_id, "");
         assert_eq!(material.gcs_hmac_secret, "");
+        assert_eq!(material.session_token, "");
         assert_eq!(material.schema_version, "1");
 
         std::env::remove_var("CONFIG_FILE");
@@ -300,6 +307,7 @@ mod data_connection_tests {
         assert_eq!(material.ducklake_data_path, "gs://bucket/ducklake/data/");
         assert_eq!(material.gcs_hmac_access_key_id, "access-id");
         assert_eq!(material.gcs_hmac_secret, "secret-value");
+        assert_eq!(material.session_token, "");
 
         std::env::remove_var("CONFIG_FILE");
         std::env::remove_var("DUCKLAKE_PG_URI");
@@ -307,6 +315,47 @@ mod data_connection_tests {
         std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
         std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
         std::env::remove_var("GCS_HMAC_SECRET");
+    }
+
+    #[test]
+    fn ducklake_connection_material_includes_s3_session_token() {
+        let _guard = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("runtime.yaml");
+        let mut config = Config::default();
+        config.ducklake.catalog_type = "postgres".to_string();
+        config.ducklake.metadata_path =
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
+        config.ducklake.data_path = "s3://bucket/ducklake/data/".to_string();
+        config.object_store.region = "us-west-2".to_string();
+        std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
+            .expect("write config");
+        std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIATEST");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret-test");
+        std::env::set_var("AWS_SESSION_TOKEN", "session-test-token");
+        std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCS_HMAC_SECRET");
+
+        let tenant = TenantInfo {
+            tenant_id: "tenant-123".to_string(),
+            bucket_name: "softprobe-tenant-bucket".to_string(),
+            dataset_id: "ignored".to_string(),
+        };
+        let scope = DuckLakeScope {
+            metadata_schema: "tenant_tenant_123".to_string(),
+            data_path: "s3://bucket/ducklake/data/".to_string(),
+        };
+
+        let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
+        assert_eq!(material.gcs_hmac_access_key_id, "AKIATEST");
+        assert_eq!(material.gcs_hmac_secret, "secret-test");
+        assert_eq!(material.session_token, "session-test-token");
+
+        std::env::remove_var("CONFIG_FILE");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
     }
 
     #[test]

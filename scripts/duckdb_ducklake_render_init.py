@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Emit DuckDB init SQL for ad-hoc shells from the same YAML as softprobe-runtime (CONFIG_FILE).
 
-Parses only the `ducklake`, `s3`, and `storage` sections (simple two-space YAML subset).
+Parses the `ducklake` and `object_store` sections (simple two-space YAML subset).
+Credentials are never read from YAML; they come from the environment:
+  - `s3://` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [/ `AWS_SESSION_TOKEN`]
+  - `gs://` → `GCS_HMAC_ACCESS_KEY_ID` / `GCS_HMAC_SECRET` (or `GCP_HMAC_*`)
+
 Writes shell exports to --meta for catalog/schema-qualified names in duckdb_ducklake_combo.sh.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import sys
@@ -33,7 +38,9 @@ def extract_section(lines: list[str], name: str) -> dict[str, str] | None:
                 k, v = m.group(1), m.group(2).split("#", 1)[0].strip()
                 if not v:
                     section[k] = ""
-                elif (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                elif (v.startswith('"') and v.endswith('"')) or (
+                    v.startswith("'") and v.endswith("'")
+                ):
                     section[k] = v[1:-1]
                 else:
                     section[k] = v
@@ -42,13 +49,12 @@ def extract_section(lines: list[str], name: str) -> dict[str, str] | None:
     return None
 
 
-def load_config(path: Path) -> tuple[dict[str, str] | None, dict[str, str] | None, dict[str, str] | None]:
+def load_config(path: Path) -> tuple[dict[str, str] | None, dict[str, str] | None]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     return (
         extract_section(lines, "ducklake"),
-        extract_section(lines, "s3"),
-        extract_section(lines, "storage"),
+        extract_section(lines, "object_store"),
     )
 
 
@@ -69,10 +75,73 @@ def attach_target(dl: dict[str, str]) -> str:
     return mp
 
 
+def env_first(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def render_object_store_sql(data_path: str, object_store: dict[str, str] | None) -> list[str]:
+    """Match runtime `configure_object_store` credential / endpoint setup."""
+    object_store = object_store or {}
+    parts: list[str] = []
+
+    if data_path.startswith("gs://"):
+        key_id = env_first("GCS_HMAC_ACCESS_KEY_ID", "GCP_HMAC_ACCESS_KEY_ID")
+        secret = env_first("GCS_HMAC_SECRET", "GCP_HMAC_SECRET")
+        if key_id and secret:
+            parts += [
+                "",
+                (
+                    "CREATE OR REPLACE SECRET gcs_hmac ("
+                    f"TYPE GCS, KEY_ID '{escape_sql_literal(key_id)}', "
+                    f"SECRET '{escape_sql_literal(secret)}'"
+                    ");"
+                ),
+            ]
+        else:
+            sys.stderr.write(
+                "warning: gs:// data_path but GCS_HMAC_ACCESS_KEY_ID/GCS_HMAC_SECRET "
+                "(or GCP_HMAC_*) are unset; object-store I/O may fail\n"
+            )
+        return parts
+
+    endpoint = (object_store.get("endpoint") or "").strip()
+    region = (object_store.get("region") or "us-east-1").strip()
+    if endpoint:
+        host = endpoint.removeprefix("http://").removeprefix("https://")
+        use_ssl = "false" if endpoint.startswith("http://") else "true"
+        parts += [
+            "",
+            f"SET s3_endpoint = '{escape_sql_literal(host)}';",
+            "SET s3_url_style = 'path';",
+            f"SET s3_use_ssl = {use_ssl};",
+        ]
+
+    access_key = env_first("AWS_ACCESS_KEY_ID")
+    secret_key = env_first("AWS_SECRET_ACCESS_KEY")
+    session_token = env_first("AWS_SESSION_TOKEN")
+    if access_key:
+        parts.append(f"SET s3_access_key_id = '{escape_sql_literal(access_key)}';")
+    if secret_key:
+        parts.append(f"SET s3_secret_access_key = '{escape_sql_literal(secret_key)}';")
+    if session_token:
+        parts.append(f"SET s3_session_token = '{escape_sql_literal(session_token)}';")
+    if data_path.startswith("s3://") or endpoint:
+        parts.append(f"SET s3_region = '{escape_sql_literal(region)}';")
+        if data_path.startswith("s3://") and not (access_key and secret_key):
+            sys.stderr.write(
+                "warning: s3:// data_path but AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY "
+                "are unset; object-store I/O may fail\n"
+            )
+    return parts
+
+
 def render_attach_sql(
     dl: dict[str, str],
-    s3: dict[str, str] | None,
-    storage: dict[str, str] | None,
+    object_store: dict[str, str] | None,
 ) -> str:
     ct = dl.get("catalog_type", "duckdb")
     alias = dl.get("catalog_alias", "softprobe")
@@ -96,26 +165,7 @@ def render_attach_sql(
     elif ct == "sqlite":
         parts += ["INSTALL sqlite;", "LOAD sqlite;"]
 
-    s3 = s3 or {}
-    storage = storage or {}
-    endpoint = (s3.get("endpoint") or "http://localhost:9000").strip()
-    host = endpoint.removeprefix("http://").removeprefix("https://")
-    use_ssl = "false" if endpoint.startswith("http://") else "true"
-    ak = (s3.get("access_key_id") or "").strip()
-    sk = (s3.get("secret_access_key") or "").strip()
-    region = (storage.get("s3_region") or "us-east-1").strip()
-
-    parts += [
-        "",
-        f"SET s3_endpoint = '{escape_sql_literal(host)}';",
-        "SET s3_url_style = 'path';",
-        f"SET s3_use_ssl = {use_ssl};",
-    ]
-    if ak:
-        parts.append(f"SET s3_access_key_id = '{escape_sql_literal(ak)}';")
-    if sk:
-        parts.append(f"SET s3_secret_access_key = '{escape_sql_literal(sk)}';")
-    parts.append(f"SET s3_region = '{escape_sql_literal(region)}';")
+    parts += render_object_store_sql(data_path, object_store)
 
     opts = [f"DATA_PATH '{escape_sql_literal(data_path)}'"]
     if lim not in ("", "null", "None"):
@@ -155,7 +205,7 @@ def write_meta(path: Path, dl: dict[str, str]) -> None:
 
 
 def default_config_path(root: Path) -> Path | None:
-    env = __import__("os").environ.get("CONFIG_FILE", "").strip()
+    env = os.environ.get("CONFIG_FILE", "").strip()
     if env:
         p = Path(env)
         return p if p.is_file() else None
@@ -173,9 +223,13 @@ def default_config_path(root: Path) -> Path | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=Path, help="Runtime YAML (default: CONFIG_FILE or test-docker/config.yaml)")
+    ap.add_argument(
+        "--config", type=Path, help="Runtime YAML (default: CONFIG_FILE or test-docker/config.yaml)"
+    )
     ap.add_argument("--meta", type=Path, required=True, help="Write shell sourceable exports for combo.sh")
-    ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent, help="Repo root for defaults")
+    ap.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parent.parent, help="Repo root for defaults"
+    )
     args = ap.parse_args()
     cfg_path = args.config or default_config_path(args.root)
     if cfg_path is None:
@@ -188,7 +242,7 @@ def main() -> None:
         sys.stderr.write(f"Config not found: {cfg_path}\n")
         sys.exit(1)
 
-    dl, s3, storage = load_config(cfg_path)
+    dl, object_store = load_config(cfg_path)
     if not dl:
         sys.stderr.write(f"No ducklake: section in {cfg_path}\n")
         sys.exit(1)
@@ -196,9 +250,10 @@ def main() -> None:
     write_meta(args.meta, dl)
     sys.stdout.write(
         f"-- CONFIG_FILE={cfg_path}\n"
-        f"-- DuckLake scope: catalog_alias={dl.get('catalog_alias')} metadata_schema={dl.get('metadata_schema')} data_path={dl.get('data_path')}\n"
+        f"-- DuckLake scope: catalog_alias={dl.get('catalog_alias')} "
+        f"metadata_schema={dl.get('metadata_schema')} data_path={dl.get('data_path')}\n"
     )
-    sys.stdout.write(render_attach_sql(dl, s3, storage))
+    sys.stdout.write(render_attach_sql(dl, object_store))
 
 
 if __name__ == "__main__":

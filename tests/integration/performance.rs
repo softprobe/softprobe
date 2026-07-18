@@ -22,10 +22,10 @@ fn load_perf_config() -> Config {
         std::env::set_var("CONFIG_FILE", &config_file);
     }
     let mut config = load_test_config();
-    // Local e2e infra is MinIO + DuckLake Postgres. Concurrent query workers contend on
+    // Local e2e infra is MinIO/GCS data + DuckLake Postgres. Concurrent query workers contend on
     // SQLite metadata (`database is locked`); prefer Postgres whenever the local catalog is up.
     let backend = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
-    if backend == "local" {
+    if backend == "local" || backend == "gcs" {
         config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
