@@ -68,8 +68,8 @@ language examples. Keep large HTTP bodies in `http.request` /
 
 | Kind | Purpose | Effect of apply | Effect of later ingest |
 |------|---------|-----------------|------------------------|
-| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metrics` | `ALTER TABLE ... ADD COLUMN` + record active spec | Extract values into the new columns for **new** rows |
-| `business_table` | Create a versioned business table + `*_current` view | `CREATE TABLE` / `CREATE OR REPLACE VIEW` + record active spec | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
+| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metrics` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec (supersede prior) | Extract values into the new columns for **new** rows |
+| `business_table` | Create a versioned business table + `*_current` view | Compatibility check, then `CREATE TABLE IF NOT EXISTS` / additive `ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE VIEW` + activate one spec per table | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
 
 Use `telemetry_columns` when you want a first-class filter column on existing
 telemetry tables. Use `business_table` when you want a dedicated relational
@@ -159,25 +159,36 @@ Example validation error:
 }
 ```
 
-### PostgreSQL-only promotion path
+### Catalog backends
 
-Promotion apply and ingest-time telemetry extraction require a **PostgreSQL**
-DuckLake catalog with a tenant scope registry:
+Promotion apply and ingest-time telemetry extraction work on both backends:
 
-- apply returns `503` with `ducklake_connection_unavailable` when the registry
-  is absent (including SQLite local catalogs);
-- ingest skips promotion extraction entirely when
-  `catalog_type != "postgres"` — manifests are ignored and no promoted columns
-  are populated.
+| Backend | Scope model | Spec storage | Apply serialization |
+|---------|-------------|--------------|---------------------|
+| **PostgreSQL** | Multi-tenant (per-tenant metadata schema via scope registry) | `{tenant_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
+| **SQLite** (local/dev) | Single configured catalog scope | `{catalog_alias}.promotion_specs` in the DuckLake catalog | Process-global mutex across DDL + activate |
 
-Local SQLite DuckLake is fine for basic ingest/query, but it is not a
-promotion environment.
+Both backends serialize the full apply critical section (physical DDL +
+activate/deactivate). Physical DDL still runs on DuckLake (outside the Postgres
+metadata transaction); the lock/mutex only prevents concurrent applies from
+interleaving.
+
+SQLite promotion is intentionally **single-scope**: every tenant id in a local
+process shares the configured DuckLake catalog. Multi-tenant isolation still
+requires PostgreSQL. Cross-process concurrent apply against the same SQLite
+file is out of scope for local/dev (WAL/busy-timeout still protect storage).
+DuckLake tables cannot declare `PRIMARY KEY`; uniqueness of `spec_id` is
+enforced by the activate path.
+
+Endpoints that need a tenant registry (for example
+`/v1/data/ducklake-connection`) still return `503 ducklake_connection_unavailable`
+when the Postgres resolver is absent.
 
 Other apply `503` codes:
 
 | `error.code` | Meaning |
 |--------------|---------|
-| `ducklake_connection_unavailable` | Tenant DuckLake resolver / registry unavailable |
+| `ducklake_connection_unavailable` | Tenant DuckLake resolver / registry unavailable (Postgres-only endpoints) |
 | `ducklake_scope_unavailable` | Authenticated tenant scope could not be resolved |
 | `promotion_schema_apply_failed` | DuckLake DDL failed |
 | `promotion_spec_record_failed` | Writing `promotion_specs` failed |
@@ -268,8 +279,8 @@ POST /v1/promotions/apply
         |
         +--> validate manifest
         +--> ensure traces/logs/metrics tables exist
-        +--> ALTER TABLE ADD COLUMN (nullable)
-        +--> record active row in tenant.promotion_specs
+        +--> ALTER TABLE ADD COLUMN IF NOT EXISTS (nullable)
+        +--> activate this telemetry spec; deactivate other active telemetry specs
         |
         v
 later OTLP ingest for that tenant
@@ -282,12 +293,27 @@ later OTLP ingest for that tenant
 query either attributes['sp.user.id'] or user_id
 ```
 
+### Active-spec lifecycle
+
+- Each tenant has **at most one active** `telemetry_columns` document.
+- Re-applying the **same** YAML is idempotent: DDL uses `IF NOT EXISTS`, and
+  the existing `promotion_specs` row is upserted back to `active`.
+- Applying an **updated** YAML activates the new content-hash `spec_id` and
+  marks prior active telemetry specs `inactive` in the same metadata transaction
+  (Postgres `BEGIN` / DuckDB `BEGIN TRANSACTION` on SQLite).
+- Physical columns are **additive only**: DuckLake never drops a column when
+  YAML removes it. Extraction follows the active document only, so removed
+  columns stop being populated on new rows while the physical column remains.
+- Spec identity uses a hash of the raw YAML text (`telemetry_columns_{hash}`).
+
 ### Ingest semantics
 
 1. Active manifests are loaded from the tenant metadata schema
    (`promotion_specs` where `status = 'active'` and
-   `target_kind = 'telemetry_columns'`). Loading requires PostgreSQL
-   tenant-scoped DuckLake; otherwise extraction is skipped.
+   `target_kind = 'telemetry_columns'`). Under normal apply that set has size
+   0 or 1. On PostgreSQL this loads from the tenant metadata schema; on SQLite
+   it loads from `{catalog_alias}.promotion_specs` in the local DuckLake
+   catalog. Other catalog types skip extraction.
 2. For each target table, columns from matching manifests are applied.
 3. Missing source values become SQL `NULL` in the promoted column.
 4. Invalid JSON bodies or type mismatches raise
@@ -357,13 +383,18 @@ columns:
       json_path: $.order.total_cents
 ```
 
-### What apply does today
+### What apply does
 
-1. Creates physical table `<table>_v<version>`
+1. Loads any active business-table manifest for the same `target.table` and
+   runs `validate_business_table_compatible` (HTTP **422** on failure).
+2. Creates physical table `<table>_v<version>` when missing
    (example: `checkout_orders_v1`).
-2. Creates or replaces view `<table>_current`
+3. Runs idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each nullable
+   column so safe same-version additive updates change the physical table.
+4. Creates or replaces view `<table>_current`
    (example: `checkout_orders_current`).
-3. Records the active business-table manifest in `promotion_specs`.
+5. Activates this business-table spec and deactivates other active specs for
+   the same logical table name.
 
 Every business table includes evidence anchors:
 
@@ -373,21 +404,16 @@ Every business table includes evidence anchors:
 
 ### Versioning / compatibility
 
-Compatibility helpers exist (`validate_business_table_compatible`) and encode
-the intended rules:
+Apply enforces `validate_business_table_compatible` against the prior active
+manifest for the same table:
 
-- same version should only grow additively;
+- same version may only add nullable columns;
+- adding a required (`nullable: false`) column requires a new table version,
+  because existing rows cannot satisfy the constraint;
 - dropping a column, changing type, or changing nullability on an existing
-  version should be rejected;
-- breaking changes should bump `target.version`.
-
-**Today's apply path does not enforce those rules.**
-`apply_business_table_promotion` runs `CREATE TABLE IF NOT EXISTS` for
-`<table>_vN`, replaces `<table>_current`, and records the new active spec. It
-does not load the prior business-table manifest or call the compatibility
-checker. Operators can therefore record an incompatible same-version manifest
-while the physical table stays stale. Treat version discipline as an
-operational requirement until apply enforces it.
+  version is rejected with **422**;
+- breaking changes must bump `target.version` (higher version is accepted and
+  creates a new physical `<table>_vN`).
 
 ### Extraction semantics (defined, tested)
 
@@ -411,20 +437,19 @@ that ingest path is wired.
 
 ## Metadata tables
 
-Each tenant metadata schema owns:
-
-| Table | Purpose |
-|-------|---------|
-| `promotion_specs` | Active/applied manifests (`spec_id`, `target_kind`, `manifest_json`, `status`, …) |
-| `promotion_errors` | Row-level extraction diagnostics for business promotion errors |
+| Backend | Location | Tables |
+|---------|----------|--------|
+| PostgreSQL | Each tenant metadata schema | `promotion_specs`, `promotion_errors` |
+| SQLite (local) | DuckLake catalog (`softprobe.promotion_specs`) | `promotion_specs` (control table; errors table remains Postgres-oriented for now) |
 
 These are control/diagnostic tables for the promotion system, not telemetry
 payload storage.
 
 ## Operator checklist
 
-1. Run promotion against a **PostgreSQL** DuckLake catalog with tenant scopes.
-   SQLite local catalogs do not apply or extract promotions.
+1. For **production multi-tenant** promotion, use a **PostgreSQL** DuckLake
+   catalog with tenant scopes. For **local/dev**, SQLite single-scope
+   promotion (apply + ingest extraction + query) is supported.
 2. Instrument consistent business attributes (`sp.user.id`, …).
 3. Verify MAP queries work before promoting anything.
 4. Promote only high-value filters you query often.

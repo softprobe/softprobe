@@ -12,8 +12,8 @@ use crate::inject::{
 };
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
-    BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
-    TelemetryTable,
+    BusinessApplyError, BusinessTableManifest, PromotionDataType, PromotionManifest,
+    TelemetryColumnsManifest, TelemetryTable,
 };
 use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
 use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
@@ -652,41 +652,24 @@ async fn apply_telemetry_promotion(
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": {
-                    "code": "ducklake_connection_unavailable",
-                    "message": "tenant DuckLake resolver is unavailable"
-                }
-            })),
-        ));
-    };
     let engine = state
         .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    let tables = telemetry_table_names(&spec.target.tables);
+    // Writer facade serializes DDL + spec activation (Postgres advisory lock / SQLite mutex).
     engine
         .storage
         .writer
-        .apply_telemetry_column_promotion(&engine.scope, &spec)
+        .apply_and_record_telemetry_promotion(&engine.scope, &manifest_yaml, &spec, &tables)
         .await
         .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
-    tenant_ducklake
-        .record_active_telemetry_promotion_spec(
-            &engine.scope,
-            &manifest_yaml,
-            &telemetry_table_names(&spec.target.tables),
-        )
-        .await
-        .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
     Ok(Json(json!({
         "specVersion": "softprobe.promotion.apply.v1",
         "applied": true,
         "target": {
             "kind": "telemetry_columns",
-            "tables": telemetry_table_names(&spec.target.tables)
+            "tables": tables
         },
         "schemaChanges": telemetry_schema_changes(&spec)
     })))
@@ -698,31 +681,32 @@ async fn apply_business_table_promotion(
     manifest_yaml: String,
     spec: BusinessTableManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": {
-                    "code": "ducklake_connection_unavailable",
-                    "message": "tenant DuckLake resolver is unavailable"
-                }
-            })),
-        ));
-    };
     let engine = state
         .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    // Writer facade dispatches: Postgres uses pg advisory lock; SQLite uses a process-global mutex.
+    // Both serialize load -> compatibility check -> DDL -> record.
     engine
         .storage
         .writer
-        .apply_business_table_promotion(&engine.scope, &spec)
+        .apply_business_promotion_guarded(&engine.scope, &manifest_yaml, &spec)
         .await
-        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
-    tenant_ducklake
-        .record_active_business_promotion_spec(&engine.scope, &manifest_yaml, &spec.target.table)
-        .await
-        .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
+        .map_err(|err| match err {
+            BusinessApplyError::Incompatible(e) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": {
+                        "code": e.code(),
+                        "message": e.to_string(),
+                        "path": e.path()
+                    }
+                })),
+            ),
+            BusinessApplyError::Other(e) => {
+                promotion_apply_error("promotion_schema_apply_failed", e)
+            }
+        })?;
     Ok(Json(json!({
         "specVersion": "softprobe.promotion.apply.v1",
         "applied": true,

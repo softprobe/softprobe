@@ -5,12 +5,15 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
+mod promotion_store;
+
 use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
-    business_table_create_ddls, extract_telemetry_promoted_value, telemetry_column_add_ddls,
-    BusinessTableManifest, PromotionColumn, TelemetryColumnsManifest, TelemetryPromotionEvent,
-    TelemetryPromotionRow, TelemetryTable,
+    business_spec_activation, business_table_create_ddls, extract_telemetry_promoted_value,
+    run_business_apply, run_telemetry_apply, telemetry_column_add_ddls, telemetry_spec_activation,
+    BusinessApplyError, BusinessTableManifest, PromotionColumn, PromotionSpecLoadError,
+    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::arrow;
@@ -408,6 +411,18 @@ impl DuckLakeWriter {
                     .await?;
             }
             Ok(())
+        } else if self.ducklake.catalog_type == "sqlite" {
+            let mut spans = Self::flatten_spans(batches);
+            if spans.is_empty() {
+                return Ok(());
+            }
+            let manifests = self.load_active_telemetry_manifests_local()?;
+            let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
+            Self::apply_span_promotions(&mut spans, &columns)?;
+            let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
+            let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
+            self.write_record_batches_internal("traces", record_batches)
+                .await
         } else {
             let schema = self.spans_schema().await?;
             let mut record_batches = Vec::new();
@@ -466,6 +481,16 @@ impl DuckLakeWriter {
                 .write_tenant_log_batches(&scope, &manifests, batches)
                 .await;
         }
+        if self.ducklake.catalog_type == "sqlite" {
+            let scope = DuckLakeScope {
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
+            };
+            let manifests = self.load_active_telemetry_manifests_local()?;
+            return self
+                .write_tenant_log_batches(&scope, &manifests, batches)
+                .await;
+        }
         let schema = self.logs_schema().await?;
         let mut record_batches = Vec::new();
         for batch in batches {
@@ -518,6 +543,16 @@ impl DuckLakeWriter {
                     .await?
                     .1
             };
+            return self
+                .write_tenant_metric_batches(&scope, &manifests, batches)
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            let scope = DuckLakeScope {
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
+            };
+            let manifests = self.load_active_telemetry_manifests_local()?;
             return self
                 .write_tenant_metric_batches(&scope, &manifests, batches)
                 .await;
@@ -587,11 +622,155 @@ impl DuckLakeWriter {
             .await
     }
 
+    fn map_spec_load(err: PromotionSpecLoadError) -> anyhow::Error {
+        match err {
+            PromotionSpecLoadError::Postgres(e) => anyhow!(e),
+            PromotionSpecLoadError::Backend(e) => anyhow!(e),
+            PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
+                anyhow!("promotion spec {spec_id} is invalid: {source}")
+            }
+        }
+    }
+
+    fn load_active_telemetry_manifests_local(&self) -> Result<Vec<TelemetryColumnsManifest>> {
+        let dk = &self.ducklake;
+        self.with_attached_conn(dk, |conn| {
+            promotion_store::load_active_telemetry_manifests(conn, &dk.catalog_alias)
+                .map_err(Self::map_spec_load)
+        })
+    }
+
+    /// Backend-neutral load of active telemetry promotion manifests for this writer's scope.
+    pub async fn load_active_telemetry_manifests(
+        &self,
+        scope: &DuckLakeScope,
+    ) -> Result<Vec<TelemetryColumnsManifest>> {
+        if self.ducklake.catalog_type == "postgres" {
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
+            return resolver
+                .load_active_telemetry_columns_manifests_for_scope(scope)
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            return self.load_active_telemetry_manifests_local();
+        }
+        Ok(Vec::new())
+    }
+
+    fn activate_spec_local_unlocked(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        activation: &crate::promotion::PromotionSpecActivation,
+    ) -> Result<String> {
+        let dk = self.effective_ducklake(scope);
+        self.with_attached_conn(&dk, |conn| {
+            promotion_store::record_active_spec(conn, &dk.catalog_alias, manifest_yaml, activation)
+        })
+    }
+
+    /// Apply telemetry DDL and activate the spec under one backend-specific critical section
+    /// (Postgres advisory lock / SQLite process-global mutex), so concurrent applies cannot
+    /// interleave DDL with a different manifest's activation.
+    pub async fn apply_and_record_telemetry_promotion(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        spec: &TelemetryColumnsManifest,
+        target_tables: &[String],
+    ) -> Result<String> {
+        if self.ducklake.catalog_type == "postgres" {
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
+            return resolver
+                .apply_telemetry_promotion_guarded(scope, manifest_yaml, target_tables, || async {
+                    self.apply_telemetry_column_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                })
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            let _guard = promotion_store::local_apply_mutex().lock().await;
+            let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+            return run_telemetry_apply(
+                || async {
+                    self.apply_telemetry_column_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                },
+                || async { self.activate_spec_local_unlocked(scope, manifest_yaml, &activation) },
+            )
+            .await;
+        }
+        Err(anyhow!(
+            "promotion specs are unsupported for catalog_type={}",
+            self.ducklake.catalog_type
+        ))
+    }
+
+    /// Backend-neutral guarded business-table apply (load → validate → DDL → record).
+    pub async fn apply_business_promotion_guarded(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        spec: &BusinessTableManifest,
+    ) -> std::result::Result<String, BusinessApplyError> {
+        if self.ducklake.catalog_type == "postgres" {
+            let resolver = self.tenant_ducklake.as_ref().ok_or_else(|| {
+                BusinessApplyError::Other(anyhow!(
+                    "postgres promotion requires a tenant DuckLake resolver"
+                ))
+            })?;
+            return resolver
+                .apply_business_promotion_guarded(scope, manifest_yaml, spec, || async {
+                    self.apply_business_table_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                })
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            let _guard = promotion_store::local_apply_mutex().lock().await;
+            let dk = self.effective_ducklake(scope);
+            let activation = business_spec_activation(&spec.target.table, manifest_yaml);
+            return run_business_apply(
+                spec,
+                || async {
+                    self.with_attached_conn(&dk, |conn| {
+                        promotion_store::load_active_business_manifest(
+                            conn,
+                            &dk.catalog_alias,
+                            &spec.target.table,
+                        )
+                        .map_err(Self::map_spec_load)
+                    })
+                },
+                || async {
+                    self.apply_business_table_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                },
+                || async { self.activate_spec_local_unlocked(scope, manifest_yaml, &activation) },
+            )
+            .await;
+        }
+        Err(BusinessApplyError::Other(anyhow!(
+            "promotion specs are unsupported for catalog_type={}",
+            self.ducklake.catalog_type
+        )))
+    }
+
     /// Apply additive telemetry promotion DDL inside one tenant DuckLake scope.
     ///
     /// `promotion apply` owns schema changes for promoted telemetry columns. It first materializes
     /// the hardcoded canonical telemetry tables if they do not exist, then runs the nullable
-    /// `ALTER TABLE ADD COLUMN` statements generated from the tenant manifest.
+    /// `ALTER TABLE ADD COLUMN IF NOT EXISTS` statements generated from the tenant manifest.
     pub async fn apply_telemetry_column_promotion(
         &self,
         scope: &DuckLakeScope,
@@ -757,8 +936,11 @@ impl DuckLakeWriter {
                         table = qualified_table,
                         path = escaped_path
                     );
+                    // BY NAME keeps ingest shrink-safe: physical promoted columns absent from the
+                    // active manifest (and thus from this Parquet batch) are filled with NULL
+                    // instead of failing a positional column-count match.
                     let insert = format!(
-                        "INSERT INTO {table} SELECT * FROM read_parquet('{path}') {order_clause};",
+                        "INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}') {order_clause};",
                         table = qualified_table,
                         path = escaped_path,
                         order_clause = order_clause,

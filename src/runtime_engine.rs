@@ -12,7 +12,9 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
-    ensure_promotion_metadata_tables, load_active_telemetry_columns_manifests,
+    business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
+    load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
+    telemetry_spec_activation, BusinessApplyError, BusinessTableManifest, PromotionSpecActivation,
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
@@ -21,8 +23,6 @@ use crate::storage::Storage;
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -450,12 +450,7 @@ RETURNING scope_id;"#,
         let client = self.pool.get().await?;
         let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
             .await
-            .map_err(|err| match err {
-                PromotionSpecLoadError::Postgres(e) => anyhow!(e),
-                PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
-                    anyhow!("promotion spec {spec_id} is invalid: {source}")
-                }
-            })?;
+            .map_err(map_spec_load_error)?;
         Ok((scope, manifests))
     }
 
@@ -467,82 +462,179 @@ RETURNING scope_id;"#,
         let client = self.pool.get().await?;
         let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
             .await
-            .map_err(|err| match err {
-                PromotionSpecLoadError::Postgres(e) => anyhow!(e),
-                PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
-                    anyhow!("promotion spec {spec_id} is invalid: {source}")
-                }
-            })?;
+            .map_err(map_spec_load_error)?;
         Ok(manifests)
     }
 
-    /// Record one successfully applied telemetry promotion manifest in the metadata schema.
+    async fn activate_spec_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        activation: &PromotionSpecActivation,
+    ) -> Result<String> {
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        tx.execute(
+            &format!(
+                r#"UPDATE "{schema}".promotion_specs
+SET status = 'inactive'
+WHERE status = 'active'
+  AND target_kind = $1
+  AND ($1 <> 'business_table' OR target_tables = $2)
+  AND spec_id <> $3;"#
+            ),
+            &[
+                &activation.target_kind,
+                &activation.target_tables,
+                &activation.spec_id,
+            ],
+        )
+        .await?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{schema}".promotion_specs
+  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
+VALUES ($1, 'softprobe.promotion.v1', $2, $3, $4, $5, 'active')
+ON CONFLICT (spec_id) DO UPDATE SET
+  target_kind = EXCLUDED.target_kind,
+  target_tables = EXCLUDED.target_tables,
+  manifest_json = EXCLUDED.manifest_json,
+  manifest_hash = EXCLUDED.manifest_hash,
+  status = 'active',
+  applied_at = NOW();"#
+            ),
+            &[
+                &activation.spec_id,
+                &activation.target_kind,
+                &activation.target_tables,
+                &manifest_yaml,
+                &activation.manifest_hash,
+            ],
+        )
+        .await?;
+        Ok(activation.spec_id.clone())
+    }
+
+    async fn load_business_manifest_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        scope: &DuckLakeScope,
+        table_name: &str,
+    ) -> Result<Option<BusinessTableManifest>> {
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let rows = tx
+            .query(
+                &format!(
+                    r#"SELECT spec_id, manifest_json FROM "{schema}".promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
+ORDER BY applied_at DESC
+LIMIT 1;"#
+                ),
+                &[&table_name],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let spec_id: String = row.get(0);
+        let manifest_json: String = row.get(1);
+        business_manifest_from_row(&spec_id, &manifest_json).map_err(map_spec_load_error)
+    }
+
+    async fn lock_promotion_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        scope: &DuckLakeScope,
+        lock_suffix: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+            &[&format!("{}:{lock_suffix}", scope.metadata_schema)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Low-level metadata operation used by resolver-isolation tests and maintenance tooling.
+    /// Runtime apply uses [`Self::apply_telemetry_promotion_guarded`] instead.
     pub async fn record_active_telemetry_promotion_spec(
         &self,
         scope: &DuckLakeScope,
         manifest_yaml: &str,
         target_tables: &[String],
     ) -> Result<String> {
-        let mut hasher = DefaultHasher::new();
-        manifest_yaml.hash(&mut hasher);
-        let manifest_hash = format!("{:016x}", hasher.finish());
-        let spec_id = format!("telemetry_columns_{manifest_hash}");
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                &format!(
-                    r#"INSERT INTO "{}".promotion_specs
-  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
-VALUES ($1, 'softprobe.promotion.v1', 'telemetry_columns', $2, $3, $4, 'active')
-ON CONFLICT (spec_id) DO UPDATE SET
-  target_tables = EXCLUDED.target_tables,
-  manifest_json = EXCLUDED.manifest_json,
-  manifest_hash = EXCLUDED.manifest_hash,
-  status = 'active',
-  applied_at = NOW();"#,
-                    scope.metadata_schema.replace('"', "\"\"")
-                ),
-                &[
-                    &spec_id,
-                    &target_tables.join(","),
-                    &manifest_yaml,
-                    &manifest_hash,
-                ],
-            )
-            .await?;
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+        let spec_id = Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await?;
+        tx.commit().await?;
         Ok(spec_id)
     }
 
-    /// Record one successfully applied business table promotion manifest in metadata.
-    pub async fn record_active_business_promotion_spec(
+    /// Apply telemetry DDL and activation through the shared lifecycle under a Postgres lock.
+    pub async fn apply_telemetry_promotion_guarded<F, Fut>(
         &self,
         scope: &DuckLakeScope,
         manifest_yaml: &str,
-        table_name: &str,
-    ) -> Result<String> {
-        let mut hasher = DefaultHasher::new();
-        manifest_yaml.hash(&mut hasher);
-        let manifest_hash = format!("{:016x}", hasher.finish());
-        let spec_id = format!("business_table_{}_{}", table_name, manifest_hash);
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                &format!(
-                    r#"INSERT INTO "{}".promotion_specs
-  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
-VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
-ON CONFLICT (spec_id) DO UPDATE SET
-  target_tables = EXCLUDED.target_tables,
-  manifest_json = EXCLUDED.manifest_json,
-  manifest_hash = EXCLUDED.manifest_hash,
-  status = 'active',
-  applied_at = NOW();"#,
-                    scope.metadata_schema.replace('"', "\"\"")
-                ),
-                &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
-            )
-            .await?;
+        target_tables: &[String],
+        apply_ddl: F,
+    ) -> Result<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+        let spec_id = run_telemetry_apply(apply_ddl, || async {
+            Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
+        })
+        .await?;
+        tx.commit().await?;
         Ok(spec_id)
+    }
+
+    /// Apply business load/validate/DDL/activation through the same lifecycle used by SQLite.
+    pub async fn apply_business_promotion_guarded<F, Fut>(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        spec: &BusinessTableManifest,
+        apply_ddl: F,
+    ) -> std::result::Result<String, BusinessApplyError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let table_name = spec.target.table.as_str();
+        let mut client = self.pool.get().await.map_err(anyhow_other)?;
+        let tx = client.transaction().await.map_err(anyhow_other)?;
+        Self::lock_promotion_tx(&tx, scope, &format!("business_table:{table_name}"))
+            .await
+            .map_err(BusinessApplyError::Other)?;
+        let activation = business_spec_activation(table_name, manifest_yaml);
+        let spec_id = run_business_apply(
+            spec,
+            || async { Self::load_business_manifest_tx(&tx, scope, table_name).await },
+            apply_ddl,
+            || async { Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await },
+        )
+        .await?;
+        tx.commit().await.map_err(anyhow_other)?;
+        Ok(spec_id)
+    }
+}
+
+fn anyhow_other<E: std::error::Error + Send + Sync + 'static>(err: E) -> BusinessApplyError {
+    BusinessApplyError::Other(anyhow!(err))
+}
+
+fn map_spec_load_error(err: PromotionSpecLoadError) -> anyhow::Error {
+    match err {
+        PromotionSpecLoadError::Postgres(e) => anyhow!(e),
+        PromotionSpecLoadError::Backend(e) => anyhow!(e),
+        PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
+            anyhow!("promotion spec {spec_id} is invalid: {source}")
+        }
     }
 }
 

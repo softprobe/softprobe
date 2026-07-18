@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 pub const PROMOTION_SPEC_VERSION: &str = "softprobe.promotion.v1";
 
@@ -192,10 +194,11 @@ pub fn parse_promotion_manifest(
     raw.validate()
 }
 
-/// Failed to read or parse promotion specs from Postgres for the configured DuckLake metadata schema.
+/// Failed to read or parse promotion specs from the configured DuckLake metadata store.
 #[derive(Debug)]
 pub enum PromotionSpecLoadError {
     Postgres(tokio_postgres::Error),
+    Backend(String),
     InvalidRowManifest {
         spec_id: String,
         source: PromotionValidationError,
@@ -206,6 +209,7 @@ impl std::fmt::Display for PromotionSpecLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Postgres(e) => write!(f, "postgres error loading promotion_specs: {e}"),
+            Self::Backend(e) => write!(f, "error loading promotion_specs: {e}"),
             Self::InvalidRowManifest { spec_id, source } => {
                 write!(
                     f,
@@ -220,15 +224,184 @@ impl std::error::Error for PromotionSpecLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Postgres(e) => Some(e),
+            Self::Backend(_) => None,
             Self::InvalidRowManifest { source, .. } => Some(source),
         }
     }
+}
+
+/// Content-hash of raw promotion YAML used as the durable identity suffix for `spec_id`.
+pub fn promotion_manifest_hash(manifest_yaml: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    manifest_yaml.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Stable `promotion_specs.spec_id` for a telemetry_columns document.
+pub fn telemetry_spec_id(manifest_yaml: &str) -> String {
+    format!(
+        "telemetry_columns_{}",
+        promotion_manifest_hash(manifest_yaml)
+    )
+}
+
+/// Stable `promotion_specs.spec_id` for a business_table document.
+pub fn business_spec_id(table_name: &str, manifest_yaml: &str) -> String {
+    format!(
+        "business_table_{}_{}",
+        table_name,
+        promotion_manifest_hash(manifest_yaml)
+    )
+}
+
+/// Backend-neutral data needed to activate one promotion spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionSpecActivation {
+    pub spec_id: String,
+    pub manifest_hash: String,
+    pub target_kind: &'static str,
+    pub target_tables: String,
+}
+
+pub fn telemetry_spec_activation(
+    manifest_yaml: &str,
+    target_tables: &[String],
+) -> PromotionSpecActivation {
+    PromotionSpecActivation {
+        spec_id: telemetry_spec_id(manifest_yaml),
+        manifest_hash: promotion_manifest_hash(manifest_yaml),
+        target_kind: "telemetry_columns",
+        target_tables: target_tables.join(","),
+    }
+}
+
+pub fn business_spec_activation(table_name: &str, manifest_yaml: &str) -> PromotionSpecActivation {
+    PromotionSpecActivation {
+        spec_id: business_spec_id(table_name, manifest_yaml),
+        manifest_hash: promotion_manifest_hash(manifest_yaml),
+        target_kind: "business_table",
+        target_tables: table_name.to_string(),
+    }
+}
+
+/// Shared telemetry apply lifecycle. Backend adapters provide only DDL and activation primitives.
+pub async fn run_telemetry_apply<ApplyDdl, ApplyDdlFuture, Activate, ActivateFuture>(
+    apply_ddl: ApplyDdl,
+    activate: Activate,
+) -> anyhow::Result<String>
+where
+    ApplyDdl: FnOnce() -> ApplyDdlFuture,
+    ApplyDdlFuture: std::future::Future<Output = anyhow::Result<()>>,
+    Activate: FnOnce() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = anyhow::Result<String>>,
+{
+    apply_ddl().await?;
+    activate().await
+}
+
+/// Error from the shared business apply lifecycle.
+pub enum BusinessApplyError {
+    Incompatible(PromotionValidationError),
+    Other(anyhow::Error),
+}
+
+/// Shared business apply lifecycle. Both PostgreSQL and SQLite execute this exact sequence.
+pub async fn run_business_apply<
+    LoadCurrent,
+    LoadFuture,
+    ApplyDdl,
+    ApplyDdlFuture,
+    Activate,
+    ActivateFuture,
+>(
+    requested: &BusinessTableManifest,
+    load_current: LoadCurrent,
+    apply_ddl: ApplyDdl,
+    activate: Activate,
+) -> Result<String, BusinessApplyError>
+where
+    LoadCurrent: FnOnce() -> LoadFuture,
+    LoadFuture: std::future::Future<Output = anyhow::Result<Option<BusinessTableManifest>>>,
+    ApplyDdl: FnOnce() -> ApplyDdlFuture,
+    ApplyDdlFuture: std::future::Future<Output = anyhow::Result<()>>,
+    Activate: FnOnce() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = anyhow::Result<String>>,
+{
+    if let Some(current) = load_current()
+        .await
+        .map_err(BusinessApplyError::Other)?
+        .as_ref()
+    {
+        validate_business_table_compatible(current, requested)
+            .map_err(BusinessApplyError::Incompatible)?;
+    }
+    apply_ddl().await.map_err(BusinessApplyError::Other)?;
+    activate().await.map_err(BusinessApplyError::Other)
+}
+
+/// Parse one `(spec_id, manifest_json)` row into a telemetry columns manifest.
+pub fn telemetry_manifest_from_row(
+    spec_id: &str,
+    manifest_json: &str,
+) -> Result<Option<TelemetryColumnsManifest>, PromotionSpecLoadError> {
+    match parse_promotion_manifest(manifest_json) {
+        Ok(PromotionManifest::TelemetryColumns(m)) => Ok(Some(m)),
+        Ok(PromotionManifest::BusinessTable(_)) => Ok(None),
+        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest {
+            spec_id: spec_id.to_string(),
+            source: e,
+        }),
+    }
+}
+
+/// Parse one `(spec_id, manifest_json)` row into a business-table manifest.
+pub fn business_manifest_from_row(
+    spec_id: &str,
+    manifest_json: &str,
+) -> Result<Option<BusinessTableManifest>, PromotionSpecLoadError> {
+    match parse_promotion_manifest(manifest_json) {
+        Ok(PromotionManifest::BusinessTable(m)) => Ok(Some(m)),
+        Ok(PromotionManifest::TelemetryColumns(_)) => Ok(None),
+        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest {
+            spec_id: spec_id.to_string(),
+            source: e,
+        }),
+    }
+}
+
+/// DuckDB-dialect DDL for the local (single-scope) `promotion_specs` control table.
+///
+/// Qualifies as `{catalog_alias}.promotion_specs` so the table lives in the attached DuckLake
+/// catalog (not the ephemeral in-memory DuckDB `main`). No `CREATE SCHEMA` — DuckLake catalogs
+/// already expose the alias as the qualification root for local SQLite.
+pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
+    let catalog = quote_sql_ident(catalog_alias);
+    // DuckLake tables do not support PRIMARY KEY / UNIQUE constraints. Uniqueness of
+    // `spec_id` is enforced by the activate path (UPDATE-then-INSERT, no ON CONFLICT).
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS {catalog}.promotion_specs (
+  spec_id TEXT NOT NULL,
+  spec_version TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_table TEXT,
+  target_tables TEXT,
+  business_version BIGINT,
+  manifest_json TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_by TEXT,
+  status TEXT NOT NULL
+);"#
+    )
 }
 
 /// Load every **active** telemetry column manifest for one tenant DuckLake metadata schema.
 ///
 /// Rows with `target_kind != telemetry_columns` are skipped. Business-table specs may live in the
 /// same table but are ignored here so ingest/query can resolve telemetry promotion per tenant.
+///
+/// Under normal apply, at most one telemetry_columns row is active per tenant (superseded specs
+/// are marked `inactive`). Loaders still return a vector so older multi-active rows remain readable.
 pub async fn load_active_telemetry_columns_manifests(
     client: &tokio_postgres::Client,
     tenant_schema: &str,
@@ -245,15 +418,39 @@ pub async fn load_active_telemetry_columns_manifests(
     for row in rows {
         let spec_id: String = row.get(0);
         let manifest_json: String = row.get(1);
-        match parse_promotion_manifest(&manifest_json) {
-            Ok(PromotionManifest::TelemetryColumns(m)) => out.push(m),
-            Ok(PromotionManifest::BusinessTable(_)) => {}
-            Err(e) => {
-                return Err(PromotionSpecLoadError::InvalidRowManifest { spec_id, source: e });
-            }
+        if let Some(m) = telemetry_manifest_from_row(&spec_id, &manifest_json)? {
+            out.push(m);
         }
     }
     Ok(out)
+}
+
+/// Load the active business-table manifest for one logical table name, if any.
+///
+/// Apply keeps at most one active `business_table` row per `target_tables` value. When multiple
+/// active rows exist (legacy data), the newest by `applied_at` wins.
+pub async fn load_active_business_table_manifest(
+    client: &tokio_postgres::Client,
+    tenant_schema: &str,
+    table_name: &str,
+) -> Result<Option<BusinessTableManifest>, PromotionSpecLoadError> {
+    let schema = quote_sql_ident(tenant_schema);
+    let sql = format!(
+        r#"SELECT spec_id, manifest_json FROM {schema}.promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
+ORDER BY applied_at DESC
+LIMIT 1;"#
+    );
+    let rows = client
+        .query(&sql, &[&table_name])
+        .await
+        .map_err(PromotionSpecLoadError::Postgres)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let spec_id: String = row.get(0);
+    let manifest_json: String = row.get(1);
+    business_manifest_from_row(&spec_id, &manifest_json)
 }
 
 /// Ensure the hardcoded promotion metadata tables exist inside one tenant schema.
@@ -478,14 +675,29 @@ pub fn validate_business_table_compatible(
             ));
         }
     }
+    let current_names = current
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
+    for requested_col in &requested.columns {
+        if !current_names.contains(requested_col.name.as_str()) && !requested_col.nullable {
+            return Err(PromotionValidationError::new(
+                "business_required_column_added",
+                format!("columns.{}.nullable", requested_col.name),
+                "required columns cannot be added to an existing table; create a new version",
+            ));
+        }
+    }
     Ok(())
 }
 
 /// Generate DuckLake-compatible DDL for a business table manifest.
 ///
-/// The physical table is versioned as `<target.table>_v<target.version>`. The current view is
-/// replaced only after the physical table DDL in the returned sequence, so callers can execute this
-/// list in order and keep `*_current` pointed at the latest successfully created version.
+/// The physical table is versioned as `<target.table>_v<target.version>`. Sequence:
+/// 1. `CREATE TABLE IF NOT EXISTS` with the full column list (first apply)
+/// 2. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column (same-version additive re-apply)
+/// 3. `CREATE OR REPLACE VIEW` so `*_current` points at the physical table
 pub fn business_table_create_ddls(
     catalog_schema_prefix: &str,
     spec: &BusinessTableManifest,
@@ -495,30 +707,43 @@ pub fn business_table_create_ddls(
     let view = business_current_view_name(spec);
     let qualified_table = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&table));
     let qualified_view = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&view));
-    let mut columns = Vec::new();
+    let mut create_columns = Vec::new();
+    let mut alter_ddls = Vec::new();
     for (name, sql_type, nullable) in business_anchor_columns() {
-        columns.push(format!(
+        let qname = quote_sql_ident(name);
+        create_columns.push(format!(
             "{} {}{}",
-            quote_sql_ident(name),
+            qname,
             sql_type,
             if *nullable { "" } else { " NOT NULL" }
         ));
-    }
-    for col in &spec.columns {
-        columns.push(format!(
-            "{} {}{}",
-            quote_sql_ident(&col.name),
-            business_promotion_data_type_sql(&col.data_type),
-            if col.nullable { "" } else { " NOT NULL" }
+        alter_ddls.push(format!(
+            "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {qname} {sql_type};"
         ));
     }
-    Ok(vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
-            columns.join(",\n  ")
-        ),
-        format!("CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"),
-    ])
+    for col in &spec.columns {
+        let qname = quote_sql_ident(&col.name);
+        let sql_type = business_promotion_data_type_sql(&col.data_type);
+        create_columns.push(format!(
+            "{} {}{}",
+            qname,
+            sql_type,
+            if col.nullable { "" } else { " NOT NULL" }
+        ));
+        alter_ddls.push(format!(
+            "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {qname} {sql_type};"
+        ));
+    }
+    let mut ddls = Vec::with_capacity(2 + alter_ddls.len());
+    ddls.push(format!(
+        "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
+        create_columns.join(",\n  ")
+    ));
+    ddls.extend(alter_ddls);
+    ddls.push(format!(
+        "CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"
+    ));
+    Ok(ddls)
 }
 
 fn validate_business_table_additive(
@@ -571,10 +796,11 @@ pub fn validate_telemetry_column_additive(
     Ok(())
 }
 
-/// Generate `ALTER TABLE ... ADD COLUMN` statements for additive nullable telemetry promotion.
+/// Generate idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements for telemetry promotion.
 ///
 /// `catalog_schema_prefix` must be a fully quoted DuckLake qualification for catalog + metadata schema,
-/// for example `"softprobe"."tenant_acme"` (no trailing dot).
+/// for example `"softprobe"."tenant_acme"` (no trailing dot). Re-applying the same (or additive)
+/// manifest is safe: existing columns are skipped.
 pub fn telemetry_column_add_ddls(
     catalog_schema_prefix: &str,
     spec: &TelemetryColumnsManifest,
@@ -587,7 +813,7 @@ pub fn telemetry_column_add_ddls(
             let typ = promotion_data_type_sql(&col.data_type);
             let qcol = quote_sql_ident(&col.name);
             ddls.push(format!(
-                "ALTER TABLE {}.{} ADD COLUMN {} {};",
+                "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} {};",
                 catalog_schema_prefix, bare, qcol, typ
             ));
         }
@@ -1264,7 +1490,6 @@ columns:
         let ddls =
             super::business_table_create_ddls(r#""softprobe"."tenant_alpha""#, &spec).expect("ddl");
 
-        assert_eq!(ddls.len(), 2);
         assert!(ddls[0].starts_with(
             r#"CREATE TABLE IF NOT EXISTS "softprobe"."tenant_alpha"."checkout_orders_v2" ("#
         ));
@@ -1273,8 +1498,14 @@ columns:
         assert!(ddls[0].contains(r#""promotion_spec_version" VARCHAR NOT NULL"#));
         assert!(ddls[0].contains(r#""order_id" VARCHAR NOT NULL"#));
         assert!(ddls[0].contains(r#""total_cents" BIGINT"#));
+        assert!(ddls.iter().any(|ddl| {
+            ddl == r#"ALTER TABLE "softprobe"."tenant_alpha"."checkout_orders_v2" ADD COLUMN IF NOT EXISTS "order_id" VARCHAR;"#
+        }));
+        assert!(ddls.iter().any(|ddl| {
+            ddl == r#"ALTER TABLE "softprobe"."tenant_alpha"."checkout_orders_v2" ADD COLUMN IF NOT EXISTS "total_cents" BIGINT;"#
+        }));
         assert_eq!(
-            ddls[1],
+            ddls.last().expect("view ddl"),
             r#"CREATE OR REPLACE VIEW "softprobe"."tenant_alpha"."checkout_orders_current" AS SELECT * FROM "softprobe"."tenant_alpha"."checkout_orders_v2";"#
         );
     }
@@ -1338,6 +1569,54 @@ columns:
     }
 
     #[test]
+    fn business_table_compatibility_rejects_additive_required_columns() {
+        let current = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: business_table, table: checkout_orders, version: 1 }
+rowSelector:
+  attribute: { key: sp.workflow, equals: checkout }
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source: { from: http_response_body, json_path: $.total }
+"#,
+        )
+        .expect("current");
+        let requested = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: business_table, table: checkout_orders, version: 1 }
+rowSelector:
+  attribute: { key: sp.workflow, equals: checkout }
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source: { from: http_response_body, json_path: $.total }
+  - name: order_id
+    type: string
+    nullable: false
+    source: { from: attribute, key: order.id }
+"#,
+        )
+        .expect("requested");
+        let (
+            PromotionManifest::BusinessTable(current),
+            PromotionManifest::BusinessTable(requested),
+        ) = (current, requested)
+        else {
+            panic!("business manifests");
+        };
+
+        let error = super::validate_business_table_compatible(&current, &requested)
+            .expect_err("required additive column needs a new table version");
+        assert_eq!(error.code(), "business_required_column_added");
+        assert_eq!(error.path(), "columns.order_id.nullable");
+    }
+
+    #[test]
     fn metadata_ddl_creates_specs_and_errors_tables() {
         let ddl = super::promotion_metadata_table_ddls("tenant_alpha");
         assert_eq!(ddl.len(), 3);
@@ -1346,6 +1625,84 @@ columns:
         assert!(ddl[1].contains("manifest_hash TEXT NOT NULL"));
         assert!(ddl[2].contains(r#""tenant_alpha".promotion_errors"#));
         assert!(ddl[2].contains("raw_value_preview TEXT"));
+    }
+
+    #[test]
+    fn telemetry_and_business_spec_ids_are_stable_content_hashes() {
+        let yaml = "specVersion: softprobe.promotion.v1\n";
+        assert_eq!(
+            super::telemetry_spec_id(yaml),
+            format!("telemetry_columns_{}", super::promotion_manifest_hash(yaml))
+        );
+        assert_eq!(
+            super::business_spec_id("checkout_orders", yaml),
+            format!(
+                "business_table_checkout_orders_{}",
+                super::promotion_manifest_hash(yaml)
+            )
+        );
+        assert_ne!(
+            super::promotion_manifest_hash(yaml),
+            super::promotion_manifest_hash("different")
+        );
+    }
+
+    #[test]
+    fn local_promotion_specs_ddl_is_catalog_qualified() {
+        let ddl = super::local_promotion_specs_table_ddl("softprobe");
+        assert!(ddl.starts_with(r#"CREATE TABLE IF NOT EXISTS "softprobe".promotion_specs ("#));
+        assert!(ddl.contains(r#"spec_id TEXT NOT NULL"#));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(ddl.contains("manifest_hash TEXT NOT NULL"));
+        assert!(ddl.contains("status TEXT NOT NULL"));
+        assert!(!ddl.contains("CREATE SCHEMA"));
+    }
+
+    #[test]
+    fn telemetry_manifest_from_row_parses_and_skips_business() {
+        let telemetry = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name
+"#;
+        let parsed = super::telemetry_manifest_from_row("spec-1", telemetry)
+            .expect("parse")
+            .expect("telemetry");
+        assert_eq!(parsed.columns[0].name, "service_name");
+
+        let business = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#;
+        assert!(super::telemetry_manifest_from_row("biz-1", business)
+            .expect("parse")
+            .is_none());
+        let biz = super::business_manifest_from_row("biz-1", business)
+            .expect("parse")
+            .expect("business");
+        assert_eq!(biz.target.table, "checkout_orders");
     }
 
     #[test]
@@ -1382,11 +1739,11 @@ columns:
         assert_eq!(ddls.len(), 4);
         assert_eq!(
             ddls[0],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN "division_name" VARCHAR;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN IF NOT EXISTS "division_name" VARCHAR;"#
         );
         assert_eq!(
             ddls[3],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN "checkout_latency_ms" DOUBLE;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN IF NOT EXISTS "checkout_latency_ms" DOUBLE;"#
         );
     }
 
