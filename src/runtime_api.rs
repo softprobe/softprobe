@@ -12,8 +12,8 @@ use crate::inject::{
 };
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
-    BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
-    TelemetryTable,
+    validate_business_table_compatible, BusinessTableManifest, PromotionDataType,
+    PromotionManifest, TelemetryColumnsManifest, TelemetryTable,
 };
 use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
 use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
@@ -713,6 +713,24 @@ async fn apply_business_table_promotion(
         .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    let current = tenant_ducklake
+        .load_active_business_table_manifest_for_scope(&engine.scope, &spec.target.table)
+        .await
+        .map_err(|err| promotion_apply_error("promotion_spec_load_failed", err))?;
+    if let Some(current) = current.as_ref() {
+        validate_business_table_compatible(current, &spec).map_err(|err| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": {
+                        "code": err.code(),
+                        "message": err.to_string(),
+                        "path": err.path()
+                    }
+                })),
+            )
+        })?;
+    }
     engine
         .storage
         .writer

@@ -117,7 +117,16 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         .await
         .expect("apply business table promotion");
 
-    assert_eq!(ddls.len(), 2);
+    assert!(
+        ddls.len() > 2,
+        "expected CREATE + additive ALTER IF NOT EXISTS + VIEW, got {}",
+        ddls.len()
+    );
+    assert!(ddls[0].contains("CREATE TABLE IF NOT EXISTS"));
+    assert!(ddls.iter().any(|ddl| ddl.contains("ADD COLUMN IF NOT EXISTS")));
+    assert!(ddls
+        .last()
+        .is_some_and(|ddl| ddl.contains("CREATE OR REPLACE VIEW")));
     assert_ducklake_table_exists(&scope.metadata_schema, "checkout_orders_v1").await;
     assert_ducklake_view_exists(&scope.metadata_schema, "checkout_orders_current").await;
 }

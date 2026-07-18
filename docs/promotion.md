@@ -68,8 +68,8 @@ language examples. Keep large HTTP bodies in `http.request` /
 
 | Kind | Purpose | Effect of apply | Effect of later ingest |
 |------|---------|-----------------|------------------------|
-| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metrics` | `ALTER TABLE ... ADD COLUMN` + record active spec | Extract values into the new columns for **new** rows |
-| `business_table` | Create a versioned business table + `*_current` view | `CREATE TABLE` / `CREATE OR REPLACE VIEW` + record active spec | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
+| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metrics` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec (supersede prior) | Extract values into the new columns for **new** rows |
+| `business_table` | Create a versioned business table + `*_current` view | Compatibility check, then `CREATE TABLE IF NOT EXISTS` / additive `ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE VIEW` + activate one spec per table | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
 
 Use `telemetry_columns` when you want a first-class filter column on existing
 telemetry tables. Use `business_table` when you want a dedicated relational
@@ -268,8 +268,8 @@ POST /v1/promotions/apply
         |
         +--> validate manifest
         +--> ensure traces/logs/metrics tables exist
-        +--> ALTER TABLE ADD COLUMN (nullable)
-        +--> record active row in tenant.promotion_specs
+        +--> ALTER TABLE ADD COLUMN IF NOT EXISTS (nullable)
+        +--> activate this telemetry spec; deactivate other active telemetry specs
         |
         v
 later OTLP ingest for that tenant
@@ -282,12 +282,25 @@ later OTLP ingest for that tenant
 query either attributes['sp.user.id'] or user_id
 ```
 
+### Active-spec lifecycle
+
+- Each tenant has **at most one active** `telemetry_columns` document.
+- Re-applying the **same** YAML is idempotent: DDL uses `IF NOT EXISTS`, and
+  the existing `promotion_specs` row is upserted back to `active`.
+- Applying an **updated** YAML activates the new content-hash `spec_id` and
+  marks prior active telemetry specs `inactive` in the same Postgres transaction.
+- Physical columns are **additive only**: DuckLake never drops a column when
+  YAML removes it. Extraction follows the active document only, so removed
+  columns stop being populated on new rows while the physical column remains.
+- Spec identity uses a hash of the raw YAML text (`telemetry_columns_{hash}`).
+
 ### Ingest semantics
 
 1. Active manifests are loaded from the tenant metadata schema
    (`promotion_specs` where `status = 'active'` and
-   `target_kind = 'telemetry_columns'`). Loading requires PostgreSQL
-   tenant-scoped DuckLake; otherwise extraction is skipped.
+   `target_kind = 'telemetry_columns'`). Under normal apply that set has size
+   0 or 1. Loading requires PostgreSQL tenant-scoped DuckLake; otherwise
+   extraction is skipped.
 2. For each target table, columns from matching manifests are applied.
 3. Missing source values become SQL `NULL` in the promoted column.
 4. Invalid JSON bodies or type mismatches raise
@@ -357,13 +370,18 @@ columns:
       json_path: $.order.total_cents
 ```
 
-### What apply does today
+### What apply does
 
-1. Creates physical table `<table>_v<version>`
+1. Loads any active business-table manifest for the same `target.table` and
+   runs `validate_business_table_compatible` (HTTP **422** on failure).
+2. Creates physical table `<table>_v<version>` when missing
    (example: `checkout_orders_v1`).
-2. Creates or replaces view `<table>_current`
+3. Runs idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column
+   so same-version additive updates change the physical table.
+4. Creates or replaces view `<table>_current`
    (example: `checkout_orders_current`).
-3. Records the active business-table manifest in `promotion_specs`.
+5. Activates this business-table spec and deactivates other active specs for
+   the same logical table name.
 
 Every business table includes evidence anchors:
 
@@ -373,21 +391,14 @@ Every business table includes evidence anchors:
 
 ### Versioning / compatibility
 
-Compatibility helpers exist (`validate_business_table_compatible`) and encode
-the intended rules:
+Apply enforces `validate_business_table_compatible` against the prior active
+manifest for the same table:
 
-- same version should only grow additively;
+- same version may only grow additively;
 - dropping a column, changing type, or changing nullability on an existing
-  version should be rejected;
-- breaking changes should bump `target.version`.
-
-**Today's apply path does not enforce those rules.**
-`apply_business_table_promotion` runs `CREATE TABLE IF NOT EXISTS` for
-`<table>_vN`, replaces `<table>_current`, and records the new active spec. It
-does not load the prior business-table manifest or call the compatibility
-checker. Operators can therefore record an incompatible same-version manifest
-while the physical table stays stale. Treat version discipline as an
-operational requirement until apply enforces it.
+  version is rejected with **422**;
+- breaking changes must bump `target.version` (higher version is accepted and
+  creates a new physical `<table>_vN`).
 
 ### Extraction semantics (defined, tested)
 

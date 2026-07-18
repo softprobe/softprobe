@@ -591,7 +591,7 @@ impl DuckLakeWriter {
     ///
     /// `promotion apply` owns schema changes for promoted telemetry columns. It first materializes
     /// the hardcoded canonical telemetry tables if they do not exist, then runs the nullable
-    /// `ALTER TABLE ADD COLUMN` statements generated from the tenant manifest.
+    /// `ALTER TABLE ADD COLUMN IF NOT EXISTS` statements generated from the tenant manifest.
     pub async fn apply_telemetry_column_promotion(
         &self,
         scope: &DuckLakeScope,

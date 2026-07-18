@@ -12,8 +12,9 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
-    ensure_promotion_metadata_tables, load_active_telemetry_columns_manifests,
-    PromotionSpecLoadError, TelemetryColumnsManifest,
+    ensure_promotion_metadata_tables, load_active_business_table_manifest,
+    load_active_telemetry_columns_manifests, BusinessTableManifest, PromotionSpecLoadError,
+    TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::session_redis::{RedisStore, Session};
@@ -476,7 +477,27 @@ RETURNING scope_id;"#,
         Ok(manifests)
     }
 
+    /// Load the active business-table manifest for one logical table in an already bound scope.
+    pub async fn load_active_business_table_manifest_for_scope(
+        &self,
+        scope: &DuckLakeScope,
+        table_name: &str,
+    ) -> Result<Option<BusinessTableManifest>> {
+        let client = self.pool.get().await?;
+        load_active_business_table_manifest(&client, &scope.metadata_schema, table_name)
+            .await
+            .map_err(|err| match err {
+                PromotionSpecLoadError::Postgres(e) => anyhow!(e),
+                PromotionSpecLoadError::InvalidRowManifest { spec_id, source } => {
+                    anyhow!("promotion spec {spec_id} is invalid: {source}")
+                }
+            })
+    }
+
     /// Record one successfully applied telemetry promotion manifest in the metadata schema.
+    ///
+    /// Keeps a single active telemetry_columns document per tenant: other active telemetry specs
+    /// are marked `inactive` in the same transaction before upserting the new row.
     pub async fn record_active_telemetry_promotion_spec(
         &self,
         scope: &DuckLakeScope,
@@ -487,11 +508,23 @@ RETURNING scope_id;"#,
         manifest_yaml.hash(&mut hasher);
         let manifest_hash = format!("{:016x}", hasher.finish());
         let spec_id = format!("telemetry_columns_{manifest_hash}");
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                &format!(
-                    r#"INSERT INTO "{}".promotion_specs
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            &format!(
+                r#"UPDATE "{schema}".promotion_specs
+SET status = 'inactive'
+WHERE status = 'active'
+  AND target_kind = 'telemetry_columns'
+  AND spec_id <> $1;"#
+            ),
+            &[&spec_id],
+        )
+        .await?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{schema}".promotion_specs
   (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
 VALUES ($1, 'softprobe.promotion.v1', 'telemetry_columns', $2, $3, $4, 'active')
 ON CONFLICT (spec_id) DO UPDATE SET
@@ -499,21 +532,24 @@ ON CONFLICT (spec_id) DO UPDATE SET
   manifest_json = EXCLUDED.manifest_json,
   manifest_hash = EXCLUDED.manifest_hash,
   status = 'active',
-  applied_at = NOW();"#,
-                    scope.metadata_schema.replace('"', "\"\"")
-                ),
-                &[
-                    &spec_id,
-                    &target_tables.join(","),
-                    &manifest_yaml,
-                    &manifest_hash,
-                ],
-            )
-            .await?;
+  applied_at = NOW();"#
+            ),
+            &[
+                &spec_id,
+                &target_tables.join(","),
+                &manifest_yaml,
+                &manifest_hash,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(spec_id)
     }
 
     /// Record one successfully applied business table promotion manifest in metadata.
+    ///
+    /// Keeps a single active business_table document per logical table name: other active specs for
+    /// the same `target_tables` value are marked `inactive` before upserting.
     pub async fn record_active_business_promotion_spec(
         &self,
         scope: &DuckLakeScope,
@@ -524,11 +560,24 @@ ON CONFLICT (spec_id) DO UPDATE SET
         manifest_yaml.hash(&mut hasher);
         let manifest_hash = format!("{:016x}", hasher.finish());
         let spec_id = format!("business_table_{}_{}", table_name, manifest_hash);
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                &format!(
-                    r#"INSERT INTO "{}".promotion_specs
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            &format!(
+                r#"UPDATE "{schema}".promotion_specs
+SET status = 'inactive'
+WHERE status = 'active'
+  AND target_kind = 'business_table'
+  AND target_tables = $1
+  AND spec_id <> $2;"#
+            ),
+            &[&table_name, &spec_id],
+        )
+        .await?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{schema}".promotion_specs
   (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
 VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
 ON CONFLICT (spec_id) DO UPDATE SET
@@ -536,12 +585,12 @@ ON CONFLICT (spec_id) DO UPDATE SET
   manifest_json = EXCLUDED.manifest_json,
   manifest_hash = EXCLUDED.manifest_hash,
   status = 'active',
-  applied_at = NOW();"#,
-                    scope.metadata_schema.replace('"', "\"\"")
-                ),
-                &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
-            )
-            .await?;
+  applied_at = NOW();"#
+            ),
+            &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(spec_id)
     }
 }

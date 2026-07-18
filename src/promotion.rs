@@ -229,6 +229,9 @@ impl std::error::Error for PromotionSpecLoadError {
 ///
 /// Rows with `target_kind != telemetry_columns` are skipped. Business-table specs may live in the
 /// same table but are ignored here so ingest/query can resolve telemetry promotion per tenant.
+///
+/// Under normal apply, at most one telemetry_columns row is active per tenant (superseded specs
+/// are marked `inactive`). Loaders still return a vector so older multi-active rows remain readable.
 pub async fn load_active_telemetry_columns_manifests(
     client: &tokio_postgres::Client,
     tenant_schema: &str,
@@ -254,6 +257,38 @@ pub async fn load_active_telemetry_columns_manifests(
         }
     }
     Ok(out)
+}
+
+/// Load the active business-table manifest for one logical table name, if any.
+///
+/// Apply keeps at most one active `business_table` row per `target_tables` value. When multiple
+/// active rows exist (legacy data), the newest by `applied_at` wins.
+pub async fn load_active_business_table_manifest(
+    client: &tokio_postgres::Client,
+    tenant_schema: &str,
+    table_name: &str,
+) -> Result<Option<BusinessTableManifest>, PromotionSpecLoadError> {
+    let schema = quote_sql_ident(tenant_schema);
+    let sql = format!(
+        r#"SELECT spec_id, manifest_json FROM {schema}.promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
+ORDER BY applied_at DESC
+LIMIT 1;"#
+    );
+    let rows = client
+        .query(&sql, &[&table_name])
+        .await
+        .map_err(PromotionSpecLoadError::Postgres)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let spec_id: String = row.get(0);
+    let manifest_json: String = row.get(1);
+    match parse_promotion_manifest(&manifest_json) {
+        Ok(PromotionManifest::BusinessTable(m)) => Ok(Some(m)),
+        Ok(PromotionManifest::TelemetryColumns(_)) => Ok(None),
+        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest { spec_id, source: e }),
+    }
 }
 
 /// Ensure the hardcoded promotion metadata tables exist inside one tenant schema.
@@ -483,9 +518,10 @@ pub fn validate_business_table_compatible(
 
 /// Generate DuckLake-compatible DDL for a business table manifest.
 ///
-/// The physical table is versioned as `<target.table>_v<target.version>`. The current view is
-/// replaced only after the physical table DDL in the returned sequence, so callers can execute this
-/// list in order and keep `*_current` pointed at the latest successfully created version.
+/// The physical table is versioned as `<target.table>_v<target.version>`. Sequence:
+/// 1. `CREATE TABLE IF NOT EXISTS` with the full column list (first apply)
+/// 2. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column (same-version additive re-apply)
+/// 3. `CREATE OR REPLACE VIEW` so `*_current` points at the physical table
 pub fn business_table_create_ddls(
     catalog_schema_prefix: &str,
     spec: &BusinessTableManifest,
@@ -495,30 +531,43 @@ pub fn business_table_create_ddls(
     let view = business_current_view_name(spec);
     let qualified_table = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&table));
     let qualified_view = format!("{}.{}", catalog_schema_prefix, quote_sql_ident(&view));
-    let mut columns = Vec::new();
+    let mut create_columns = Vec::new();
+    let mut alter_ddls = Vec::new();
     for (name, sql_type, nullable) in business_anchor_columns() {
-        columns.push(format!(
+        let qname = quote_sql_ident(name);
+        create_columns.push(format!(
             "{} {}{}",
-            quote_sql_ident(name),
+            qname,
             sql_type,
             if *nullable { "" } else { " NOT NULL" }
         ));
-    }
-    for col in &spec.columns {
-        columns.push(format!(
-            "{} {}{}",
-            quote_sql_ident(&col.name),
-            business_promotion_data_type_sql(&col.data_type),
-            if col.nullable { "" } else { " NOT NULL" }
+        alter_ddls.push(format!(
+            "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {qname} {sql_type};"
         ));
     }
-    Ok(vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
-            columns.join(",\n  ")
-        ),
-        format!("CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"),
-    ])
+    for col in &spec.columns {
+        let qname = quote_sql_ident(&col.name);
+        let sql_type = business_promotion_data_type_sql(&col.data_type);
+        create_columns.push(format!(
+            "{} {}{}",
+            qname,
+            sql_type,
+            if col.nullable { "" } else { " NOT NULL" }
+        ));
+        alter_ddls.push(format!(
+            "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {qname} {sql_type};"
+        ));
+    }
+    let mut ddls = Vec::with_capacity(2 + alter_ddls.len());
+    ddls.push(format!(
+        "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
+        create_columns.join(",\n  ")
+    ));
+    ddls.extend(alter_ddls);
+    ddls.push(format!(
+        "CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"
+    ));
+    Ok(ddls)
 }
 
 fn validate_business_table_additive(
@@ -571,10 +620,11 @@ pub fn validate_telemetry_column_additive(
     Ok(())
 }
 
-/// Generate `ALTER TABLE ... ADD COLUMN` statements for additive nullable telemetry promotion.
+/// Generate idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements for telemetry promotion.
 ///
 /// `catalog_schema_prefix` must be a fully quoted DuckLake qualification for catalog + metadata schema,
-/// for example `"softprobe"."tenant_acme"` (no trailing dot).
+/// for example `"softprobe"."tenant_acme"` (no trailing dot). Re-applying the same (or additive)
+/// manifest is safe: existing columns are skipped.
 pub fn telemetry_column_add_ddls(
     catalog_schema_prefix: &str,
     spec: &TelemetryColumnsManifest,
@@ -587,7 +637,7 @@ pub fn telemetry_column_add_ddls(
             let typ = promotion_data_type_sql(&col.data_type);
             let qcol = quote_sql_ident(&col.name);
             ddls.push(format!(
-                "ALTER TABLE {}.{} ADD COLUMN {} {};",
+                "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} {};",
                 catalog_schema_prefix, bare, qcol, typ
             ));
         }
@@ -1264,7 +1314,6 @@ columns:
         let ddls =
             super::business_table_create_ddls(r#""softprobe"."tenant_alpha""#, &spec).expect("ddl");
 
-        assert_eq!(ddls.len(), 2);
         assert!(ddls[0].starts_with(
             r#"CREATE TABLE IF NOT EXISTS "softprobe"."tenant_alpha"."checkout_orders_v2" ("#
         ));
@@ -1273,8 +1322,14 @@ columns:
         assert!(ddls[0].contains(r#""promotion_spec_version" VARCHAR NOT NULL"#));
         assert!(ddls[0].contains(r#""order_id" VARCHAR NOT NULL"#));
         assert!(ddls[0].contains(r#""total_cents" BIGINT"#));
+        assert!(ddls.iter().any(|ddl| {
+            ddl == r#"ALTER TABLE "softprobe"."tenant_alpha"."checkout_orders_v2" ADD COLUMN IF NOT EXISTS "order_id" VARCHAR;"#
+        }));
+        assert!(ddls.iter().any(|ddl| {
+            ddl == r#"ALTER TABLE "softprobe"."tenant_alpha"."checkout_orders_v2" ADD COLUMN IF NOT EXISTS "total_cents" BIGINT;"#
+        }));
         assert_eq!(
-            ddls[1],
+            ddls.last().expect("view ddl"),
             r#"CREATE OR REPLACE VIEW "softprobe"."tenant_alpha"."checkout_orders_current" AS SELECT * FROM "softprobe"."tenant_alpha"."checkout_orders_v2";"#
         );
     }
@@ -1382,11 +1437,11 @@ columns:
         assert_eq!(ddls.len(), 4);
         assert_eq!(
             ddls[0],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN "division_name" VARCHAR;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".traces ADD COLUMN IF NOT EXISTS "division_name" VARCHAR;"#
         );
         assert_eq!(
             ddls[3],
-            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN "checkout_latency_ms" DOUBLE;"#
+            r#"ALTER TABLE "softprobe"."tenant_alpha".logs ADD COLUMN IF NOT EXISTS "checkout_latency_ms" DOUBLE;"#
         );
     }
 
