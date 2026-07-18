@@ -1,654 +1,242 @@
-# OpenTelemetry Collector with Apache Iceberg Storage
+# Softprobe Runtime Architecture
 
-> **Historical / pre-DuckLake.** Durable storage is now **DuckLake**. See [adhoc-duckdb-ducklake.md](adhoc-duckdb-ducklake.md) and [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md). ADR-001 is superseded by ADR-014 in [decision_log.md](decision_log.md).
+**Status:** Current
+**Storage backend:** DuckLake
+**Last verified against:** `src/` on 2026-07-18
 
-**Version**: 2.0
-**Date**: 2025-01-31
-**Status**: Historical (superseded for runtime storage)
-**Project Type**: Standalone OTLP Collector
+## Overview
 
-> **See Also**: [Softprobe Business Vision & Strategic Goals](goals.md) - Understand the broader business context and long-term vision for this project.
+`softprobe-runtime` is a Rust service that combines:
 
----
+- OTLP trace, log, and metric ingestion over HTTP
+- OTLP trace ingestion over gRPC
+- tenant-scoped DuckLake storage and DuckDB queries
+- telemetry search and detail APIs
+- Redis-backed capture/replay control sessions
+- schema promotion and optional dropdown metadata
 
-## 1. Executive Summary
+DuckLake is the only durable telemetry backend. Apache Iceberg, the
+application-level ingest buffer, staged Parquet tier, and application WAL have
+been removed. Historical documents for those designs are under
+[`legacy/`](legacy/README.md).
 
-### Overview
+## Runtime data flow
 
-This is a standalone OpenTelemetry-compatible collector that **extends OTLP to capture and store full HTTP request/response bodies** in an efficient, vendor-neutral data lake. Unlike traditional observability backends, this system treats telemetry data as a comprehensive data warehouse that serves two critical purposes:
-
-1. **Business Case Troubleshooting**: AI agents and engineers can access complete session context (full HTTP payloads) to debug complex business logic failures
-2. **ETL Pipeline Source**: Full payloads serve as the source of truth for data analytics, business intelligence, and ad-hoc data exploration
-
-The system provides:
-
-- **Extended OTLP Protocol**: Captures full HTTP request/response bodies alongside standard telemetry
-- **Separated Storage Architecture**: Metadata (spans, attributes) and bodies stored separately for efficient access patterns
-- **Business Attribute Indexing**: Search sessions by business identifiers (user ID, order ID, confirmation code) without scanning payloads
-- **Iceberg Data Lake**: Vendor-neutral storage enabling SQL queries and analytics
-- **Session Management**: Session-aware buffering for traces and logs (NOT metrics)
-
-### Primary Goal
-
-**THE SINGLE MOST IMPORTANT GOAL**: Store complete HTTP request/response bodies in an efficient, vendor-neutral data lake that can be:
-- Queried for troubleshooting via business metadata (user ID, order ID, etc.) WITHOUT reading bodies
-- Accessed by AI agents to analyze full session context when troubleshooting hard business cases
-- Used as the source for ETL pipelines and ad-hoc data analytics
-
-Bodies are stored separately from metadata to avoid expensive read/write operations during routine queries.
-
-### Key Design Principles
-
-1. **Complete Data Capture**: Store full HTTP payloads, not just metadata
-2. **Separated Storage**: Metadata and bodies stored separately for efficient access
-3. **Business-Centric Search**: Index by business attributes (order ID, user ID) for fast session lookup
-4. **Vendor-neutral formats**: Iceberg-based data lake, no proprietary storage
-5. **OTLP Extension**: Build on OpenTelemetry standards, add body capture
-6. **Dual Purpose**: Troubleshooting tool AND analytics data warehouse
-
-### Goals and Non-Goals
-
-**Goals**:
-- **PRIMARY**: Capture and store full HTTP request/response bodies in efficient, separated storage
-- **PRIMARY**: Enable search by business attributes (user ID, order ID, PNR, etc.) without reading bodies
-- **PRIMARY**: Provide complete session context for AI-powered troubleshooting
-- **PRIMARY**: Serve as ETL source for business analytics and ad-hoc data exploration
-- Complete OTLP v1 API implementation with body capture extensions
-- Apache Iceberg storage with metadata/body separation
-- Business attribute extraction and indexing from HTTP payloads
-- Session management for traces and logs (coordinated buffering and storage)
-- Horizontal scalability with consistent hashing
-
-**Non-Goals**:
-- OTLP exporter functionality (collector is ingestion-only)
-- Real-time streaming queries (batch-oriented query model)
-- Java integration (standalone Rust service)
-- Sampling or data reduction (stores EVERYTHING)
-- External metadata indexing layer (using Iceberg's built-in capabilities)
-
----
-
-## 2. Architecture
-
-### 2.1 Data Flow
-
-```
-┌──────────────────┐
-│ OTel SDK Client  │ (Standard OTLP)
-└────────┬─────────┘
-         │ POST /v1/traces, /v1/logs, /v1/metrics
-         ▼
-┌────────────────────────────┐
-│ OTLP Collector (Rust/Axum) │
-│ - Trace/Log Buffer (unified)│
-│ - Metrics Buffer (separate) │
-└────────┬───────────────────┘
-         │
-         │ Coordinated Flush
-         ▼
-┌───────────────────────────────────┐
-│ Apache Iceberg Tables             │
-│ ├─ traces (session-based)    │
-│ ├─ logs (session-based)      │
-│ └─ metrics (metric_name-based)│
-└────────┬──────────────────────────┘
-         │
-         │ Direct Query with Predicates
-         ▼
-┌────────────────────────────┐
-│ Query API                  │
-│ - Manifest Pruning         │
-│ - Partition Elimination    │
-│ - Row Group Statistics     │
-└────────────────────────────┘
+```text
+OTLP HTTP/gRPC request
+        |
+        v
+authenticate and bind tenant
+        |
+        v
+decode OTLP -> Span / Log / Metric
+        |
+        v
+Arrow RecordBatch -> temporary local Parquet
+        |
+        v
+DuckDB transaction:
+  CREATE TABLE IF NEEDED
+  INSERT ... SELECT read_parquet(...)
+        |
+        v
+DuckLake
+  metadata: PostgreSQL (production) or SQLite (local)
+  rows: catalog-inlined or Parquet under data_path
+        |
+        v
+DuckDB query workers ATTACH the same tenant scope
 ```
 
-### 2.2 Component Architecture
+Each OTLP request is written through immediately. Upstream OpenTelemetry
+collectors own batching. The temporary Parquet file is only an input adapter
+between Arrow and DuckLake and is deleted after the transaction; it is not a
+staged durability tier.
 
-| Component | Responsibility | Technology |
-|-----------|---------------|------------|
-| **OTLP Endpoints** | Accept standard OTLP traces/logs/metrics | Rust (Axum), Tonic |
-| **Session Buffer** | Unified buffer for traces+logs by session_id | Rust (DashMap) |
-| **Metrics Buffer** | Separate buffer organized by metric_name | Rust (DashMap) |
-| **Iceberg Writer** | Coordinated writes to separate tables | iceberg-rust 0.7 |
-| **Query Engine** | Direct Iceberg scans with predicates | iceberg-rust, DuckDB |
-| **Object Storage** | S3-compatible backend | MinIO/S3/R2 |
+DuckLake data inlining decides where committed rows live:
 
-### 2.3 Ingest Engine Architecture
+- batches at or below `ducklake.data_inlining_row_limit` may stay in the
+  metadata catalog;
+- larger writes become Parquet files under `ducklake.data_path`.
 
-The system uses a write-aware ingestion engine that decouples read freshness from Iceberg commit frequency, avoiding metadata bloat while enabling sub-second query freshness.
-
-#### Data Flow
-
-```mermaid
-flowchart TD
-    subgraph write [Write Path]
-        API[API Request] --> Buffer[Buffer In-Memory]
-        Buffer -->|time or size trigger| Flush[Flush Operation]
-        Flush --> Staged[Staged Local Parquet]
-        Flush --> WAL[WAL for Recovery]
-        Staged -->|background optimizer| Iceberg[Iceberg S3]
-    end
-    
-    subgraph query [Query Path - Real-Time]
-        Query[SQL Query] --> UnionView[Union View]
-        UnionView --> BufferView[Buffer View]
-        UnionView --> StagedView[Staged View]
-        UnionView --> IcebergView[Iceberg View]
-        BufferView -->|Arrow RecordBatch| Buffer
-        StagedView -->|read_parquet| Staged
-        IcebergView -->|iceberg_scan| Iceberg
-    end
-    
-    subgraph recovery [Recovery Path - Startup Only]
-        Startup[Startup] -->|read WAL files| WALRecovery[WAL Replay]
-        WAL -->|restore data| WALRecovery
-        WALRecovery -->|write to| StagedRecovery[Staged Cache]
-    end
-```
+Both forms are committed DuckLake data and are queried through the same
+attached catalog.
 
-**Key Separation**:
-- **Write Path**: Buffer → Staged + WAL (dual-write on flush)
-- **Query Path**: Buffer ∪ Staged ∪ Iceberg (no WAL)
-- **Recovery Path**: WAL → Staged (startup only)
+## Storage and catalog
 
-#### Design Decisions
+The writer in `src/storage/ducklake/mod.rs` is the sole durable writer. It:
 
-1. **Buffer + WAL Ingest Engine**: Replaces direct Iceberg commits to decouple freshness from metadata commits and reduce write amplification.
+1. resolves the tenant's DuckLake scope;
+2. applies active telemetry-column promotions;
+3. converts records to Arrow using the canonical schemas in
+   `src/storage/schema/`;
+4. writes a temporary Parquet file;
+5. checks out an already-attached DuckDB connection from the scope's writer
+   pool;
+6. creates the target table if necessary and inserts the rows in one
+   transaction;
+7. removes the temporary file.
 
-2. **Arrow/Parquet Schema Reuse**: Uses Arrow in-memory buffers and Parquet/Arrow WAL segments that reuse the same schema as Iceberg tables, removing JSON schema duplication and enabling union-read with DuckDB.
+Supported catalog backends:
 
-3. **Local-Only WAL**: WAL is local-only as the ingestion source of truth until commit, with object-store uploads only during Iceberg commits. Keeps the hot path fast for small row groups.
+- `postgres`: production and tenant-scoped deployments;
+- `sqlite`: local multi-client development;
+- `duckdb`: rejected because DuckLake documents it as single-client only.
 
-4. **DuckDB Query Engine**: Uses DuckDB as the query engine with Iceberg catalog compatibility, enabling SQL queries without bespoke APIs.
+SQLite uses `META_JOURNAL_MODE 'WAL'` and a busy timeout. This is SQLite's
+catalog journal mode, not the removed Softprobe application WAL.
 
-5. **Session-Based Row Grouping**: Preserves session-based row-grouping when flushing Parquet for traces/logs to maintain query performance.
+DuckLake's own conflict retry settings are pinned on writer connections.
+The runtime sets `ducklake_max_retry_count=10`,
+`ducklake_retry_backoff=1.5`, and `ducklake_retry_wait_ms=100`. Exhausted
+ingest writes are surfaced to the HTTP exporter as `503 Service Unavailable`;
+Softprobe does not add another hidden write retry loop.
 
-6. **Stable DuckDB Views**: Uses stable DuckDB views for union-read that combine in-memory buffer snapshots, staged parquet files, and committed Iceberg data. Views refresh only on schema change or staged file updates.
+Each catalog scope owns a pool of already-attached writer connections.
+`ducklake.writer_pool_size` defaults to `4` and is clamped to `1..=16`.
+Writes run on Tokio's blocking pool so PostgreSQL and object-store waits do not
+pin async workers.
 
-7. **WAL for Recovery Only**: WAL is written during buffer flush alongside staged files but is NOT part of the query path. Separates durability (WAL) from visibility (buffer/staged).
+## Tenant isolation
 
-8. **Buffer Snapshots as Arrow**: Buffer snapshots are exposed as Arrow RecordBatches and registered with DuckDB as temp tables, enabling querying in-memory data without disk I/O.
+Authentication resolves a tenant before operational work begins. A
+`RuntimeEngine` is then built and cached for that tenant with:
 
-#### Lessons Learned
+- a tenant-bound DuckLake metadata schema and data path;
+- a tenant-bound writer and query engine;
+- an optional Redis session store;
+- an optional Postgres dropdown catalog.
 
-**Mistake: WAL in Query Path (2026-01-25)**
+With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
+configured registry schema. Operational APIs do not accept arbitrary tenant or
+scope parameters after binding.
 
-Initial implementation incorrectly included WAL files in the DuckDB union view query path. This was wrong because:
-1. WAL is for crash recovery, not queries - mixing concerns
-2. Creates double-reads: data appears in both WAL and staged after flush
-3. Breaks the buffer → staged → committed pipeline semantics
-4. Tests expect immediate buffer visibility, not WAL-delayed visibility
+## Telemetry tables
 
-**Correct architecture**:
-- Write Path: API → Buffer (in-memory) → [flush] → Staged (parquet) + WAL (recovery)
-- Query Path: Buffer (in-memory) ∪ Staged (parquet) ∪ Committed (Iceberg)
-- Recovery Path: Startup → Read WAL → Restore to Staged
+DuckLake creates tables lazily from Arrow schemas.
 
-**Why buffer must be queryable**:
-- Sub-second freshness requirement: queries must see buffered data immediately
-- Single-writer single-reader: no concurrency issues with buffer snapshots
-- Avoids write amplification: don't write to disk just to make data queryable
+### `traces`
 
-#### Trade-offs
+Core columns include:
 
-- **Increased Complexity**: More moving parts (buffer, WAL, staged, committed)
-- **Operational Requirements**: New requirements for local disk/NVMe sizing and health
-- **Durability**: Uncommitted data is not durable across node loss until commit completes
-- **Recovery Semantics**: Requires careful recovery to reconcile WAL + buffer + Iceberg snapshots
+- correlation: `session_id`, `trace_id`, `span_id`, `parent_span_id`
+- tenancy/application: `app_id`, `organization_id`, `tenant_id`
+- timing/status: `timestamp`, `end_timestamp`, `status_code`,
+  `status_message`, `record_date`
+- OTLP data: `attributes`, `events`, `span_kind`, `message_type`
+- HTTP data: request method/path/headers/body and response
+  status/headers/body
 
----
+Rows are inserted ordered by `record_date`, `app_id`, `session_id`, and
+`timestamp`.
 
-## 3. Buffering Strategy
+### `logs`
 
-### 3.1 Separate Buffers for Traces and Logs
+Core columns include `session_id`, timestamps, severity, body, attributes,
+resource attributes, trace/span correlation, and `record_date`.
 
-**Rationale**: While traces and logs are used together for session investigation, they must be buffered separately to avoid Iceberg file fragmentation. Writing to separate tables from a unified buffer would create many small Parquet files.
+### `metrics`
 
-**Traces Buffer**:
-- **Buffer Organization**: HashMap<session_id, Vec<Span>> OR global Vec<Span> with session tracking
-- **Flush Triggers**:
-  - Size: ~128MB buffer size
-  - Age: 60 seconds
-  - Session timeout: 30 minutes (configurable)
-- **Storage**: Writes to `traces` table with session-based row groups
+Core columns include metric name, description, unit, type, timestamp, value,
+attributes, resource attributes, and `record_date`.
 
-**Logs Buffer**:
-- **Buffer Organization**: HashMap<session_id, Vec<LogRecord>> OR global Vec<LogRecord> with session tracking
-- **Flush Triggers**:
-  - Size: ~128MB buffer size (independent tracking)
-  - Age: 60 seconds
-  - Session timeout: 30 minutes (same timeout as traces for consistency)
-- **Storage**: Writes to `logs` table with session-based row groups
+Promotion manifests can add nullable columns to any telemetry table. Active
+manifests are stored in the tenant's PostgreSQL metadata schema and are applied
+by the promotion workflow, not by process-global YAML.
 
-**Session Coordination**: While buffers are separate, session timeouts can be coordinated to ensure traces and logs for a session are queryable around the same time. This is a query optimization, not a storage requirement.
+## Query path
 
-### 3.2 Separate Metrics Buffering
+`src/query/duckdb.rs` owns a pool of independent DuckDB worker connections.
+Every worker loads `httpfs` and DuckLake, configures object-store access, and
+ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
-**Rationale**: Metrics are aggregations, NOT session-correlated.
+Public query names remain:
 
-- **Buffer Organization**: HashMap<metric_name, Vec<MetricDataPoint>> OR global Vec<MetricDataPoint>
-- **Flush Triggers**:
-  - Size: ~128MB buffer size
-  - Age: 60 seconds (independent of session timeouts)
-- **Storage Pattern**: Organized by metric_name + timestamp, NOT session_id
-
-**Note**: Iceberg may not be ideal for time-series metrics. Consider Prometheus/InfluxDB later.
+- `union_spans`, `union_logs`, `union_metrics`
+- `committed_spans`, `committed_logs`, `committed_metrics`
 
----
-
-## 4. Storage Platform Decision
-
-### 4.0 Table Format: Iceberg vs Delta Lake vs Hudi
-
-**Decision**: ✅ **Apache Iceberg**
-
-**Rationale** (See [Storage Design Analysis](storage_design.md#is-iceberg-the-right-foundation)):
-
-| Criterion | Iceberg | Delta Lake | Winner |
-|-----------|---------|------------|--------|
-| Vendor Neutrality | ✅ Apache Foundation | ⚠️ Databricks-centric | **Iceberg** |
-| Multi-Engine Support | ✅ Spark, Trino, Dremio, Flink, DuckDB | ⚠️ Databricks-first | **Iceberg** |
-| Rust Ecosystem | ✅ iceberg-rust 0.7+ | ❌ No official support | **Iceberg** |
-| Query Performance (OLAP) | ⚠️ 1.7x slower (TPC-DS) | ✅ Fastest | **Delta** |
-| Session Lookups | ✅ Partition pruning + row groups | ✅ Good | **Tie** |
-| Open Specification | ✅ Fully open | ⚠️ Databricks influence | **Iceberg** |
-
-**Performance Consideration**: Iceberg is 1.7x slower than Delta Lake in TPC-DS OLAP benchmarks, but this doesn't reflect our workload:
-- Our queries: Session lookups (`WHERE session_id = 'xxx'`) + batch ETL
-- Iceberg's optimizations (partition pruning, row group stats, bloom filters) excel at session-based queries
-- Network I/O from object storage dominates ETL queries, not Parquet decode time
-
-**Trade-off Accepted**: Vendor neutrality and multi-engine support outweigh 1.7x OLAP performance tax.
-
-**When We'd Reconsider**:
-- Session lookup latency >1s AND all optimization attempts fail
-- Customer demand for Databricks-native integration
-- iceberg-rust library becomes unmaintained
-
-### 4.0.1 Object Storage: Cloud-Neutral S3-Compatible
-
-**Decision**: ✅ **S3-Compatible Storage (Customer Choice)**
-
-**Supported Backends**:
-- **AWS S3** - Industry standard, existing infrastructure
-- **Cloudflare R2** - Zero egress, cost-optimized
-- **Google Cloud Storage** - GCP customers
-- **MinIO** - Self-hosted, compliance/on-prem
-- **Any S3-compatible provider** - Wasabi, etc.
-
-**Cost Analysis** (Example: 100TB data + 50TB monthly egress):
-
-| Provider | Storage/GB | Egress/GB | Monthly Cost |
-|----------|------------|-----------|--------------|
-| AWS S3 | $0.023 | $0.09 | **$6,800** |
-| Cloudflare R2 | $0.015 | **$0** | **$1,500** |
-| Google Cloud Storage | $0.020 | $0.12 | **$8,300** |
-| MinIO (self-hosted) | Variable | $0 | Infrastructure cost |
-
-**Strategic Rationale**:
-- **Cloud neutrality**: Works with customer's existing infrastructure
-- **Customer choice**: "Bring your own storage" reduces lock-in
-- **Cost awareness**: Document cost implications, let customers decide
-- **Self-hosted option**: MinIO for compliance/sovereignty requirements
-- **S3-compatible**: Single implementation, multiple deployment options
-
-**Recommendation** (not requirement):
-- High egress workloads benefit from zero-egress providers (R2, Wasabi) or self-hosted (MinIO)
-
----
-
-## 5. Iceberg Storage Schema
-
-### 5.1 Table: traces
-
-**Partition**: `date` (day-based)
-**Sort Order**: `session_id, trace_id, timestamp`
-**Row Groups**: One row group per session_id
-
-**Design Decision** (See [Storage Design](storage_design.md#executive-decision--analysis)):
-- ✅ **HTTP bodies stored as STRING columns** in traces table (columnar separation via Parquet)
-- ✅ **Business attributes** via user-provided `sp.*` convention in attributes MAP
-- ✅ **Cloudflare R2 storage** for zero-egress cost advantage
-
-```
-CREATE TABLE traces (
-  -- Identifiers
-  trace_id STRING,
-  span_id STRING,
-  parent_span_id STRING,
-  session_id STRING,
-
-  -- Application context
-  app_id STRING,
-  organization_id STRING,
-  tenant_id STRING,
-
-  -- Span metadata
-  message_type STRING,
-  span_kind STRING,
-  timestamp TIMESTAMPTZ,
-  end_timestamp TIMESTAMPTZ,
-
-  -- Attributes (includes user-provided sp.* business identifiers)
-  attributes MAP<STRING, STRING>,
-
-  -- Events (metadata only, NOT full bodies)
-  events ARRAY<STRUCT<
-    name STRING,
-    timestamp TIMESTAMPTZ,
-    attributes MAP<STRING, STRING>
-  >>,
-
-  -- HTTP Bodies (stored as STRING, Parquet ZSTD compressed)
-  -- Columnar format ensures these are NOT read during metadata-only queries
-  http_request_method STRING,
-  http_request_path STRING,
-  http_request_headers STRING,    -- JSON string
-  http_request_body STRING,        -- Full body (Parquet compressed)
-  http_response_status_code INT,
-  http_response_headers STRING,    -- JSON string
-  http_response_body STRING,       -- Full body (Parquet compressed)
-
-  -- Status
-  status_code STRING,
-  status_message STRING,
-
-  -- Partition key
-  record_date DATE
-)
-PARTITIONED BY (record_date)
-SORT BY (session_id, trace_id, timestamp)
-```
-
-**Key Design Rationale**:
-
-1. **Columnar Separation**: Parquet's columnar format provides automatic I/O separation
-   - Query: `SELECT session_id FROM traces WHERE attributes['sp.user.id'] = 'user-123'`
-   - Only reads: session_id, attributes columns (NOT http_request_body, http_response_body)
-
-2. **User-Provided Business Attributes**: `sp.*` convention in attributes MAP
-   - Example: `attributes['sp.user.id'] = 'user-123'`
-   - Example: `attributes['sp.order.id'] = 'ORD-456'`
-   - Users instrument their code to add business context
-
-3. **Bodies as STRING**: Let Parquet ZSTD compression handle it
-   - No application-level compression needed
-   - DuckDB can query JSON directly: `json_extract(http_request_body, '$.orderId')`
-
-4. **Future Migration Path**: If columnar separation proves insufficient
-   - Phase 2: Move bodies to separate `http_payloads` table
-   - But start simple and validate performance first
-
-5. **Schema Promotion**: User-defined attribute promotion to top-level columns
-   - Configure specific attributes to be promoted from `attributes` or `resource_attributes` MAP to top-level columns
-   - Enables direct SQL queries: `WHERE user_id = '123'` instead of `WHERE attributes['user.id'] = '123'`
-   - Supports auto-type detection (STRING, INT, DOUBLE, BOOLEAN) or explicit type specification
-   - See [Schema Promotion Configuration](#schema-promotion) section below
-
-### 5.2 Table: logs
-
-**Partition**: `date` (day-based)
-**Sort Order**: `session_id, timestamp`
-**Row Groups**: One row group per session_id (aligned with traces)
-
-```
-CREATE TABLE logs (
-  session_id STRING,
-  timestamp TIMESTAMP,
-  observed_timestamp TIMESTAMP,
-  severity_number INT,
-  severity_text STRING,
-  body STRING,
-  attributes MAP<STRING, STRING>,
-  resource_attributes MAP<STRING, STRING>,
-  date DATE  -- partition key
-)
-PARTITIONED BY (date)
-```
-
-### 5.3 Table: metrics (Experimental)
-
-**Partition**: `date, metric_name` (NOT session-based)
-**Sort Order**: `metric_name, timestamp`
-**Row Groups**: Organized by metric_name, NOT session_id
-
-```
-CREATE TABLE metrics (
-  metric_name STRING,
-  description STRING,
-  unit STRING,
-  metric_type STRING,  -- gauge, sum, histogram
-  timestamp TIMESTAMP,
-  value DOUBLE,
-  attributes MAP<STRING, STRING>,
-  resource_attributes MAP<STRING, STRING>,
-  date DATE,  -- partition key
-  -- partitioned by (date, metric_name)
-)
-PARTITIONED BY (date, metric_name)
-```
-
----
-
-## 6. Query Strategy
-
-### 6.1 Grafana via DuckDB Plugin (Primary Query Interface)
-
-**Architecture**: Grafana DuckDB Plugin → DuckDB → Iceberg Extension → S3/R2
-
-**Query Path**:
-1. User creates dashboard in Grafana with SQL queries
-2. DuckDB plugin executes `iceberg_scan('s3://warehouse/traces')` queries
-3. DuckDB Iceberg extension leverages:
-   - **Manifest pruning**: Eliminate irrelevant data files
-   - **Partition pruning**: Date-based partition elimination
-   - **Row group statistics**: Fine-grained filtering via Parquet metadata
-4. Results streamed back to Grafana for visualization
-
-**Example Grafana Query**:
-```sql
-SELECT
-  time_bucket($__interval, timestamp) AS time,
-  COUNT(*) as request_count
-FROM iceberg_scan('s3://warehouse/traces')
-WHERE $__timeFilter(timestamp)
-  AND record_date >= DATE $__timeFrom
-  AND record_date <= DATE $__timeTo
-GROUP BY time
-ORDER BY time
-```
-
-**Benefits**:
-- **No custom query API needed** - DuckDB plugin handles everything
-- **Grafana native features** - Time macros, variables, query inspector
-- **Direct Iceberg access** - No HTTP overhead
-- **Official maintained plugin** - Updates and bug fixes from MotherDuck
-
-**Documentation**: See [docs/grafana.md](grafana.md)
-
-### 6.2 Programmatic Access (Future)
-
-For programmatic access outside Grafana (e.g., Slack bots, CI/CD analytics):
-
-**Option 1: DuckDB CLI/SDK**
+Because ingest is flush-through, union and committed names resolve to the same
+DuckLake tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
+compatibility spellings only; there are no corresponding runtime tiers.
+
+Query surfaces include:
+
+- tenant-scoped `POST /v1/query/sql` for internal/debug use;
+- telemetry search, details, fields, sessions, and traces endpoints;
+- `GET /v1/data/ducklake-connection` for clients that query DuckLake locally;
+- `make duckdb-shell` for local ad hoc access.
+
+See [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) for the supported
+interactive workflow.
+
+## Maintenance
+
+The scheduler runs when compaction or metadata maintenance is enabled. It
+walks the default DuckLake scope and all registered tenant scopes.
+
+For `traces`, `logs`, and `metrics`, it can:
+
+- set the configured target file size;
+- call `ducklake_merge_adjacent_files`;
+- expire old DuckLake snapshots;
+- clean old DuckLake files.
+
+When enabled, the Postgres dropdown catalog is pruned by its active-value
+retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
+exist in the current path.
+
+## Configuration
+
+The canonical shape is `config.yaml`; defaults and validation live in
+`src/config.rs`.
+
+Important DuckLake settings:
+
+- `catalog_type`: `postgres` or `sqlite`
+- `metadata_path`: PostgreSQL connection string or SQLite path
+- `data_path`: local, `s3://`, or `gs://` data location
+- `catalog_alias`
+- `metadata_schema`
+- `data_inlining_row_limit` (default `10000`)
+- `writer_pool_size` (default `4`, clamped to `1..=16`)
+
+Object-store credentials are configured through the `s3` section. `gs://`
+DuckLake paths use GCS HMAC interoperability credentials
+(`GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET`, with `GCP_HMAC_*` aliases).
+
+Config precedence is:
+
+1. supported environment overrides;
+2. `CONFIG_FILE` (default `config.yaml`);
+3. built-in defaults when the file does not exist.
+
+Supported direct overrides in `src/config.rs` are `PORT`, `S3_REGION`, and
+`SOFTPROBE_MAX_HTTP_BODY_BYTES`.
+
+## Network surfaces
+
+- HTTP listens on `SOFTPROBE_LISTEN_ADDR` when set; otherwise it binds
+  `0.0.0.0` with `server.port` (default `8090`). The current binary does not
+  use `server.host` for its listen address.
+- OTLP/gRPC traces listen on `OTEL_GRPC_PORT` (default `4317`), unless
+  `SOFTPROBE_GRPC_DISABLE=1`.
+- `/v1/*` operational routes require bearer authentication, except tenant
+  provisioning which performs its own admin-token validation.
+- `REDIS_HOST` is required by the main control-plane runtime.
+
+The implemented HTTP routes are exposed by `/openapi.json`; the standalone
+ingestion contract is in [`ingestion-openapi.yaml`](ingestion-openapi.yaml).
+
+## Validation
+
+From the repository root:
+
 ```bash
-duckdb -c "SELECT COUNT(*) FROM iceberg_scan('s3://warehouse/traces') WHERE session_id = 'xxx'"
+make setup-local
+make test
+make lint
+make check-fmt
 ```
 
-**Option 2: Custom REST API** (if needed)
-- Implement `/api/query` endpoint
-- Add authentication, rate limiting
-- Use DuckDB Rust bindings
-
-**Current Status**: Not implemented - Grafana plugin satisfies all current query needs
-
----
-
-## 6. Performance Considerations
-
-### 6.1 Targets
-
-- **Ingestion**: 10k+ spans/sec per collector instance
-- **Session Queries**: Best-effort using Iceberg optimizations
-- **Time-Range Queries**: Leverages partition elimination
-
-**Note**: No specific latency targets (<100ms, <500ms) - optimize later if needed.
-
-### 6.2 Scalability
-
-- **Horizontal Scaling**: Multiple collector instances with consistent hashing by session_id
-- **Storage**: Iceberg scales to petabytes with S3-compatible object storage
-- **Query Fan-out**: Mitigated by partition pruning and row group statistics
-
-### 6.3 Storage Maintenance (Metadata + Data)
-
-**Problem**: Frequent commits generate many snapshots and manifest files (metadata bloat), and small Parquet files hurt read performance.
-
-**Approach**:
-- **Metadata maintenance**: Run scheduled Iceberg procedures to keep snapshot/manifest metadata compact.
-  - Expire old snapshots (keep recent N hours/days for rollback and time travel)
-  - Rewrite manifests to consolidate small manifest files
-  - Remove orphan files to clean up unreferenced data/metadata
-- **Data compaction**: Rewrite small Parquet files into target-sized files to reduce file counts and improve scan efficiency.
-
-**Notes**:
-- Maintenance runs asynchronously and does NOT change commit frequency or ingestion latency.
-- Maintenance cadence and retention policy are configurable per table (traces/logs/metrics).
-
----
-
-## 7. Implementation Status
-
-See [tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md) for current status.
-
-**Completed**:
-- ✅ OTLP `/v1/traces` endpoint
-- ✅ Session buffering for traces
-- ✅ Iceberg table schema for traces
-- ✅ Multi-app row-group batching
-
-**In Progress**:
-- 🔄 OTLP `/v1/logs` endpoint
-- 🔄 Unified traces+logs buffering
-- 🔄 OTLP `/v1/metrics` endpoint
-- 🔄 Query APIs
-
----
-
-## 8. Design Decisions
-
-### Decision 1: Custom Rust OTLP Collector vs. Standard OTel Collector
-
-**Choice**: Build a custom Rust-based OTLP collector instead of using the standard OpenTelemetry Collector
-**Rationale**: Enables session-aware buffering, multi-app row-group batching, and direct Iceberg writes with fine-grained control over the storage layer
-**Alternatives Considered**:
-- Standard OTel Collector (lacks session buffering capability, requires custom exporters)
-- OpenTelemetry Collector Contrib (harder to customize storage layer for session-aware batching)
-**Trade-off**: Maintenance burden of custom collector vs. full control over buffering and storage optimization
-
-### Decision 2: Separate Iceberg Tables per Signal Type
-
-**Choice**: Use separate tables (`traces`, `logs`, `metrics`) instead of a unified table
-**Rationale**: Optimizes schema and queries for each signal type - traces, logs, and metrics have fundamentally different access patterns and structure
-**Alternatives Considered**:
-- Single unified table (complex schema, harder to optimize for different query patterns)
-- Separate databases (operational overhead, harder to maintain consistency)
-**Implementation**: Coordinated writes to maintain session alignment across traces and logs tables
-
-### Decision 3: Direct Iceberg Queries vs. External Metadata Index
-
-**Choice**: Direct Iceberg queries using built-in metadata (manifests, partition stats, row group statistics) - no external index
-**Rationale**: Simplicity over complexity - defer metadata optimization, avoid ETL pipeline and operational overhead
-**Alternatives Considered**:
-- ClickHouse/PostgreSQL metadata layer (adds complexity, operational overhead, ETL lag between raw and indexed data)
-- Elasticsearch (expensive at scale, complex operational requirements)
-- Embedded secondary indexes (not yet mature in Iceberg ecosystem)
-**Trade-off**: Accept potentially slower queries vs. dedicated index in exchange for simpler architecture and no ETL pipeline
-
-### Decision 4: Separate Buffers for Traces, Logs, and Metrics
-
-**Choice**: Separate buffers for traces, logs, and metrics - each signal type buffered independently
-**Rationale**:
-- **Traces**: Buffered by session_id, written to `traces` table with session-based row groups
-- **Logs**: Buffered independently by session_id, written to `logs` table with session-based row groups
-- **Metrics**: Buffered by metric_name (NOT session), written to `metrics` table
-- **Why separate?**: Unified buffer would cause Iceberg fragmentation - writing to separate tables from one buffer creates many small Parquet files
-**Alternatives Considered**:
-- Unified buffer for traces+logs (would cause file fragmentation and poor Iceberg compaction)
-- Single buffer for all three signal types (metrics are fundamentally different - aggregations, not session-correlated)
-**Implementation**:
-- Independent buffers with separate flush triggers based on size/time
-- Session timeout coordination (30 min) ensures traces and logs for a session are queryable around the same time
-- Metrics flushed independently organized by metric_name + timestamp
-**Note**: Iceberg may not be ideal for time-series metrics - consider Prometheus/InfluxDB later
-
-### Decision 5: Multi-App Row Groups
-
-**Choice**: One Parquet file can contain multiple sessions from different applications
-**Rationale**: Reduces S3 PUT/GET operations while maintaining query efficiency via row group pruning
-**Alternatives Considered**:
-- One file per session (too many small files, high S3 costs, poor compaction)
-- One file per app (inefficient for cross-application queries)
-**Implementation**: One row group per session_id within each Parquet file, enables efficient session-level filtering
-
-### Decision 6: Scheduled Iceberg Maintenance (Metadata + Data)
-
-**Choice**: Add scheduled maintenance jobs for Iceberg metadata (snapshots/manifests) and data file compaction.
-**Rationale**: Commit frequency cannot be reduced without adding ingestion delay, so metadata bloat must be handled by maintenance. Small Parquet files degrade query performance without compaction.
-**Alternatives Considered**:
-- Reduce commit frequency (adds ingestion delay)
-- External metadata index (adds operational complexity)
-**Implementation**:
-- Metadata maintenance: snapshot expiration, manifest rewrite, orphan file cleanup
-- Data maintenance: compaction to target file sizes (e.g., 64MB)
-
----
-
-## 9. Open Questions
-
-1. **Session Timeout**: Default 30 minutes inactivity - is this appropriate for all workloads?
-   - Short-lived services may need shorter timeouts (5-10 minutes)
-   - Long-running batch jobs may need longer timeouts (hours)
-   - Consider making this configurable per application/service
-
-2. **Large Payloads**: How to handle >10MB telemetry payloads?
-   - Options: compression (gzip/zstd), chunking (split large traces), external reference (store in blob storage, reference in Iceberg)
-   - Current limit: no enforced limit, but large payloads may impact buffer memory
-
-3. **Metrics Storage**: Should we replace Iceberg with Prometheus for metrics?
-   - Iceberg storage for metrics is experimental
-   - Metrics are aggregations with different access patterns than traces/logs
-   - Consider dedicated time-series database (Prometheus, InfluxDB, VictoriaMetrics)
-
-4. **Metrics Aggregation Strategy**: Raw vs. pre-aggregated storage?
-   - Store raw metric data points (high cardinality, high storage cost)
-   - Pre-aggregate at collection time (lower storage, potential data loss)
-   - Hybrid approach (raw for short retention, aggregated for long-term)
-
-5. **Query Performance**: If direct Iceberg queries are too slow, add external index layer?
-   - Current approach: rely on Iceberg's built-in metadata (manifests, partition stats, row group statistics)
-   - If insufficient: consider ClickHouse/PostgreSQL metadata index or Elasticsearch
-   - Monitor query performance before committing to added complexity
-
----
-
-## 10. References
-
-- **Business Vision**: [Softprobe Strategic Goals](goals.md) - Long-term vision and business context
-- **Storage Design**: [HTTP Body Storage & Business Attribute Indexing](storage_design.md) - Detailed design options
-- **OpenTelemetry Protocol**: https://opentelemetry.io/docs/specs/otlp/
-- **Apache Iceberg**: https://iceberg.apache.org/docs/latest/
-- **Iceberg Rust**: https://github.com/apache/iceberg-rust
-- **OpenSpec Proposal**: [openspec/changes/add-iceberg-otlp-migration/proposal.md](../openspec/changes/add-iceberg-otlp-migration/proposal.md)
-- **OpenSpec Tasks**: [openspec/changes/add-iceberg-otlp-migration/tasks.md](../openspec/changes/add-iceberg-otlp-migration/tasks.md)
-
----
-
-## 11. Glossary
-
-- **OTLP**: OpenTelemetry Protocol
-- **Session**: Logical grouping of related traces and logs (NOT metrics)
-- **Manifest File**: Iceberg metadata file tracking data file statistics
-- **Row Group**: Unit of data organization within Parquet files
-- **Predicate Pushdown**: Applying filters at storage layer for efficiency
+`make test` covers unit tests plus isolated MinIO/PostgreSQL/Redis integration
+tests. `make duckdb-shell` is the supported manual ATTACH smoke.
