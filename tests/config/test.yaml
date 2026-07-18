@@ -4,28 +4,18 @@ server:
   max_body_size: 104857600
   worker_threads: null
 
-storage:
-  s3_region: us-east-1
+object_store:
+  region: us-east-1
+  endpoint: http://localhost:9000
 
-ingest_engine:
+query:
+  max_connections: 10
   cache_dir: /var/tmp/softprobe/duckdb
 
-compaction:
+maintenance:
   enabled: false
   target_file_size_bytes: 67108864
-  compaction_interval_seconds: 3600
-
-duckdb:
-  max_connections: 10
-  max_memory_per_query: 2GB
-  max_query_duration_seconds: 30
-  enable_spill_to_disk: true
-  spill_directory: /tmp/duckdb_spill
-
-s3:
-  endpoint: http://localhost:9000
-  access_key_id: minioadmin
-  secret_access_key: minioadmin
+  interval_seconds: 3600
 
 ducklake:
   catalog_type: sqlite

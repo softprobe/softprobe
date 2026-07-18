@@ -147,13 +147,12 @@ fn ducklake_connection_material(
     scope: &DuckLakeScope,
 ) -> Result<DuckLakeConnectionMaterial, String> {
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
-    let ducklake = config.ducklake_or_default();
-    let ducklake_pg_uri = postgres_ducklake_metadata_path(&ducklake);
-    // DuckLake schema and data path come from runtime config for this process (`ducklake.*` in YAML).
+    let ducklake = &config.ducklake;
+    let ducklake_pg_uri = postgres_ducklake_metadata_path(ducklake);
+    // DuckLake schema and data path come from the tenant scope resolved for this process.
     let ducklake_data_path = scope.data_path.clone();
     let ducklake_metadata_schema = scope.metadata_schema.clone();
-    let gcs_hmac_access_key_id = config.s3.access_key_id.clone();
-    let gcs_hmac_secret = config.s3.secret_access_key.clone();
+    let creds = config.resolve_object_store_credentials(&ducklake_data_path);
 
     if ducklake.catalog_type != "postgres" {
         return Err(format!(
@@ -167,16 +166,10 @@ fn ducklake_connection_material(
     if ducklake_data_path.trim().is_empty() {
         return Err("DuckLake data path is required".to_string());
     }
-    if path_requires_hmac(&ducklake_data_path)
-        && (gcs_hmac_access_key_id
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-            || gcs_hmac_secret.as_deref().unwrap_or("").trim().is_empty())
-    {
+    if path_requires_hmac(&ducklake_data_path) && !creds.is_complete() {
         return Err(
-            "GCS/S3 DuckLake data path requires config.s3.access_key_id and config.s3.secret_access_key"
+            "GCS/S3 DuckLake data path requires object-store credentials in the environment \
+             (GCS_HMAC_ACCESS_KEY_ID/GCS_HMAC_SECRET for gs://, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for s3://)"
                 .to_string(),
         );
     }
@@ -191,8 +184,8 @@ fn ducklake_connection_material(
         ducklake_metadata_schema,
         ducklake_data_path,
         gcs_bucket: tenant.bucket_name.clone(),
-        gcs_hmac_access_key_id: gcs_hmac_access_key_id.unwrap_or_default(),
-        gcs_hmac_secret: gcs_hmac_secret.unwrap_or_default(),
+        gcs_hmac_access_key_id: creds.access_key_id.unwrap_or_default(),
+        gcs_hmac_secret: creds.secret_access_key.unwrap_or_default(),
         schema_version: "1".to_string(),
     })
 }
@@ -227,15 +220,11 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        let mut ducklake = config.ducklake_or_default();
-        ducklake.catalog_type = "postgres".to_string();
-        ducklake.metadata_path =
+        config.ducklake.catalog_type = "postgres".to_string();
+        config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
-        ducklake.data_path = "./warehouse/ducklake/data/".to_string();
-        ducklake.metadata_schema = "tenant_meta".to_string();
-        config.ducklake = Some(ducklake);
-        config.s3.access_key_id = None;
-        config.s3.secret_access_key = None;
+        config.ducklake.data_path = "./warehouse/ducklake/data/".to_string();
+        config.ducklake.metadata_schema = "tenant_meta".to_string();
         std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
             .expect("write config");
         std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
@@ -273,20 +262,16 @@ mod data_connection_tests {
     }
 
     #[test]
-    fn ducklake_connection_material_ignores_env_overrides_and_uses_config() {
+    fn ducklake_connection_material_reads_hmac_from_environment() {
         let _guard = env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        let mut ducklake = config.ducklake_or_default();
-        ducklake.catalog_type = "postgres".to_string();
-        ducklake.metadata_path =
+        config.ducklake.catalog_type = "postgres".to_string();
+        config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
-        ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
-        ducklake.metadata_schema = "config_schema".to_string();
-        config.ducklake = Some(ducklake);
-        config.s3.access_key_id = Some("config-access-id".to_string());
-        config.s3.secret_access_key = Some("config-secret".to_string());
+        config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
+        config.ducklake.metadata_schema = "config_schema".to_string();
         std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
             .expect("write config");
         std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
@@ -313,8 +298,8 @@ mod data_connection_tests {
         );
         assert_eq!(material.ducklake_metadata_schema, "tenant_tenant_123");
         assert_eq!(material.ducklake_data_path, "gs://bucket/ducklake/data/");
-        assert_eq!(material.gcs_hmac_access_key_id, "config-access-id");
-        assert_eq!(material.gcs_hmac_secret, "config-secret");
+        assert_eq!(material.gcs_hmac_access_key_id, "access-id");
+        assert_eq!(material.gcs_hmac_secret, "secret-value");
 
         std::env::remove_var("CONFIG_FILE");
         std::env::remove_var("DUCKLAKE_PG_URI");
@@ -330,14 +315,10 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        let mut ducklake = config.ducklake_or_default();
-        ducklake.catalog_type = "postgres".to_string();
-        ducklake.metadata_path =
+        config.ducklake.catalog_type = "postgres".to_string();
+        config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
-        ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
-        config.ducklake = Some(ducklake);
-        config.s3.access_key_id = None;
-        config.s3.secret_access_key = None;
+        config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
         std::fs::write(&config_path, serde_yaml::to_string(&config).expect("yaml"))
             .expect("write config");
         std::env::set_var("CONFIG_FILE", config_path.to_string_lossy().to_string());
@@ -346,6 +327,8 @@ mod data_connection_tests {
         std::env::remove_var("DUCKLAKE_METADATA_SCHEMA");
         std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID");
         std::env::remove_var("GCS_HMAC_SECRET");
+        std::env::remove_var("GCP_HMAC_ACCESS_KEY_ID");
+        std::env::remove_var("GCP_HMAC_SECRET");
 
         let tenant = TenantInfo {
             tenant_id: "tenant-123".to_string(),
@@ -359,7 +342,7 @@ mod data_connection_tests {
 
         let err =
             ducklake_connection_material(&tenant, &scope).expect_err("missing hmac should fail");
-        assert!(err.contains("config.s3.access_key_id"));
+        assert!(err.contains("GCS_HMAC_ACCESS_KEY_ID") || err.contains("object-store credentials"));
 
         std::env::remove_var("CONFIG_FILE");
     }

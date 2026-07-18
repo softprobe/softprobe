@@ -1,42 +1,31 @@
-# Cloudflare R2 object-store test configuration for DuckLake data_path
-# R2 is used as S3-compatible storage; catalog is DuckLake (not Iceberg REST)
-#
-# Setup instructions:
-# 1. Create R2 bucket: npx wrangler r2 bucket create your-bucket-name
-# 2. Enable catalog: npx wrangler r2 bucket catalog enable your-bucket-name
-# 3. Create API token with R2 Data Catalog permissions
-# 4. Update credentials below
-#
-# Security: DO NOT commit real credentials to git!
+# Cloudflare R2 object store for DuckLake data_path (S3-compatible).
+# Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (R2 API token).
+# Set ducklake.data_path to s3://<bucket>/ducklake/ or pass R2_BUCKET to Make targets.
 
 server:
   port: 8090
   host: 127.0.0.1
-  max_body_size: 104857600  # 100MB
+  max_body_size: 104857600
   worker_threads: null
 
-storage:
-  s3_region: "auto"  # R2 uses "auto" region
+object_store:
+  region: auto
+  endpoint: https://YOUR-ACCOUNT-ID.r2.cloudflarestorage.com
 
-ingest_engine:
-  cache_dir: "/var/tmp/softprobe/duckdb"
-
-compaction:
-  enabled: false
-  target_file_size_bytes: 67108864  # 64MB
-  compaction_interval_seconds: 3600
-
-duckdb:
+query:
   max_connections: 10
-  max_memory_per_query: "2GB"
-  max_query_duration_seconds: 30
-  enable_spill_to_disk: true
-  spill_directory: "/tmp/duckdb_spill"
+  cache_dir: /var/tmp/softprobe/duckdb
 
-s3:
-  # Cloudflare R2 S3-compatible endpoint
-  endpoint: "https://fb4b299688885a31058d94ee11ee1129.r2.cloudflarestorage.com"
-  # S3 API credentials (Access Key ID and Secret Access Key from R2 API Token)
-  access_key_id: "f4264a811928d7649cdd426f55fa3091"
-  secret_access_key: "f46ba8076875f179cacb191cc96c6ff608654de54c744e692b2aba011a62662a"
+maintenance:
+  enabled: false
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
 
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/splake-r2-ducklake/metadata.sqlite
+  data_path: s3://YOUR-R2-BUCKET/ducklake/
+  catalog_alias: softprobe
+  metadata_schema: main
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

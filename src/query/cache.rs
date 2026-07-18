@@ -15,7 +15,7 @@ pub struct CacheSettings {
 impl CacheSettings {
     pub fn new(config: &Config) -> Self {
         Self {
-            cache_dir: config.ingest_engine.cache_dir.as_ref().map(PathBuf::from),
+            cache_dir: config.query.cache_dir.as_ref().map(PathBuf::from),
         }
     }
 

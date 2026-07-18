@@ -13,6 +13,7 @@ pub fn load_test_config() -> Config {
 
     let config_file = match test_type.as_str() {
         "r2" => "tests/config/test-r2.yaml",
+        "gcs" => "tests/config/test-gcs.yaml",
         _ => "tests/config/test.yaml",
     };
 
@@ -24,15 +25,60 @@ pub fn load_test_config() -> Config {
 }
 
 fn assign_unique_ducklake_paths(config: &mut Config) {
-    if config.ducklake.is_none() {
-        config.ducklake = Some(config.ducklake_or_default());
-    }
-    if let Some(ducklake) = config.ducklake.as_mut() {
-        let base = std::env::temp_dir().join(format!("splake-tests-{}", uuid::Uuid::new_v4()));
-        let _ = std::fs::create_dir_all(&base);
-        ducklake.metadata_path = base.join("metadata.ducklake").to_string_lossy().to_string();
-        ducklake.data_path = base.join("data").to_string_lossy().to_string();
-        let _ = std::fs::create_dir_all(&ducklake.data_path);
+    let backend = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
+    let run_id = uuid::Uuid::new_v4();
+
+    match backend.as_str() {
+        "gcs" => {
+            let prefix = std::env::var("GCS_E2E_PREFIX").unwrap_or_else(|_| {
+                let bucket = std::env::var("GCS_BUCKET")
+                    .unwrap_or_else(|_| "softprobe-datalake-ducklake".to_string());
+                format!("gs://{bucket}/ducklake/e2e/{run_id}/")
+            });
+            let prefix = if prefix.ends_with('/') {
+                prefix
+            } else {
+                format!("{prefix}/")
+            };
+            println!("GCS e2e data_path prefix: {prefix}");
+            // Keep sqlite metadata local; only object data goes to GCS.
+            let base = std::env::temp_dir().join(format!("splake-gcs-e2e-{run_id}"));
+            let _ = std::fs::create_dir_all(&base);
+            config.ducklake.catalog_type = "sqlite".to_string();
+            config.ducklake.metadata_path =
+                base.join("metadata.sqlite").to_string_lossy().to_string();
+            config.ducklake.data_path = prefix;
+            config.ducklake.metadata_schema = "main".to_string();
+        }
+        _ => {
+            let base = std::env::temp_dir().join(format!("splake-tests-{run_id}"));
+            let _ = std::fs::create_dir_all(&base);
+            config.ducklake.metadata_path =
+                base.join("metadata.sqlite").to_string_lossy().to_string();
+            // For local/r2: keep configured remote data_path when it already points at object store;
+            // otherwise isolate under temp.
+            if !config.ducklake.data_path.contains("://") {
+                config.ducklake.data_path = base.join("data").to_string_lossy().to_string();
+                let _ = std::fs::create_dir_all(&config.ducklake.data_path);
+            } else if backend == "local" {
+                // Local MinIO tests still need unique prefixes under the shared warehouse bucket.
+                let unique = format!(
+                    "{}e2e/{}/",
+                    config.ducklake.data_path.trim_end_matches('/'),
+                    run_id
+                );
+                // Prefer inserting under .../ducklake/... when present.
+                if config.ducklake.data_path.contains("/ducklake/") {
+                    config.ducklake.data_path = config.ducklake.data_path.replacen(
+                        "/ducklake/",
+                        &format!("/ducklake/e2e/{run_id}/"),
+                        1,
+                    );
+                } else {
+                    config.ducklake.data_path = unique;
+                }
+            }
+        }
     }
 }
 

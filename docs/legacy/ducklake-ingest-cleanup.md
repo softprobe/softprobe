@@ -23,7 +23,7 @@ Concurrent commit conflicts are retried inside the DuckLake extension (`ducklake
 | `catalog_type` | Role |
 |----------------|------|
 | **postgres** | Production / multi-tenant (registry scopes) |
-| **sqlite** | Local multi-client (`META_JOURNAL_MODE=WAL`, `META_BUSY_TIMEOUT=500`) |
+| **sqlite** | Local multi-client (`META_JOURNAL_MODE=WAL`, `META_BUSY_TIMEOUT=5000`) |
 | **duckdb** | **Rejected** — DuckLake single-client only |
 
 Softprobe does **not** reattach / `mem::forget` query connections after writes. Visibility follows the catalog backend.

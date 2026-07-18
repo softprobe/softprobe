@@ -214,9 +214,12 @@ Important DuckLake settings:
 - `data_inlining_row_limit` (default `10000`)
 - `writer_pool_size` (default `4`, clamped to `1..=16`)
 
-Object-store credentials are configured through the `s3` section. `gs://`
-DuckLake paths use GCS HMAC interoperability credentials
-(`GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET`, with `GCP_HMAC_*` aliases).
+Non-secret object-store settings live in the `object_store` section (`region`
+and an optional custom `endpoint` for MinIO/R2). Object-store credentials are
+never stored in YAML; they are resolved from the environment: `AWS_ACCESS_KEY_ID`
+/ `AWS_SECRET_ACCESS_KEY` (with optional `AWS_SESSION_TOKEN`) for `s3://` paths,
+and GCS HMAC interoperability credentials `GCS_HMAC_ACCESS_KEY_ID` /
+`GCS_HMAC_SECRET` (with `GCP_HMAC_*` aliases) for `gs://` paths.
 
 Config precedence is:
 

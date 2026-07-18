@@ -2,7 +2,7 @@ use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
 use anyhow::{anyhow, Result};
-use duckdb::{Connection, ToSql};
+use duckdb::Connection;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -66,7 +66,7 @@ impl MaintenanceExecutor {
     ) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
-            ducklake: config.ducklake_or_default(),
+            ducklake: config.ducklake.clone(),
             dropdown_catalog,
             scope_registry,
         })
@@ -118,7 +118,7 @@ impl MaintenanceExecutor {
 
             for table in tables {
                 let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
-                let compaction = if self.config.compaction.enabled {
+                let compaction = if self.config.maintenance.enabled {
                     CompactionResult {
                         status: match self.ducklake_compact_table(&conn, &ducklake, table) {
                             Ok(status) => status,
@@ -137,16 +137,13 @@ impl MaintenanceExecutor {
                     }
                 };
 
-                let metadata = if self.config.compaction.metadata_maintenance_enabled {
-                    match (
-                        self.ducklake_expire_snapshots(&conn, &ducklake),
-                        self.ducklake_cleanup_files(&conn, &ducklake),
-                    ) {
-                        (Ok(expired), Ok(())) => MetadataMaintenanceResult {
+                let metadata = if self.config.maintenance.metadata_enabled {
+                    match self.ducklake_expire_snapshots(&conn, &ducklake) {
+                        Ok(expired) => MetadataMaintenanceResult {
                             expired_snapshots: expired,
                             skipped: false,
                         },
-                        (Err(err), _) | (_, Err(err)) => {
+                        Err(err) => {
                             warn!(
                                 "Maintenance metadata failed for {} ({}): {}",
                                 table_ident, label, err
@@ -164,6 +161,29 @@ impl MaintenanceExecutor {
                     }
                 };
 
+                let remove_orphan_files = if self.config.maintenance.metadata_enabled
+                    && self.config.maintenance.remove_orphan_files_enabled
+                {
+                    match self.ducklake_cleanup_files(&conn, &ducklake) {
+                        Ok(()) => ActionResult {
+                            status: ActionStatus::Completed,
+                        },
+                        Err(err) => {
+                            warn!(
+                                "Maintenance orphan cleanup failed for {} ({}): {}",
+                                table_ident, label, err
+                            );
+                            ActionResult {
+                                status: ActionStatus::Skipped,
+                            }
+                        }
+                    }
+                } else {
+                    ActionResult {
+                        status: ActionStatus::Skipped,
+                    }
+                };
+
                 results.push(TableMaintenanceResult {
                     table: table_ident,
                     metadata,
@@ -171,9 +191,7 @@ impl MaintenanceExecutor {
                     rewrite_manifests: ActionResult {
                         status: ActionStatus::Unsupported,
                     },
-                    remove_orphan_files: ActionResult {
-                        status: ActionStatus::Unsupported,
-                    },
+                    remove_orphan_files,
                 });
             }
         }
@@ -199,7 +217,7 @@ impl MaintenanceExecutor {
     ) -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
-        crate::storage::ducklake::configure_httpfs_gcs_for_data_path(&conn, &ducklake.data_path)?;
+        crate::storage::ducklake::configure_object_store(&conn, &self.config, &ducklake.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
         if ducklake.catalog_type == "postgres" {
             conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
@@ -207,28 +225,6 @@ impl MaintenanceExecutor {
         if ducklake.catalog_type == "sqlite" {
             conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
         }
-        if let Some(endpoint) = self.config.s3.endpoint.as_ref() {
-            let trimmed = endpoint
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            conn.execute("SET s3_endpoint = ?;", [&trimmed as &dyn ToSql])?;
-            conn.execute("SET s3_url_style = 'path';", [])?;
-            if endpoint.starts_with("http://") {
-                conn.execute("SET s3_use_ssl = false;", [])?;
-            } else if endpoint.starts_with("https://") {
-                conn.execute("SET s3_use_ssl = true;", [])?;
-            }
-        }
-        if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
-            conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
-        }
-        if let Some(secret_key) = self.config.s3.secret_access_key.as_ref() {
-            conn.execute("SET s3_secret_access_key = ?;", [secret_key as &dyn ToSql])?;
-        }
-        conn.execute(
-            "SET s3_region = ?;",
-            [&self.config.storage.s3_region as &dyn ToSql],
-        )?;
         Ok(conn)
     }
 
@@ -279,7 +275,7 @@ impl MaintenanceExecutor {
         // Match qualified name used for tables (see ducklake_qualified_table_name).
         let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
         let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-        let target_file_size = size_literal(self.config.compaction.target_file_size_bytes);
+        let target_file_size = size_literal(self.config.maintenance.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', {});",
             ducklake.catalog_alias, target_file_size, scope
@@ -338,7 +334,7 @@ impl MaintenanceExecutor {
     ) -> Result<usize> {
         let days = std::cmp::max(
             1,
-            self.config.compaction.metadata_max_snapshot_age_seconds / (24 * 3600),
+            self.config.maintenance.max_snapshot_age_seconds / (24 * 3600),
         );
         let dry_run_sql = format!(
             "CALL ducklake_expire_snapshots('{}', dry_run => true, older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
@@ -358,10 +354,7 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<()> {
-        let older_than_seconds = self
-            .config
-            .compaction
-            .metadata_remove_orphan_older_than_seconds;
+        let older_than_seconds = self.config.maintenance.remove_orphan_older_than_seconds;
         let sql = if older_than_seconds == 0 {
             format!(
                 "CALL ducklake_cleanup_old_files('{}', cleanup_all => true);",

@@ -89,6 +89,16 @@ ducklake:
   writer_pool_size: 4
 ```
 
+YAML holds non-secret settings only. The top-level sections are `server`,
+`object_store` (`region` / optional `endpoint`), `query`, `maintenance`,
+`ducklake`, and `dropdown_catalog`. Unknown or legacy keys are rejected. Object
+storage credentials are never stored in YAML; resolve them from the
+environment:
+
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [/ `AWS_SESSION_TOKEN`]: `s3://`
+  paths (MinIO, R2, AWS)
+- `GCS_HMAC_ACCESS_KEY_ID` / `GCS_HMAC_SECRET` (or `GCP_HMAC_*`): `gs://` paths
+
 Supported direct environment overrides are:
 
 - `CONFIG_FILE`
@@ -171,7 +181,7 @@ scope:
 - clean old files;
 - prune optional dropdown-catalog values.
 
-Settings are under `compaction` and `dropdown_catalog` in `config.yaml`.
+Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
 
 ## License
 

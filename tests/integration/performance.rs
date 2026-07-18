@@ -1,14 +1,13 @@
 use anyhow::Result;
 use chrono::Utc;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Log as LogData;
 use softprobe_runtime::query::duckdb::{reset_view_counters, view_counters_snapshot};
 use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::util::pipeline::TestPipeline;
-use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
+use crate::util::storage_config::load_test_config;
 
 // ========================================
 // Performance test goals (tunable via env):
@@ -21,21 +20,17 @@ use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
 fn load_perf_config() -> Config {
     if let Ok(config_file) = std::env::var("PERF_CONFIG_FILE") {
         std::env::set_var("CONFIG_FILE", &config_file);
-        return Config::load().expect("Failed to load perf config");
     }
-    if let Ok(config_file) = std::env::var("CONFIG_FILE") {
-        if std::path::Path::new(&config_file).exists() {
-            return Config::load().expect("Failed to load config");
-        }
+    let mut config = load_test_config();
+    // Local e2e infra is MinIO + DuckLake Postgres. Concurrent query workers contend on
+    // SQLite metadata (`database is locked`); prefer Postgres whenever the local catalog is up.
+    let backend = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
+    if backend == "local" {
+        config.ducklake.catalog_type = "postgres".to_string();
+        config.ducklake.metadata_path =
+            "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     }
-
-    let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
-    let config_file = match test_type.as_str() {
-        "r2" => "tests/config/test-r2.yaml",
-        _ => "tests/config/test.yaml",
-    };
-    std::env::set_var("CONFIG_FILE", config_file);
-    Config::load().expect("Failed to load config")
+    config
 }
 
 fn perf_target() -> std::time::Duration {
@@ -200,7 +195,7 @@ async fn retry_query_until_count(
 async fn perf_union_read_latency() {
     let mut config = load_perf_config();
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
-        config.duckdb.max_connections = 1;
+        config.query.max_connections = 1;
     }
 
     let test_pipeline = TestPipeline::new(config).await;
@@ -288,7 +283,7 @@ async fn perf_union_read_latency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
+    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -405,7 +400,7 @@ async fn perf_union_read_latency() {
 async fn perf_union_read_concurrency() {
     let mut config = load_perf_config();
     if std::env::var("PERF_FORCE_SINGLE_WORKER").ok().as_deref() == Some("1") {
-        config.duckdb.max_connections = 1;
+        config.query.max_connections = 1;
     }
 
     let test_pipeline = TestPipeline::new(config).await;
@@ -497,7 +492,7 @@ async fn perf_union_read_concurrency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.duckdb.max_connections);
+    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -618,7 +613,7 @@ async fn perf_union_read_concurrency() {
 
 #[tokio::test]
 async fn perf_view_recreate_stability() {
-    let mut config = load_perf_config();
+    let config = load_perf_config();
 
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;

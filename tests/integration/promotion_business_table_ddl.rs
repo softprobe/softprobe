@@ -74,24 +74,24 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let mut config = Config::default();
-    let mut ducklake = config.ducklake_or_default();
-    ducklake.catalog_type = "postgres".to_string();
-    ducklake.metadata_path =
+    config.ducklake.catalog_type = "postgres".to_string();
+    config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
-    ducklake.catalog_alias = "softprobe".to_string();
-    ducklake.metadata_schema = format!("softprobe_business_apply_{suffix}");
+    config.ducklake.catalog_alias = "softprobe".to_string();
+    // Keep schema names ≤63 chars (Postgres identifier limit) to avoid silent truncation collisions.
+    let short = &suffix[..8.min(suffix.len())];
+    config.ducklake.metadata_schema = format!("sp_biz_reg_{short}");
     let business_data_path = temp.path().join("data").to_string_lossy().to_string();
-    ducklake.data_path = business_data_path.clone();
-    ducklake.data_inlining_row_limit = Some(0);
-    config.ducklake = Some(ducklake);
-    config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
+    config.ducklake.data_path = business_data_path.clone();
+    config.ducklake.data_inlining_row_limit = Some(0);
+    config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
     let resolver = DuckLakeScopeResolver::connect(&config)
         .await
         .expect("resolver")
         .expect("postgres resolver");
-    let business_tenant_id = format!("tenant-business-apply-{suffix}");
-    let business_metadata_schema = format!("softprobe_business_apply_data_{suffix}");
+    let business_tenant_id = format!("tenant-biz-{short}");
+    let business_metadata_schema = format!("sp_biz_data_{short}");
     resolver
         .provision_scope(ScopeProvisioningRequest {
             scope_id: business_tenant_id.clone(),

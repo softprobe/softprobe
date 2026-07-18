@@ -13,8 +13,8 @@ pub async fn start_maintenance_scheduler(
     dropdown_catalog: Option<Arc<DropdownCatalog>>,
     scope_registry: Option<DuckLakeScopeResolver>,
 ) -> Result<Option<JoinHandle<()>>> {
-    let metadata_enabled = config.compaction.metadata_maintenance_enabled;
-    let compaction_enabled = config.compaction.enabled;
+    let metadata_enabled = config.maintenance.metadata_enabled;
+    let compaction_enabled = config.maintenance.enabled;
 
     if !metadata_enabled && !compaction_enabled {
         return Ok(None);
@@ -22,13 +22,13 @@ pub async fn start_maintenance_scheduler(
 
     let interval_seconds = if metadata_enabled && compaction_enabled {
         std::cmp::min(
-            config.compaction.metadata_maintenance_interval_seconds,
-            config.compaction.compaction_interval_seconds,
+            config.maintenance.metadata_interval_seconds,
+            config.maintenance.interval_seconds,
         )
     } else if metadata_enabled {
-        config.compaction.metadata_maintenance_interval_seconds
+        config.maintenance.metadata_interval_seconds
     } else {
-        config.compaction.compaction_interval_seconds
+        config.maintenance.interval_seconds
     };
 
     let executor = MaintenanceExecutor::new(config, dropdown_catalog, scope_registry).await?;
@@ -61,8 +61,8 @@ mod tests {
     #[tokio::test]
     async fn scheduler_skips_when_compaction_and_metadata_disabled() {
         let mut c = Config::default();
-        c.compaction.enabled = false;
-        c.compaction.metadata_maintenance_enabled = false;
+        c.maintenance.enabled = false;
+        c.maintenance.metadata_enabled = false;
         let out = start_maintenance_scheduler(&c, None, None)
             .await
             .expect("scheduler");
