@@ -1,14 +1,14 @@
 pub mod authn_contract;
 pub mod http_api;
+#[cfg(feature = "integration-e2e")]
+pub mod promotion_apply_e2e;
 pub mod promotion_business_row_extraction;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_business_table_ddl;
 pub mod promotion_manifest;
-pub mod promotion_sqlite_local;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
-#[cfg(feature = "integration-e2e")]
-pub mod promotion_apply_e2e;
+pub mod promotion_sqlite_local;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]

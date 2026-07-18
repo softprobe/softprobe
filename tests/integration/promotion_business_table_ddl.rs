@@ -123,7 +123,9 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         ddls.len()
     );
     assert!(ddls[0].contains("CREATE TABLE IF NOT EXISTS"));
-    assert!(ddls.iter().any(|ddl| ddl.contains("ADD COLUMN IF NOT EXISTS")));
+    assert!(ddls
+        .iter()
+        .any(|ddl| ddl.contains("ADD COLUMN IF NOT EXISTS")));
     assert!(ddls
         .last()
         .is_some_and(|ddl| ddl.contains("CREATE OR REPLACE VIEW")));

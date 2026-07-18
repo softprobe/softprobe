@@ -5,9 +5,9 @@
 //! gets its own RuntimeEngine/writer pointing at the same SQLite file).
 
 use crate::promotion::{
-    business_manifest_from_row, business_spec_id, local_promotion_specs_table_ddl,
-    promotion_manifest_hash, telemetry_manifest_from_row, telemetry_spec_id,
-    BusinessTableManifest, PromotionSpecLoadError, TelemetryColumnsManifest,
+    business_manifest_from_row, local_promotion_specs_table_ddl, telemetry_manifest_from_row,
+    BusinessTableManifest, PromotionSpecActivation, PromotionSpecLoadError,
+    TelemetryColumnsManifest,
 };
 use anyhow::Result;
 use duckdb::Connection;
@@ -102,26 +102,32 @@ ORDER BY applied_at DESC LIMIT 1;"
     business_manifest_from_row(&spec_id, &manifest_json)
 }
 
-/// Activate a telemetry promotion spec (deactivate others, upsert this one).
-pub fn record_active_telemetry_spec(
+/// Activate one spec using the lifecycle shared by telemetry and business promotions.
+///
+/// DuckLake tables do not support unique constraints, so UPDATE-then-INSERT runs under the
+/// process-global apply mutex held by the coordinator.
+pub fn record_active_spec(
     conn: &Connection,
     catalog_alias: &str,
     manifest_yaml: &str,
-    target_tables: &[String],
+    activation: &PromotionSpecActivation,
 ) -> Result<String> {
     ensure_specs_table(conn, catalog_alias)?;
     let catalog = quote_ident(catalog_alias);
-    let spec_id = telemetry_spec_id(manifest_yaml);
-    let manifest_hash = promotion_manifest_hash(manifest_yaml);
-    let tables = target_tables.join(",");
     conn.execute_batch("BEGIN TRANSACTION;")?;
     let result = (|| -> Result<String> {
         conn.execute(
             &format!(
                 "UPDATE {catalog}.promotion_specs SET status = 'inactive' \
-WHERE status = 'active' AND target_kind = 'telemetry_columns' AND spec_id <> ?"
+WHERE status = 'active' AND target_kind = ? \
+AND (? <> 'business_table' OR target_tables = ?) AND spec_id <> ?"
             ),
-            [&spec_id],
+            duckdb::params![
+                activation.target_kind,
+                activation.target_kind,
+                activation.target_tables,
+                activation.spec_id
+            ],
         )?;
         let updated = conn.execute(
             &format!(
@@ -129,72 +135,30 @@ WHERE status = 'active' AND target_kind = 'telemetry_columns' AND spec_id <> ?"
 target_tables = ?, manifest_json = ?, manifest_hash = ?, status = 'active', applied_at = NOW() \
 WHERE spec_id = ?"
             ),
-            duckdb::params![tables, manifest_yaml, manifest_hash, spec_id],
+            duckdb::params![
+                activation.target_tables,
+                manifest_yaml,
+                activation.manifest_hash,
+                activation.spec_id
+            ],
         )?;
         if updated == 0 {
             conn.execute(
                 &format!(
                     "INSERT INTO {catalog}.promotion_specs \
 (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status) \
-VALUES (?, 'softprobe.promotion.v1', 'telemetry_columns', ?, ?, ?, 'active')"
+VALUES (?, 'softprobe.promotion.v1', ?, ?, ?, ?, 'active')"
                 ),
-                duckdb::params![spec_id, tables, manifest_yaml, manifest_hash],
+                duckdb::params![
+                    activation.spec_id,
+                    activation.target_kind,
+                    activation.target_tables,
+                    manifest_yaml,
+                    activation.manifest_hash
+                ],
             )?;
         }
-        Ok(spec_id)
-    })();
-    match result {
-        Ok(id) => {
-            conn.execute_batch("COMMIT;")?;
-            Ok(id)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK;");
-            Err(err)
-        }
-    }
-}
-
-/// Activate a business-table promotion spec (deactivate others for the same table, upsert this one).
-pub fn record_active_business_spec(
-    conn: &Connection,
-    catalog_alias: &str,
-    manifest_yaml: &str,
-    table_name: &str,
-) -> Result<String> {
-    ensure_specs_table(conn, catalog_alias)?;
-    let catalog = quote_ident(catalog_alias);
-    let spec_id = business_spec_id(table_name, manifest_yaml);
-    let manifest_hash = promotion_manifest_hash(manifest_yaml);
-    conn.execute_batch("BEGIN TRANSACTION;")?;
-    let result = (|| -> Result<String> {
-        conn.execute(
-            &format!(
-                "UPDATE {catalog}.promotion_specs SET status = 'inactive' \
-WHERE status = 'active' AND target_kind = 'business_table' \
-AND target_tables = ? AND spec_id <> ?"
-            ),
-            duckdb::params![table_name, spec_id],
-        )?;
-        let updated = conn.execute(
-            &format!(
-                "UPDATE {catalog}.promotion_specs SET \
-target_tables = ?, manifest_json = ?, manifest_hash = ?, status = 'active', applied_at = NOW() \
-WHERE spec_id = ?"
-            ),
-            duckdb::params![table_name, manifest_yaml, manifest_hash, spec_id],
-        )?;
-        if updated == 0 {
-            conn.execute(
-                &format!(
-                    "INSERT INTO {catalog}.promotion_specs \
-(spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status) \
-VALUES (?, 'softprobe.promotion.v1', 'business_table', ?, ?, ?, 'active')"
-                ),
-                duckdb::params![spec_id, table_name, manifest_yaml, manifest_hash],
-            )?;
-        }
-        Ok(spec_id)
+        Ok(activation.spec_id.clone())
     })();
     match result {
         Ok(id) => {

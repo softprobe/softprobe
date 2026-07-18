@@ -254,6 +254,91 @@ pub fn business_spec_id(table_name: &str, manifest_yaml: &str) -> String {
     )
 }
 
+/// Backend-neutral data needed to activate one promotion spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionSpecActivation {
+    pub spec_id: String,
+    pub manifest_hash: String,
+    pub target_kind: &'static str,
+    pub target_tables: String,
+}
+
+pub fn telemetry_spec_activation(
+    manifest_yaml: &str,
+    target_tables: &[String],
+) -> PromotionSpecActivation {
+    PromotionSpecActivation {
+        spec_id: telemetry_spec_id(manifest_yaml),
+        manifest_hash: promotion_manifest_hash(manifest_yaml),
+        target_kind: "telemetry_columns",
+        target_tables: target_tables.join(","),
+    }
+}
+
+pub fn business_spec_activation(table_name: &str, manifest_yaml: &str) -> PromotionSpecActivation {
+    PromotionSpecActivation {
+        spec_id: business_spec_id(table_name, manifest_yaml),
+        manifest_hash: promotion_manifest_hash(manifest_yaml),
+        target_kind: "business_table",
+        target_tables: table_name.to_string(),
+    }
+}
+
+/// Shared telemetry apply lifecycle. Backend adapters provide only DDL and activation primitives.
+pub async fn run_telemetry_apply<ApplyDdl, ApplyDdlFuture, Activate, ActivateFuture>(
+    apply_ddl: ApplyDdl,
+    activate: Activate,
+) -> anyhow::Result<String>
+where
+    ApplyDdl: FnOnce() -> ApplyDdlFuture,
+    ApplyDdlFuture: std::future::Future<Output = anyhow::Result<()>>,
+    Activate: FnOnce() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = anyhow::Result<String>>,
+{
+    apply_ddl().await?;
+    activate().await
+}
+
+/// Error from the shared business apply lifecycle.
+pub enum BusinessApplyError {
+    Incompatible(PromotionValidationError),
+    Other(anyhow::Error),
+}
+
+/// Shared business apply lifecycle. Both PostgreSQL and SQLite execute this exact sequence.
+pub async fn run_business_apply<
+    LoadCurrent,
+    LoadFuture,
+    ApplyDdl,
+    ApplyDdlFuture,
+    Activate,
+    ActivateFuture,
+>(
+    requested: &BusinessTableManifest,
+    load_current: LoadCurrent,
+    apply_ddl: ApplyDdl,
+    activate: Activate,
+) -> Result<String, BusinessApplyError>
+where
+    LoadCurrent: FnOnce() -> LoadFuture,
+    LoadFuture: std::future::Future<Output = anyhow::Result<Option<BusinessTableManifest>>>,
+    ApplyDdl: FnOnce() -> ApplyDdlFuture,
+    ApplyDdlFuture: std::future::Future<Output = anyhow::Result<()>>,
+    Activate: FnOnce() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = anyhow::Result<String>>,
+{
+    if let Some(current) = load_current()
+        .await
+        .map_err(BusinessApplyError::Other)?
+        .as_ref()
+    {
+        validate_business_table_compatible(current, requested)
+            .map_err(BusinessApplyError::Incompatible)?;
+    }
+    apply_ddl().await.map_err(BusinessApplyError::Other)?;
+    activate().await.map_err(BusinessApplyError::Other)
+}
+
 /// Parse one `(spec_id, manifest_json)` row into a telemetry columns manifest.
 pub fn telemetry_manifest_from_row(
     spec_id: &str,
@@ -587,6 +672,20 @@ pub fn validate_business_table_compatible(
                 "business_column_nullability_changed",
                 format!("columns.{}.nullable", current_col.name),
                 "existing business table column nullability changed; create a new version",
+            ));
+        }
+    }
+    let current_names = current
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
+    for requested_col in &requested.columns {
+        if !current_names.contains(requested_col.name.as_str()) && !requested_col.nullable {
+            return Err(PromotionValidationError::new(
+                "business_required_column_added",
+                format!("columns.{}.nullable", requested_col.name),
+                "required columns cannot be added to an existing table; create a new version",
             ));
         }
     }
@@ -1470,6 +1569,54 @@ columns:
     }
 
     #[test]
+    fn business_table_compatibility_rejects_additive_required_columns() {
+        let current = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: business_table, table: checkout_orders, version: 1 }
+rowSelector:
+  attribute: { key: sp.workflow, equals: checkout }
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source: { from: http_response_body, json_path: $.total }
+"#,
+        )
+        .expect("current");
+        let requested = parse_promotion_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: business_table, table: checkout_orders, version: 1 }
+rowSelector:
+  attribute: { key: sp.workflow, equals: checkout }
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source: { from: http_response_body, json_path: $.total }
+  - name: order_id
+    type: string
+    nullable: false
+    source: { from: attribute, key: order.id }
+"#,
+        )
+        .expect("requested");
+        let (
+            PromotionManifest::BusinessTable(current),
+            PromotionManifest::BusinessTable(requested),
+        ) = (current, requested)
+        else {
+            panic!("business manifests");
+        };
+
+        let error = super::validate_business_table_compatible(&current, &requested)
+            .expect_err("required additive column needs a new table version");
+        assert_eq!(error.code(), "business_required_column_added");
+        assert_eq!(error.path(), "columns.order_id.nullable");
+    }
+
+    #[test]
     fn metadata_ddl_creates_specs_and_errors_tables() {
         let ddl = super::promotion_metadata_table_ddls("tenant_alpha");
         assert_eq!(ddl.len(), 3);
@@ -1503,9 +1650,7 @@ columns:
     #[test]
     fn local_promotion_specs_ddl_is_catalog_qualified() {
         let ddl = super::local_promotion_specs_table_ddl("softprobe");
-        assert!(ddl.starts_with(
-            r#"CREATE TABLE IF NOT EXISTS "softprobe".promotion_specs ("#
-        ));
+        assert!(ddl.starts_with(r#"CREATE TABLE IF NOT EXISTS "softprobe".promotion_specs ("#));
         assert!(ddl.contains(r#"spec_id TEXT NOT NULL"#));
         assert!(!ddl.contains("PRIMARY KEY"));
         assert!(ddl.contains("manifest_hash TEXT NOT NULL"));

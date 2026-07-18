@@ -12,10 +12,10 @@ use crate::inject::{
 };
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
-    BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
-    TelemetryTable,
+    BusinessApplyError, BusinessTableManifest, PromotionDataType, PromotionManifest,
+    TelemetryColumnsManifest, TelemetryTable,
 };
-use crate::runtime_engine::{BusinessApplyError, DuckLakeScope, ScopeProvisioningRequest};
+use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
 use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
 use axum::{
     body::Bytes,

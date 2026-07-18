@@ -4,4 +4,5 @@ pub mod otlp;
 pub mod perf;
 pub mod pipeline;
 pub mod poll;
+pub mod promotion_contract;
 pub mod storage_config;

@@ -12,11 +12,10 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
-    business_manifest_from_row, business_spec_id, ensure_promotion_metadata_tables,
-    load_active_business_table_manifest, load_active_telemetry_columns_manifests,
-    promotion_manifest_hash, telemetry_spec_id, validate_business_table_compatible,
-    BusinessTableManifest, PromotionSpecLoadError, PromotionValidationError,
-    TelemetryColumnsManifest,
+    business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
+    load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
+    telemetry_spec_activation, BusinessApplyError, BusinessTableManifest, PromotionSpecActivation,
+    PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::session_redis::{RedisStore, Session};
@@ -467,22 +466,94 @@ RETURNING scope_id;"#,
         Ok(manifests)
     }
 
-    /// Load the active business-table manifest for one logical table in an already bound scope.
-    pub async fn load_active_business_table_manifest_for_scope(
-        &self,
+    async fn activate_spec_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        activation: &PromotionSpecActivation,
+    ) -> Result<String> {
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        tx.execute(
+            &format!(
+                r#"UPDATE "{schema}".promotion_specs
+SET status = 'inactive'
+WHERE status = 'active'
+  AND target_kind = $1
+  AND ($1 <> 'business_table' OR target_tables = $2)
+  AND spec_id <> $3;"#
+            ),
+            &[
+                &activation.target_kind,
+                &activation.target_tables,
+                &activation.spec_id,
+            ],
+        )
+        .await?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{schema}".promotion_specs
+  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
+VALUES ($1, 'softprobe.promotion.v1', $2, $3, $4, $5, 'active')
+ON CONFLICT (spec_id) DO UPDATE SET
+  target_kind = EXCLUDED.target_kind,
+  target_tables = EXCLUDED.target_tables,
+  manifest_json = EXCLUDED.manifest_json,
+  manifest_hash = EXCLUDED.manifest_hash,
+  status = 'active',
+  applied_at = NOW();"#
+            ),
+            &[
+                &activation.spec_id,
+                &activation.target_kind,
+                &activation.target_tables,
+                &manifest_yaml,
+                &activation.manifest_hash,
+            ],
+        )
+        .await?;
+        Ok(activation.spec_id.clone())
+    }
+
+    async fn load_business_manifest_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
         scope: &DuckLakeScope,
         table_name: &str,
     ) -> Result<Option<BusinessTableManifest>> {
-        let client = self.pool.get().await?;
-        load_active_business_table_manifest(&client, &scope.metadata_schema, table_name)
-            .await
-            .map_err(map_spec_load_error)
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let rows = tx
+            .query(
+                &format!(
+                    r#"SELECT spec_id, manifest_json FROM "{schema}".promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
+ORDER BY applied_at DESC
+LIMIT 1;"#
+                ),
+                &[&table_name],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let spec_id: String = row.get(0);
+        let manifest_json: String = row.get(1);
+        business_manifest_from_row(&spec_id, &manifest_json).map_err(map_spec_load_error)
     }
 
-    /// Record one successfully applied telemetry promotion manifest in the metadata schema.
-    ///
-    /// Keeps a single active telemetry_columns document per tenant: other active telemetry specs
-    /// are marked `inactive` in the same transaction before upserting the new row.
+    async fn lock_promotion_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        scope: &DuckLakeScope,
+        lock_suffix: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+            &[&format!("{}:{lock_suffix}", scope.metadata_schema)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Low-level metadata operation used by resolver-isolation tests and maintenance tooling.
+    /// Runtime apply uses [`Self::apply_telemetry_promotion_guarded`] instead.
     pub async fn record_active_telemetry_promotion_spec(
         &self,
         scope: &DuckLakeScope,
@@ -491,63 +562,14 @@ RETURNING scope_id;"#,
     ) -> Result<String> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        // Serialize concurrent applies for this tenant: without the lock two different manifests
-        // could each deactivate-then-insert before seeing the other's row, leaving two active specs.
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!("{}:telemetry_columns", scope.metadata_schema)],
-        )
-        .await?;
-        let spec_id =
-            Self::upsert_active_telemetry_spec_tx(&tx, scope, manifest_yaml, target_tables).await?;
+        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+        let spec_id = Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await?;
         tx.commit().await?;
         Ok(spec_id)
     }
 
-    async fn upsert_active_telemetry_spec_tx(
-        tx: &deadpool_postgres::Transaction<'_>,
-        scope: &DuckLakeScope,
-        manifest_yaml: &str,
-        target_tables: &[String],
-    ) -> Result<String> {
-        let manifest_hash = promotion_manifest_hash(manifest_yaml);
-        let spec_id = telemetry_spec_id(manifest_yaml);
-        let schema = scope.metadata_schema.replace('"', "\"\"");
-        tx.execute(
-            &format!(
-                r#"UPDATE "{schema}".promotion_specs
-SET status = 'inactive'
-WHERE status = 'active'
-  AND target_kind = 'telemetry_columns'
-  AND spec_id <> $1;"#
-            ),
-            &[&spec_id],
-        )
-        .await?;
-        tx.execute(
-            &format!(
-                r#"INSERT INTO "{schema}".promotion_specs
-  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
-VALUES ($1, 'softprobe.promotion.v1', 'telemetry_columns', $2, $3, $4, 'active')
-ON CONFLICT (spec_id) DO UPDATE SET
-  target_tables = EXCLUDED.target_tables,
-  manifest_json = EXCLUDED.manifest_json,
-  manifest_hash = EXCLUDED.manifest_hash,
-  status = 'active',
-  applied_at = NOW();"#
-            ),
-            &[
-                &spec_id,
-                &target_tables.join(","),
-                &manifest_yaml,
-                &manifest_hash,
-            ],
-        )
-        .await?;
-        Ok(spec_id)
-    }
-
-    /// Apply telemetry promotion DDL then activate the spec under one per-tenant advisory lock.
+    /// Apply telemetry DDL and activation through the shared lifecycle under a Postgres lock.
     pub async fn apply_telemetry_promotion_guarded<F, Fut>(
         &self,
         scope: &DuckLakeScope,
@@ -559,85 +581,19 @@ ON CONFLICT (spec_id) DO UPDATE SET
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        let schema = scope.metadata_schema.replace('"', "\"\"");
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!("{}:telemetry_columns", scope.metadata_schema)],
-        )
-        .await?;
-        // Ensure metadata tables exist before upsert (provision may have created them already).
-        let _ = schema;
-        apply_ddl().await?;
-        let spec_id =
-            Self::upsert_active_telemetry_spec_tx(&tx, scope, manifest_yaml, target_tables).await?;
-        tx.commit().await?;
-        Ok(spec_id)
-    }
-
-    /// Record one successfully applied business table promotion manifest in metadata.
-    ///
-    /// Keeps a single active business_table document per logical table name: other active specs for
-    /// the same `target_tables` value are marked `inactive` before upserting.
-    pub async fn record_active_business_promotion_spec(
-        &self,
-        scope: &DuckLakeScope,
-        manifest_yaml: &str,
-        table_name: &str,
-    ) -> Result<String> {
-        let manifest_hash = promotion_manifest_hash(manifest_yaml);
-        let spec_id = business_spec_id(table_name, manifest_yaml);
-        let schema = scope.metadata_schema.replace('"', "\"\"");
-        let mut client = self.pool.get().await?;
-        let tx = client.transaction().await?;
-        // Serialize concurrent applies for this tenant+table (see telemetry variant above).
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!(
-                "{}:business_table:{}",
-                scope.metadata_schema, table_name
-            )],
-        )
-        .await?;
-        tx.execute(
-            &format!(
-                r#"UPDATE "{schema}".promotion_specs
-SET status = 'inactive'
-WHERE status = 'active'
-  AND target_kind = 'business_table'
-  AND target_tables = $1
-  AND spec_id <> $2;"#
-            ),
-            &[&table_name, &spec_id],
-        )
-        .await?;
-        tx.execute(
-            &format!(
-                r#"INSERT INTO "{schema}".promotion_specs
-  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
-VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
-ON CONFLICT (spec_id) DO UPDATE SET
-  target_tables = EXCLUDED.target_tables,
-  manifest_json = EXCLUDED.manifest_json,
-  manifest_hash = EXCLUDED.manifest_hash,
-  status = 'active',
-  applied_at = NOW();"#
-            ),
-            &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
-        )
+        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+        let spec_id = run_telemetry_apply(apply_ddl, || async {
+            Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
+        })
         .await?;
         tx.commit().await?;
         Ok(spec_id)
     }
 
-    /// Apply a business-table promotion while holding a per-tenant+table advisory lock across the
-    /// whole critical section: load prior active manifest -> compatibility check -> physical DDL
-    /// (via `apply_ddl`) -> activate/deactivate spec, all under one transaction-scoped lock.
-    ///
-    /// Serializing the entire sequence (not just the final spec swap) prevents two concurrent
-    /// applies from both passing compatibility against a stale prior manifest and racing DDL on the
-    /// same `<table>_vN`.
+    /// Apply business load/validate/DDL/activation through the same lifecycle used by SQLite.
     pub async fn apply_business_promotion_guarded<F, Fut>(
         &self,
         scope: &DuckLakeScope,
@@ -650,86 +606,22 @@ ON CONFLICT (spec_id) DO UPDATE SET
         Fut: std::future::Future<Output = Result<()>>,
     {
         let table_name = spec.target.table.as_str();
-        let schema = scope.metadata_schema.replace('"', "\"\"");
         let mut client = self.pool.get().await.map_err(anyhow_other)?;
         let tx = client.transaction().await.map_err(anyhow_other)?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!(
-                "{}:business_table:{}",
-                scope.metadata_schema, table_name
-            )],
-        )
-        .await
-        .map_err(anyhow_other)?;
-
-        // Load the prior active manifest under the lock so validation and DDL cannot race a
-        // concurrent apply that already activated a different manifest.
-        let load_sql = format!(
-            r#"SELECT spec_id, manifest_json FROM "{schema}".promotion_specs
-WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
-ORDER BY applied_at DESC
-LIMIT 1;"#
-        );
-        let rows = tx
-            .query(&load_sql, &[&table_name])
+        Self::lock_promotion_tx(&tx, scope, &format!("business_table:{table_name}"))
             .await
-            .map_err(anyhow_other)?;
-        if let Some(row) = rows.first() {
-            let spec_id: String = row.get(0);
-            let manifest_json: String = row.get(1);
-            if let Some(current) = business_manifest_from_row(&spec_id, &manifest_json)
-                .map_err(|err| BusinessApplyError::Other(map_spec_load_error(err)))?
-            {
-                validate_business_table_compatible(&current, spec)
-                    .map_err(BusinessApplyError::Incompatible)?;
-            }
-        }
-
-        // Physical DDL runs while the advisory lock is held.
-        apply_ddl().await.map_err(BusinessApplyError::Other)?;
-
-        let manifest_hash = promotion_manifest_hash(manifest_yaml);
-        let spec_id = business_spec_id(table_name, manifest_yaml);
-        tx.execute(
-            &format!(
-                r#"UPDATE "{schema}".promotion_specs
-SET status = 'inactive'
-WHERE status = 'active'
-  AND target_kind = 'business_table'
-  AND target_tables = $1
-  AND spec_id <> $2;"#
-            ),
-            &[&table_name, &spec_id],
+            .map_err(BusinessApplyError::Other)?;
+        let activation = business_spec_activation(table_name, manifest_yaml);
+        let spec_id = run_business_apply(
+            spec,
+            || async { Self::load_business_manifest_tx(&tx, scope, table_name).await },
+            apply_ddl,
+            || async { Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await },
         )
-        .await
-        .map_err(anyhow_other)?;
-        tx.execute(
-            &format!(
-                r#"INSERT INTO "{schema}".promotion_specs
-  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
-VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
-ON CONFLICT (spec_id) DO UPDATE SET
-  target_tables = EXCLUDED.target_tables,
-  manifest_json = EXCLUDED.manifest_json,
-  manifest_hash = EXCLUDED.manifest_hash,
-  status = 'active',
-  applied_at = NOW();"#
-            ),
-            &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
-        )
-        .await
-        .map_err(anyhow_other)?;
+        .await?;
         tx.commit().await.map_err(anyhow_other)?;
         Ok(spec_id)
     }
-}
-
-/// Error from [`DuckLakeScopeResolver::apply_business_promotion_guarded`], distinguishing a client
-/// compatibility rejection (HTTP 422) from an operational failure (HTTP 503).
-pub enum BusinessApplyError {
-    Incompatible(PromotionValidationError),
-    Other(anyhow::Error),
 }
 
 fn anyhow_other<E: std::error::Error + Send + Sync + 'static>(err: E) -> BusinessApplyError {

@@ -10,12 +10,12 @@ mod promotion_store;
 use crate::config::{Config, DuckLakeConfig};
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
-    business_table_create_ddls, extract_telemetry_promoted_value, telemetry_column_add_ddls,
-    validate_business_table_compatible, BusinessTableManifest, PromotionColumn,
-    PromotionSpecLoadError, TelemetryColumnsManifest, TelemetryPromotionEvent,
-    TelemetryPromotionRow, TelemetryTable,
+    business_spec_activation, business_table_create_ddls, extract_telemetry_promoted_value,
+    run_business_apply, run_telemetry_apply, telemetry_column_add_ddls, telemetry_spec_activation,
+    BusinessApplyError, BusinessTableManifest, PromotionColumn, PromotionSpecLoadError,
+    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
-use crate::runtime_engine::{BusinessApplyError, DuckLakeScope, DuckLakeScopeResolver};
+use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::arrow;
 use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
 use ::arrow::datatypes::Schema;
@@ -632,9 +632,7 @@ impl DuckLakeWriter {
         }
     }
 
-    fn load_active_telemetry_manifests_local(
-        &self,
-    ) -> Result<Vec<TelemetryColumnsManifest>> {
+    fn load_active_telemetry_manifests_local(&self) -> Result<Vec<TelemetryColumnsManifest>> {
         let dk = &self.ducklake;
         self.with_attached_conn(dk, |conn| {
             promotion_store::load_active_telemetry_manifests(conn, &dk.catalog_alias)
@@ -648,9 +646,10 @@ impl DuckLakeWriter {
         scope: &DuckLakeScope,
     ) -> Result<Vec<TelemetryColumnsManifest>> {
         if self.ducklake.catalog_type == "postgres" {
-            let resolver = self.tenant_ducklake.as_ref().ok_or_else(|| {
-                anyhow!("postgres promotion requires a tenant DuckLake resolver")
-            })?;
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
             return resolver
                 .load_active_telemetry_columns_manifests_for_scope(scope)
                 .await;
@@ -661,50 +660,16 @@ impl DuckLakeWriter {
         Ok(Vec::new())
     }
 
-    fn record_active_telemetry_spec_local_unlocked(
+    fn activate_spec_local_unlocked(
         &self,
         scope: &DuckLakeScope,
         manifest_yaml: &str,
-        target_tables: &[String],
+        activation: &crate::promotion::PromotionSpecActivation,
     ) -> Result<String> {
         let dk = self.effective_ducklake(scope);
         self.with_attached_conn(&dk, |conn| {
-            promotion_store::record_active_telemetry_spec(
-                conn,
-                &dk.catalog_alias,
-                manifest_yaml,
-                target_tables,
-            )
+            promotion_store::record_active_spec(conn, &dk.catalog_alias, manifest_yaml, activation)
         })
-    }
-
-    /// Backend-neutral record of an active telemetry promotion spec.
-    pub async fn record_active_telemetry_spec(
-        &self,
-        scope: &DuckLakeScope,
-        manifest_yaml: &str,
-        target_tables: &[String],
-    ) -> Result<String> {
-        if self.ducklake.catalog_type == "postgres" {
-            let resolver = self.tenant_ducklake.as_ref().ok_or_else(|| {
-                anyhow!("postgres promotion requires a tenant DuckLake resolver")
-            })?;
-            return resolver
-                .record_active_telemetry_promotion_spec(scope, manifest_yaml, target_tables)
-                .await;
-        }
-        if self.ducklake.catalog_type == "sqlite" {
-            let _guard = promotion_store::local_apply_mutex().lock().await;
-            return self.record_active_telemetry_spec_local_unlocked(
-                scope,
-                manifest_yaml,
-                target_tables,
-            );
-        }
-        Err(anyhow!(
-            "promotion specs are unsupported for catalog_type={}",
-            self.ducklake.catalog_type
-        ))
     }
 
     /// Apply telemetry DDL and activate the spec under one backend-specific critical section
@@ -718,9 +683,10 @@ impl DuckLakeWriter {
         target_tables: &[String],
     ) -> Result<String> {
         if self.ducklake.catalog_type == "postgres" {
-            let resolver = self.tenant_ducklake.as_ref().ok_or_else(|| {
-                anyhow!("postgres promotion requires a tenant DuckLake resolver")
-            })?;
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
             return resolver
                 .apply_telemetry_promotion_guarded(scope, manifest_yaml, target_tables, || async {
                     self.apply_telemetry_column_promotion(scope, spec)
@@ -731,12 +697,16 @@ impl DuckLakeWriter {
         }
         if self.ducklake.catalog_type == "sqlite" {
             let _guard = promotion_store::local_apply_mutex().lock().await;
-            self.apply_telemetry_column_promotion(scope, spec).await?;
-            return self.record_active_telemetry_spec_local_unlocked(
-                scope,
-                manifest_yaml,
-                target_tables,
-            );
+            let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+            return run_telemetry_apply(
+                || async {
+                    self.apply_telemetry_column_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                },
+                || async { self.activate_spec_local_unlocked(scope, manifest_yaml, &activation) },
+            )
+            .await;
         }
         Err(anyhow!(
             "promotion specs are unsupported for catalog_type={}",
@@ -768,33 +738,27 @@ impl DuckLakeWriter {
         if self.ducklake.catalog_type == "sqlite" {
             let _guard = promotion_store::local_apply_mutex().lock().await;
             let dk = self.effective_ducklake(scope);
-            let current = self
-                .with_attached_conn(&dk, |conn| {
-                    promotion_store::load_active_business_manifest(
-                        conn,
-                        &dk.catalog_alias,
-                        &spec.target.table,
-                    )
-                    .map_err(Self::map_spec_load)
-                })
-                .map_err(BusinessApplyError::Other)?;
-            if let Some(current) = current.as_ref() {
-                validate_business_table_compatible(current, spec)
-                    .map_err(BusinessApplyError::Incompatible)?;
-            }
-            self.apply_business_table_promotion(scope, spec)
-                .await
-                .map_err(BusinessApplyError::Other)?;
-            return self
-                .with_attached_conn(&dk, |conn| {
-                    promotion_store::record_active_business_spec(
-                        conn,
-                        &dk.catalog_alias,
-                        manifest_yaml,
-                        &spec.target.table,
-                    )
-                })
-                .map_err(BusinessApplyError::Other);
+            let activation = business_spec_activation(&spec.target.table, manifest_yaml);
+            return run_business_apply(
+                spec,
+                || async {
+                    self.with_attached_conn(&dk, |conn| {
+                        promotion_store::load_active_business_manifest(
+                            conn,
+                            &dk.catalog_alias,
+                            &spec.target.table,
+                        )
+                        .map_err(Self::map_spec_load)
+                    })
+                },
+                || async {
+                    self.apply_business_table_promotion(scope, spec)
+                        .await
+                        .map(|_| ())
+                },
+                || async { self.activate_spec_local_unlocked(scope, manifest_yaml, &activation) },
+            )
+            .await;
         }
         Err(BusinessApplyError::Other(anyhow!(
             "promotion specs are unsupported for catalog_type={}",

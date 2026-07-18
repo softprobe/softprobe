@@ -389,8 +389,8 @@ columns:
    runs `validate_business_table_compatible` (HTTP **422** on failure).
 2. Creates physical table `<table>_v<version>` when missing
    (example: `checkout_orders_v1`).
-3. Runs idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column
-   so same-version additive updates change the physical table.
+3. Runs idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each nullable
+   column so safe same-version additive updates change the physical table.
 4. Creates or replaces view `<table>_current`
    (example: `checkout_orders_current`).
 5. Activates this business-table spec and deactivates other active specs for
@@ -407,7 +407,9 @@ Every business table includes evidence anchors:
 Apply enforces `validate_business_table_compatible` against the prior active
 manifest for the same table:
 
-- same version may only grow additively;
+- same version may only add nullable columns;
+- adding a required (`nullable: false`) column requires a new table version,
+  because existing rows cannot satisfy the constraint;
 - dropping a column, changing type, or changing nullability on an existing
   version is rejected with **422**;
 - breaking changes must bump `target.version` (higher version is accepted and
