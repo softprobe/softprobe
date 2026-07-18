@@ -757,8 +757,11 @@ impl DuckLakeWriter {
                         table = qualified_table,
                         path = escaped_path
                     );
+                    // BY NAME keeps ingest shrink-safe: physical promoted columns absent from the
+                    // active manifest (and thus from this Parquet batch) are filled with NULL
+                    // instead of failing a positional column-count match.
                     let insert = format!(
-                        "INSERT INTO {table} SELECT * FROM read_parquet('{path}') {order_clause};",
+                        "INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}') {order_clause};",
                         table = qualified_table,
                         path = escaped_path,
                         order_clause = order_clause,

@@ -470,3 +470,58 @@ async fn reapplying_same_telemetry_manifest_is_idempotent() {
     assert_eq!(active_telemetry_spec_count(&fx.metadata_schema).await, 1);
     assert_eq!(inactive_telemetry_spec_count(&fx.metadata_schema).await, 0);
 }
+
+#[tokio::test]
+async fn shrunken_manifest_keeps_ingest_working_with_stale_column_null() {
+    let fx = setup_promo_fixture().await;
+
+    // v2 (service_name + division_name) creates both physical columns; ingest one row so the
+    // table exists with the wide schema on disk.
+    let (status2, body2) = apply_manifest(&fx.router, &fx.api_key, MANIFEST_V2).await;
+    assert_eq!(status2, StatusCode::OK, "v2 apply failed: {body2}");
+    let wide_session = format!("sess-wide-{}", Uuid::new_v4());
+    let ingest_status = ingest_otlp_trace(
+        &fx.router,
+        &fx.api_key,
+        &wide_session,
+        "checkout-api",
+        Some("payments"),
+    )
+    .await;
+    assert_eq!(ingest_status, StatusCode::OK);
+
+    // Shrink back to v1 (service_name only). The physical division_name column stays.
+    let (status1, body1) = apply_manifest(&fx.router, &fx.api_key, MANIFEST_V1).await;
+    assert_eq!(status1, StatusCode::OK, "shrunken apply failed: {body1}");
+    assert_eq!(active_telemetry_spec_count(&fx.metadata_schema).await, 1);
+
+    // Ingest after the shrink must succeed even though the batch has fewer promoted columns
+    // than the physical table; the stale column is NULL-filled (BY NAME insert).
+    let narrow_session = format!("sess-narrow-{}", Uuid::new_v4());
+    let ingest_status = ingest_otlp_trace(
+        &fx.router,
+        &fx.api_key,
+        &narrow_session,
+        "checkout-api",
+        Some("payments"),
+    )
+    .await;
+    assert_eq!(
+        ingest_status,
+        StatusCode::OK,
+        "ingest after shrunken manifest must not fail"
+    );
+
+    let values = attach_and_query_promoted(
+        &fx.metadata_path,
+        &fx.data_path,
+        &fx.metadata_schema,
+        &narrow_session,
+        &["service_name", "division_name"],
+    );
+    assert_eq!(values[0].as_deref(), Some("checkout-api"));
+    assert_eq!(
+        values[1], None,
+        "stale promoted column must be NULL after manifest shrink"
+    );
+}

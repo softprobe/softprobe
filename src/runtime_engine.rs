@@ -511,6 +511,13 @@ RETURNING scope_id;"#,
         let schema = scope.metadata_schema.replace('"', "\"\"");
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
+        // Serialize concurrent applies for this tenant: without the lock two different manifests
+        // could each deactivate-then-insert before seeing the other's row, leaving two active specs.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+            &[&format!("{}:telemetry_columns", scope.metadata_schema)],
+        )
+        .await?;
         tx.execute(
             &format!(
                 r#"UPDATE "{schema}".promotion_specs
@@ -563,6 +570,15 @@ ON CONFLICT (spec_id) DO UPDATE SET
         let schema = scope.metadata_schema.replace('"', "\"\"");
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
+        // Serialize concurrent applies for this tenant+table (see telemetry variant above).
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+            &[&format!(
+                "{}:business_table:{}",
+                scope.metadata_schema, table_name
+            )],
+        )
+        .await?;
         tx.execute(
             &format!(
                 r#"UPDATE "{schema}".promotion_specs
