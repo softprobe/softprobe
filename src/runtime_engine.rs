@@ -13,8 +13,9 @@ use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
     ensure_promotion_metadata_tables, load_active_business_table_manifest,
-    load_active_telemetry_columns_manifests, BusinessTableManifest, PromotionSpecLoadError,
-    TelemetryColumnsManifest,
+    load_active_telemetry_columns_manifests, parse_promotion_manifest,
+    validate_business_table_compatible, BusinessTableManifest, PromotionManifest,
+    PromotionSpecLoadError, PromotionValidationError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::session_redis::{RedisStore, Session};
@@ -609,6 +610,118 @@ ON CONFLICT (spec_id) DO UPDATE SET
         tx.commit().await?;
         Ok(spec_id)
     }
+
+    /// Apply a business-table promotion while holding a per-tenant+table advisory lock across the
+    /// whole critical section: load prior active manifest -> compatibility check -> physical DDL
+    /// (via `apply_ddl`) -> activate/deactivate spec, all under one transaction-scoped lock.
+    ///
+    /// Serializing the entire sequence (not just the final spec swap) prevents two concurrent
+    /// applies from both passing compatibility against a stale prior manifest and racing DDL on the
+    /// same `<table>_vN`.
+    pub async fn apply_business_promotion_guarded<F, Fut>(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        spec: &BusinessTableManifest,
+        apply_ddl: F,
+    ) -> std::result::Result<String, BusinessApplyError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let table_name = spec.target.table.as_str();
+        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let mut client = self.pool.get().await.map_err(anyhow_other)?;
+        let tx = client.transaction().await.map_err(anyhow_other)?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+            &[&format!(
+                "{}:business_table:{}",
+                scope.metadata_schema, table_name
+            )],
+        )
+        .await
+        .map_err(anyhow_other)?;
+
+        // Load the prior active manifest under the lock so validation and DDL cannot race a
+        // concurrent apply that already activated a different manifest.
+        let load_sql = format!(
+            r#"SELECT spec_id, manifest_json FROM "{schema}".promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table' AND target_tables = $1
+ORDER BY applied_at DESC
+LIMIT 1;"#
+        );
+        let rows = tx
+            .query(&load_sql, &[&table_name])
+            .await
+            .map_err(anyhow_other)?;
+        if let Some(row) = rows.first() {
+            let spec_id: String = row.get(0);
+            let manifest_json: String = row.get(1);
+            match parse_promotion_manifest(&manifest_json) {
+                Ok(PromotionManifest::BusinessTable(current)) => {
+                    validate_business_table_compatible(&current, spec)
+                        .map_err(BusinessApplyError::Incompatible)?;
+                }
+                Ok(PromotionManifest::TelemetryColumns(_)) => {}
+                Err(e) => {
+                    return Err(BusinessApplyError::Other(anyhow!(
+                        "promotion spec {spec_id} is invalid: {e}"
+                    )));
+                }
+            }
+        }
+
+        // Physical DDL runs while the advisory lock is held.
+        apply_ddl().await.map_err(BusinessApplyError::Other)?;
+
+        let mut hasher = DefaultHasher::new();
+        manifest_yaml.hash(&mut hasher);
+        let manifest_hash = format!("{:016x}", hasher.finish());
+        let spec_id = format!("business_table_{}_{}", table_name, manifest_hash);
+        tx.execute(
+            &format!(
+                r#"UPDATE "{schema}".promotion_specs
+SET status = 'inactive'
+WHERE status = 'active'
+  AND target_kind = 'business_table'
+  AND target_tables = $1
+  AND spec_id <> $2;"#
+            ),
+            &[&table_name, &spec_id],
+        )
+        .await
+        .map_err(anyhow_other)?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{schema}".promotion_specs
+  (spec_id, spec_version, target_kind, target_tables, manifest_json, manifest_hash, status)
+VALUES ($1, 'softprobe.promotion.v1', 'business_table', $2, $3, $4, 'active')
+ON CONFLICT (spec_id) DO UPDATE SET
+  target_tables = EXCLUDED.target_tables,
+  manifest_json = EXCLUDED.manifest_json,
+  manifest_hash = EXCLUDED.manifest_hash,
+  status = 'active',
+  applied_at = NOW();"#
+            ),
+            &[&spec_id, &table_name, &manifest_yaml, &manifest_hash],
+        )
+        .await
+        .map_err(anyhow_other)?;
+        tx.commit().await.map_err(anyhow_other)?;
+        Ok(spec_id)
+    }
+}
+
+/// Error from [`DuckLakeScopeResolver::apply_business_promotion_guarded`], distinguishing a client
+/// compatibility rejection (HTTP 422) from an operational failure (HTTP 503).
+pub enum BusinessApplyError {
+    Incompatible(PromotionValidationError),
+    Other(anyhow::Error),
+}
+
+fn anyhow_other<E: std::error::Error + Send + Sync + 'static>(err: E) -> BusinessApplyError {
+    BusinessApplyError::Other(anyhow!(err))
 }
 
 fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str) -> Result<()> {

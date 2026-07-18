@@ -12,10 +12,10 @@ use crate::inject::{
 };
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
-    validate_business_table_compatible, BusinessTableManifest, PromotionDataType,
-    PromotionManifest, TelemetryColumnsManifest, TelemetryTable,
+    BusinessTableManifest, PromotionDataType, PromotionManifest, TelemetryColumnsManifest,
+    TelemetryTable,
 };
-use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
+use crate::runtime_engine::{BusinessApplyError, DuckLakeScope, ScopeProvisioningRequest};
 use crate::runtime_engine::{RuntimeEngine, TenantSessionStore};
 use axum::{
     body::Bytes,
@@ -713,34 +713,33 @@ async fn apply_business_table_promotion(
         .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
-    let current = tenant_ducklake
-        .load_active_business_table_manifest_for_scope(&engine.scope, &spec.target.table)
+    // The whole load -> compatibility check -> DDL -> record sequence runs under one per-tenant+table
+    // advisory lock inside the resolver, so concurrent applies cannot interleave.
+    tenant_ducklake
+        .apply_business_promotion_guarded(&engine.scope, &manifest_yaml, &spec, || async {
+            engine
+                .storage
+                .writer
+                .apply_business_table_promotion(&engine.scope, &spec)
+                .await
+                .map(|_| ())
+        })
         .await
-        .map_err(|err| promotion_apply_error("promotion_spec_load_failed", err))?;
-    if let Some(current) = current.as_ref() {
-        validate_business_table_compatible(current, &spec).map_err(|err| {
-            (
+        .map_err(|err| match err {
+            BusinessApplyError::Incompatible(e) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "error": {
-                        "code": err.code(),
-                        "message": err.to_string(),
-                        "path": err.path()
+                        "code": e.code(),
+                        "message": e.to_string(),
+                        "path": e.path()
                     }
                 })),
-            )
+            ),
+            BusinessApplyError::Other(e) => {
+                promotion_apply_error("promotion_schema_apply_failed", e)
+            }
         })?;
-    }
-    engine
-        .storage
-        .writer
-        .apply_business_table_promotion(&engine.scope, &spec)
-        .await
-        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
-    tenant_ducklake
-        .record_active_business_promotion_spec(&engine.scope, &manifest_yaml, &spec.target.table)
-        .await
-        .map_err(|err| promotion_apply_error("promotion_spec_record_failed", err))?;
     Ok(Json(json!({
         "specVersion": "softprobe.promotion.apply.v1",
         "applied": true,

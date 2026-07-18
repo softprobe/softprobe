@@ -324,6 +324,35 @@ WHERE table_catalog = 'softprobe'
     n > 0
 }
 
+fn ducklake_relation_column_exists(
+    metadata_path: &str,
+    data_path: &str,
+    metadata_schema: &str,
+    table_name: &str,
+    column: &str,
+) -> bool {
+    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch("INSTALL ducklake; INSTALL postgres; LOAD postgres;")
+        .expect("extensions");
+    conn.execute_batch(&format!(
+        "ATTACH 'ducklake:postgres:{}' AS softprobe (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', DATA_INLINING_ROW_LIMIT 0);",
+        metadata_path.replace('\'', "''"),
+        data_path.replace('\'', "''"),
+        metadata_schema.replace('\'', "''"),
+        metadata_schema.replace('\'', "''"),
+    ))
+    .expect("attach");
+    let sql = format!(
+        r#"SELECT count(*) FROM information_schema.columns
+WHERE table_catalog = 'softprobe'
+  AND table_schema = '{metadata_schema}'
+  AND table_name = '{table_name}'
+  AND column_name = '{column}'"#
+    );
+    let n: i64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
+    n > 0
+}
+
 async fn active_telemetry_spec_count(schema: &str) -> i64 {
     let (client, connection) = tokio_postgres::connect(
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
@@ -524,4 +553,109 @@ async fn shrunken_manifest_keeps_ingest_working_with_stale_column_null() {
         values[1], None,
         "stale promoted column must be NULL after manifest shrink"
     );
+}
+
+const BUSINESS_V1: &str = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#;
+
+// Same version + same column with a changed type: must be rejected as incompatible (422).
+const BUSINESS_V1_INCOMPATIBLE: &str = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: string
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#;
+
+// Same version, additive new column: allowed and physically applied.
+const BUSINESS_V1_ADDITIVE: &str = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+  - name: coupon_code
+    type: string
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.coupon
+"#;
+
+#[tokio::test]
+async fn business_apply_enforces_compatibility_and_additive_columns() {
+    let fx = setup_promo_fixture().await;
+
+    let (status1, body1) = apply_manifest(&fx.router, &fx.api_key, BUSINESS_V1).await;
+    assert_eq!(status1, StatusCode::OK, "business v1 apply failed: {body1}");
+    assert!(ducklake_relation_column_exists(
+        &fx.metadata_path,
+        &fx.data_path,
+        &fx.metadata_schema,
+        "checkout_orders_v1",
+        "total_cents"
+    ));
+
+    // Incompatible same-version type change is rejected under the guarded apply path.
+    let (status_bad, body_bad) =
+        apply_manifest(&fx.router, &fx.api_key, BUSINESS_V1_INCOMPATIBLE).await;
+    assert_eq!(
+        status_bad,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "incompatible apply should be 422: {body_bad}"
+    );
+    assert_eq!(body_bad["error"]["code"], "business_column_type_changed");
+
+    // Additive same-version column is applied to the physical table.
+    let (status_add, body_add) = apply_manifest(&fx.router, &fx.api_key, BUSINESS_V1_ADDITIVE).await;
+    assert_eq!(
+        status_add,
+        StatusCode::OK,
+        "additive apply should succeed: {body_add}"
+    );
+    assert!(ducklake_relation_column_exists(
+        &fx.metadata_path,
+        &fx.data_path,
+        &fx.metadata_schema,
+        "checkout_orders_v1",
+        "coupon_code"
+    ));
 }
