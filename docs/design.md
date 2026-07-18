@@ -140,9 +140,23 @@ resource attributes, trace/span correlation, and `record_date`.
 Core columns include metric name, description, unit, type, timestamp, value,
 attributes, resource attributes, and `record_date`.
 
-Promotion manifests can add nullable columns to any telemetry table. Active
-manifests are stored in the tenant's PostgreSQL metadata schema and are applied
-by the promotion workflow, not by process-global YAML.
+## Schema promotion
+
+Promotion is tenant-scoped and applied through authenticated
+`POST /v1/promotions/apply`, not process-global YAML. Active manifests live in
+the tenant PostgreSQL metadata schema (`promotion_specs`). Apply and ingest
+extraction require a PostgreSQL catalog; SQLite local catalogs skip promotion.
+
+- **Telemetry columns:** additive nullable columns on `traces` / `logs` /
+  `metrics`. Future ingest extracts declared sources into those columns;
+  historical rows stay `NULL`.
+- **Business tables:** versioned `<table>_vN` tables plus `<table>_current`
+  views with evidence anchors. Apply provisions schema today; automatic OTLP
+  row materialization is not wired yet.
+
+`sp.*` attributes are an instrumentation convention only. Softprobe does not
+auto-promote them. Canonical contract:
+[`promotion.md`](promotion.md).
 
 ## Query path
 
@@ -225,7 +239,9 @@ Supported direct overrides in `src/config.rs` are `PORT`, `S3_REGION`, and
 - `REDIS_HOST` is required by the main control-plane runtime.
 
 The implemented HTTP routes are exposed by `/openapi.json`; the standalone
-ingestion contract is in [`ingestion-openapi.yaml`](ingestion-openapi.yaml).
+ingestion and promotion contract is in
+[`ingestion-openapi.yaml`](ingestion-openapi.yaml). Promotion semantics are in
+[`promotion.md`](promotion.md).
 
 ## Validation
 

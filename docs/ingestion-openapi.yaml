@@ -10,6 +10,9 @@ info:
     - `POST /v1/logs`
     - `POST /v1/metrics`
 
+    It also documents the tenant-scoped schema promotion endpoint:
+    - `POST /v1/promotions/apply`
+
     For JSON payloads, requests are expected to follow the OpenTelemetry collector export
     request shapes (`ExportTraceServiceRequest`, `ExportLogsServiceRequest`, and
     `ExportMetricsServiceRequest`).
@@ -21,12 +24,20 @@ info:
     - All other content types (including missing header) are treated as JSON.
     - Each accepted request is committed directly to the tenant's DuckLake scope.
     - Durable write failures return HTTP 503 so the exporter can retry.
+
+    Canonical promotion contract (manifest YAML, lifecycle, failure modes):
+    `docs/promotion.md`.
+  externalDocs:
+    description: Softprobe schema promotion guide
+    url: ./promotion.md
 servers:
   - url: http://localhost:8090
     description: Local endpoint from default `config.yaml`
 tags:
   - name: ingestion
     description: OTLP ingestion endpoints
+  - name: promotion
+    description: Tenant-scoped schema promotion
 security:
   - bearerAuth: []
 paths:
@@ -159,6 +170,117 @@ paths:
           description: Request exceeds `server.max_body_size`
         "503":
           $ref: "#/components/responses/IngestUnavailable"
+  /v1/promotions/apply:
+    post:
+      tags:
+        - promotion
+      summary: Apply a tenant-scoped promotion manifest
+      description: |
+        Parses a `softprobe.promotion.v1` YAML manifest, applies DuckLake schema
+        changes for the authenticated tenant, and records the active spec in that
+        tenant's metadata schema.
+
+        Requirements and semantics:
+        - Requires a PostgreSQL DuckLake catalog with a tenant scope registry.
+          SQLite local catalogs return `503 ducklake_connection_unavailable`.
+        - Telemetry-column promotions extract values on subsequent OTLP ingest
+          for that tenant. Historical rows are not backfilled.
+        - Invalid JSON/type conversion during telemetry extraction fails the
+          ingest batch. A corrupt active `promotion_specs` row can also block
+          tenant ingest.
+        - Business-table apply provisions `<table>_vN` + `<table>_current` and
+          records the spec; automatic OTLP row materialization is not wired yet.
+        - Full contract: `docs/promotion.md`.
+      operationId: applyPromotion
+      externalDocs:
+        description: Canonical promotion guide
+        url: ./promotion.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromotionApplyRequest"
+            examples:
+              telemetryColumns:
+                summary: Promote sp.user.id to traces.user_id
+                value:
+                  manifestYaml: |
+                    specVersion: softprobe.promotion.v1
+                    target:
+                      kind: telemetry_columns
+                      tables: [traces]
+                    columns:
+                      - name: user_id
+                        type: string
+                        nullable: true
+                        source:
+                          from: attribute
+                          key: sp.user.id
+              businessTable:
+                summary: Provision a versioned business table
+                value:
+                  manifestYaml: |
+                    specVersion: softprobe.promotion.v1
+                    target:
+                      kind: business_table
+                      table: checkout_orders
+                      version: 1
+                    rowSelector:
+                      attribute:
+                        key: sp.workflow
+                        equals: checkout
+                    columns:
+                      - name: order_id
+                        type: string
+                        nullable: false
+                        source:
+                          from: http_response_body
+                          json_path: $.order.id
+      responses:
+        "200":
+          description: Manifest validated and schema changes applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromotionApplyResponse"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "422":
+          description: Invalid YAML or promotion validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromotionErrorResponse"
+              examples:
+                notNullable:
+                  value:
+                    error:
+                      code: telemetry_column_not_nullable
+                      message: "telemetry_column_not_nullable at columns[0].nullable: telemetry promoted columns must be nullable"
+        "503":
+          description: |
+            Tenant DuckLake registry/scope unavailable or schema apply/record
+            failed. Possible `error.code` values:
+            `ducklake_connection_unavailable`, `ducklake_scope_unavailable`,
+            `promotion_schema_apply_failed`, `promotion_spec_record_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromotionErrorResponse"
+              examples:
+                registryUnavailable:
+                  value:
+                    error:
+                      code: ducklake_connection_unavailable
+                      message: tenant DuckLake resolver is unavailable
+                schemaApplyFailed:
+                  value:
+                    error:
+                      code: promotion_schema_apply_failed
+                      message: "DuckLake DDL failed: ..."
 components:
   securitySchemes:
     bearerAuth:
@@ -220,3 +342,50 @@ components:
         OTLP metrics export request (JSON mapping).
         See OpenTelemetry protocol spec for the canonical schema.
       additionalProperties: true
+    PromotionApplyRequest:
+      type: object
+      required:
+        - manifestYaml
+      properties:
+        manifestYaml:
+          type: string
+          description: |
+            YAML document with `specVersion: softprobe.promotion.v1`.
+            See `docs/promotion.md` for the full manifest contract.
+    PromotionApplyResponse:
+      type: object
+      required:
+        - specVersion
+        - applied
+        - target
+        - schemaChanges
+      properties:
+        specVersion:
+          type: string
+          const: softprobe.promotion.apply.v1
+        applied:
+          type: boolean
+        target:
+          type: object
+          additionalProperties: true
+          description: Applied target summary (`telemetry_columns` or `business_table`).
+        schemaChanges:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    PromotionErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string
