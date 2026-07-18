@@ -1,6 +1,6 @@
 # Grafana Integration Guide
 
-> **Historical / pre-DuckLake.** Prefer querying DuckLake via the runtime or `make duckdb-shell` ([adhoc-duckdb-ducklake.md](adhoc-duckdb-ducklake.md)). `iceberg_scan()` examples below are legacy.
+> **Historical / pre-DuckLake.** Prefer querying DuckLake via the runtime or `make duckdb-shell` ([adhoc-duckdb-ducklake.md](../adhoc-duckdb-ducklake.md)). `iceberg_scan()` examples below are legacy.
 
 This guide shows how to visualize your OTLP telemetry data in Grafana using the **official DuckDB Data Source Plugin**.
 

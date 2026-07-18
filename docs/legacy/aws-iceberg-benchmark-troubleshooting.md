@@ -1,5 +1,8 @@
 # AWS Benchmark Troubleshooting Guide
 
+> **Legacy Iceberg benchmark guide.** It applies to the archived
+> Lakekeeper/Iceberg benchmark stack, not the current DuckLake runtime.
+
 ## Instance Becomes Unresponsive During Benchmark
 
 ### Problem

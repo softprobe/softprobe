@@ -1,5 +1,9 @@
 # DuckLake ingest cleanup (buffer + hollow tiering)
 
+> **Legacy migration record.** The resulting flush-through behavior is
+> documented in [`../design.md`](../design.md). This file preserves the
+> completed cleanup rationale and stress observations.
+
 Status: **done** — flush-through ingest; OTel collector owns batching; catalog concurrency via official DuckLake backends.
 
 ## 1. How often we commit

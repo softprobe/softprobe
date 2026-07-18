@@ -1,10 +1,13 @@
-# OpenTelemetry Instrumentation Guide
+# Softprobe Runtime OpenTelemetry Instrumentation Guide
 
 This guide shows how to instrument your application to capture HTTP bodies and business attributes for storage in the Softprobe OTLP backend.
 
 ## Session wording (read this first)
 
-- **`sp.session.id` on spans** is the **correlation id** the runtime uses for Iceberg partitioning / grouping (it defaults to `trace_id` if unset). Typical production use: **end-user session**, checkout flow, or any stable id you want to query by.
+- **`sp.session.id` on spans** is the **correlation id** stored in the DuckLake
+  `session_id` column (it defaults to `trace_id` if unset). Typical production
+  use: **end-user session**, checkout flow, or any stable id you want to query
+  by.
 - **Control session / test session** is a different object: `sessionId` from `POST /v1/sessions` in the hybrid JSON control API. Hybrid capture/replay sets `x-softprobe-session-id` and the proxy mirrors that into `sp.session.id` on proxy-generated spans so inject/extract hit the same server-side session document.
 
 If documentation mentions “session” without context, check whether it means **control API session** (testing) or **`sp.session.id` / `session_id` column** (telemetry correlation).
@@ -17,11 +20,12 @@ We use two complementary OpenTelemetry features:
 2. **Span Attributes** - For capturing searchable business metadata (user IDs, order IDs, etc.)
 
 This separation provides:
-- **Columnar efficiency**: Parquet doesn't read body columns when querying by attributes
+- **Query efficiency**: metadata queries do not need to select body columns
 - **No attribute limits**: Bodies stored as events avoid the 128 span attribute limit
 - **Semantic clarity**: Events represent "notable moments", attributes represent "searchable metadata"
 
-See [ADR-006](decision_log.md#adr-006-http-bodies-via-span-events-not-span-attributes) for the full decision rationale.
+The original rationale is preserved in the
+[legacy decision log](legacy/decision-log-iceberg-era.md#adr-006-http-bodies-via-span-events-not-span-attributes).
 
 ## HTTP Body Instrumentation Pattern
 
@@ -47,11 +51,11 @@ async function handleRequest(req, res) {
 
       // Business attributes for search (sp.* convention)
       span.setAttribute('sp.user.id', req.body.user.id);
-      span.setAttribute('sp.order.id', orderResult.orderId);
       span.setAttribute('sp.tenant.id', req.headers['x-tenant-id']);
 
       // Process request
       const orderResult = await createOrder(req.body);
+      span.setAttribute('sp.order.id', orderResult.orderId);
 
       // Capture HTTP response data as span event
       span.addEvent('http.response', {
@@ -149,7 +153,7 @@ public class OrderController {
             span.setAttribute("http.request.path", "/api/orders");
 
             // Business attributes for search (sp.* convention)
-            span.setAttribute("sp.user.id", request.getuser.id());
+            span.setAttribute("sp.user.id", request.getUserId());
             span.setAttribute("sp.tenant.id", headers.getFirst("X-Tenant-Id"));
 
             // Process request
@@ -240,9 +244,10 @@ These are automatically extracted and stored in dedicated columns for efficient 
 
 ## Storage Schema
 
-Your instrumentation data is stored in the `traces` Iceberg table with this structure:
+Your instrumentation data is stored in the DuckLake `traces` table with this
+structure:
 
-### Columns Populated from Span Events
+### HTTP columns populated primarily from span events
 
 | Column | Source | Example |
 |--------|--------|---------|
@@ -260,9 +265,25 @@ Your instrumentation data is stored in the `traces` Iceberg table with this stru
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
 | `attributes` | All span attributes (MAP) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
+### HTTP payload fallback
+
+Events are preferred. For compatibility with SDKs and OBI/eBPF telemetry, the
+runtime falls back to span attributes when an event did not provide a value:
+
+- headers: `http.request.headers`, `http.response.headers`
+- bodies: `http.request.body` / `http.response.body`
+- OBI body aliases: `http.request.body.content`,
+  `http.response.body.content`
+
+When both event and span-attribute values exist, the event value wins. For
+body keys within the same source, the shorter key without `.content` wins.
+
 ## Column promotion (runtime-scoped)
 
-Telemetry column promotion is **not** configured via process-global `config.yaml`. Active promotion manifests are stored in Postgres (`promotion_specs` in **this runtime’s** configured DuckLake metadata schema) and applied through the promotion workflow (`softprobe promotion validate` / `apply`). See [`docs/column-promotion.md`](../../docs/column-promotion.md).
+Telemetry column promotion is **not** configured via process-global
+`config.yaml`. Active promotion manifests are stored in Postgres
+(`promotion_specs` in **this runtime’s** configured DuckLake metadata schema)
+and applied through authenticated `POST /v1/promotions/apply`.
 
 ## Querying Your Data
 
@@ -319,9 +340,10 @@ ORDER BY timestamp ASC;
 
 ## Performance Considerations
 
-### Columnar Separation Benefits
+### Column selection
 
-When you query by business attributes, Parquet only reads the `attributes` MAP column, **NOT** the body columns:
+When data is in Parquet, a query by business attributes can read the
+`attributes` MAP without selecting body columns:
 
 ```sql
 -- This query reads ONLY: session_id, trace_id, attributes
@@ -331,14 +353,9 @@ FROM traces
 WHERE attributes['sp.user.id'] = 'user-123';
 ```
 
-This provides significant I/O savings when bodies are large (1KB-100KB+).
-
-### Compression
-
-HTTP bodies are stored as STRING columns compressed with ZSTD level 3, providing:
-- 5-10x compression ratio for JSON payloads
-- Fast decompression for reads
-- Low CPU overhead during ingestion
+This reduces object-store I/O when bodies are large. DuckLake may instead keep
+small committed batches inline in its metadata catalog, depending on
+`ducklake.data_inlining_row_limit`.
 
 ## Best Practices
 
@@ -351,7 +368,8 @@ span.addEvent('http.request', {
 });
 span.setAttribute('sp.user.id', body.user.id);
 
-// ❌ BAD: Bodies in attributes (hits 128 attribute limit)
+// ⚠️ COMPATIBILITY FALLBACK: accepted by the runtime, but events are preferred
+// because large bodies consume the span attribute budget.
 span.setAttribute('http.request.body', JSON.stringify(body));
 ```
 
@@ -394,13 +412,13 @@ span.setAttribute('sp.session.id', sessionId);
 
 ## Next Steps
 
-1. **Validate Instrumentation**: Use the OTLP endpoint at `http://localhost:8080/v1/traces` to test your instrumentation
-2. **Query Your Data**: Use DuckDB or Iceberg-compatible query engines to explore stored traces
-3. **Create Custom Views**: Build industry-specific wide tables for your use case (see [Storage Design](storage_design.md))
+1. **Validate Instrumentation**: Use the OTLP endpoint at `http://localhost:8090/v1/traces`.
+2. **Query Your Data**: Use the runtime telemetry APIs or DuckDB attached to the same DuckLake scope.
+3. **Promote important fields**: Use the tenant-scoped promotion workflow when a business attribute needs a dedicated column.
 
 ## Support
 
 For questions or issues:
-- Review [ADR-006](decision_log.md#adr-006-http-bodies-via-span-events-not-span-attributes) for design rationale
-- Check [Design Doc](design.md) for architecture overview
-- See [Storage Design](storage_design.md) for advanced querying patterns
+- Check the [current design](design.md) for the runtime architecture.
+- See [ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md) for local SQL access.
+- Review the [legacy ADR-006](legacy/decision-log-iceberg-era.md#adr-006-http-bodies-via-span-events-not-span-attributes) for the original event-versus-attribute rationale.

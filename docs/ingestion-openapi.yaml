@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Datalake Ingestion API
+  title: Softprobe Runtime Ingestion API
   version: 0.1.0
   description: |
-    OTLP-compatible ingestion API exposed by the Datalake service.
+    Authenticated OTLP-compatible ingestion API exposed by softprobe-runtime.
 
     This API accepts telemetry payloads on standard OTLP HTTP paths:
     - `POST /v1/traces`
@@ -19,12 +19,16 @@ info:
     Content type behavior mirrors implementation:
     - Any `Content-Type` containing `protobuf` is treated as protobuf.
     - All other content types (including missing header) are treated as JSON.
+    - Each accepted request is committed directly to the tenant's DuckLake scope.
+    - Durable write failures return HTTP 503 so the exporter can retry.
 servers:
   - url: http://localhost:8090
     description: Local endpoint from default `config.yaml`
 tags:
   - name: ingestion
     description: OTLP ingestion endpoints
+security:
+  - bearerAuth: []
 paths:
   /v1/traces:
     post:
@@ -61,6 +65,14 @@ paths:
                   value: Invalid JSON
                 invalidProtobuf:
                   value: Protobuf decode failed
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "413":
+          description: Request exceeds `server.max_body_size`
+        "503":
+          $ref: "#/components/responses/IngestUnavailable"
   /v1/logs:
     post:
       tags:
@@ -96,6 +108,14 @@ paths:
                   value: "Invalid JSON: expected value at line 1 column 1"
                 invalidProtobuf:
                   value: Protobuf decode failed
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "413":
+          description: Request exceeds `server.max_body_size`
+        "503":
+          $ref: "#/components/responses/IngestUnavailable"
   /v1/metrics:
     post:
       tags:
@@ -131,7 +151,30 @@ paths:
                   value: Invalid JSON
                 invalidProtobuf:
                   value: Invalid protobuf
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "413":
+          description: Request exceeds `server.max_body_size`
+        "503":
+          $ref: "#/components/responses/IngestUnavailable"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    IngestUnavailable:
+      description: DuckLake commit failed after backend retries; exporter should retry
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IngestResponse"
+          example:
+            success: false
+            ingested_count: 0
+            message: "Ingestion failed: DuckLake write failed"
   schemas:
     IngestResponse:
       type: object

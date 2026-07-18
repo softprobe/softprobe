@@ -1,6 +1,8 @@
 # Ad hoc DuckDB queries against DuckLake (optional)
 
-Committed telemetry lives in **DuckLake** (Postgres/SQLite metadata + object-store `data_path`). End-to-end verification is automated by `make test-local` (in `softprobe-runtime`) / repo root **`make test`**, and `tests/integration/storage_contract_validation.rs`.
+Committed telemetry lives in **DuckLake** (PostgreSQL/SQLite metadata plus the
+configured `data_path`). End-to-end verification is automated by repository
+root **`make test`**.
 
 ## Same scope as the runtime (multi-tenant / per-config)
 
@@ -17,7 +19,7 @@ If `CONFIG_FILE` is wrong, you will ATTACH to an empty or wrong schema and see n
 ## Interactive CLI
 
 ```bash
-cd softprobe-runtime
+# From the thelake repository root
 make duckdb-shell
 ```
 

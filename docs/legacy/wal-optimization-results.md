@@ -1,5 +1,9 @@
 # WAL Small-File Performance Optimization - Results
 
+> **Legacy benchmark record.** The application WAL described here was later
+> removed. Current ingest writes through directly to DuckLake; see
+> [`../design.md`](../design.md).
+
 ## Problem Identified
 
 The performance stress test revealed a critical design flaw in the WAL (Write-Ahead Log) implementation:
@@ -26,21 +30,21 @@ DIAG execute_query: 23.380s total
 ## Solution Implemented
 
 ### 1. Add WAL Buffering (Root Cause Fix)
-**Changed**: [`src/ingest_engine/mod.rs`](../src/ingest_engine/mod.rs)
+**Changed**: [`src/ingest_engine/mod.rs`](../../src/ingest_engine/mod.rs)
 
 - Removed WAL writes from `pre_add_callback` (per-request)
 - Added WAL writes to `flush_callback` (batched every 1s or 1MB)
 - **Impact**: Reduces file creation from 180K/hour to 3.6K/hour (50x improvement)
 
 ### 2. Add WAL Cleanup
-**Changed**: [`src/ingest_engine/mod.rs`](../src/ingest_engine/mod.rs)
+**Changed**: [`src/ingest_engine/mod.rs`](../../src/ingest_engine/mod.rs)
 
 - Added `cleanup_old_wal_files()` to delete files older than watermark
 - Called automatically after `update_wal_watermark()`
 - **Impact**: WAL directory stays clean with only recent uncommitted data
 
 ### 3. Optimize Directory Scans
-**Changed**: [`src/query/duckdb.rs`](../src/query/duckdb.rs)
+**Changed**: [`src/query/duckdb.rs`](../../src/query/duckdb.rs)
 
 - Skip expensive directory scan if manifest is fresh (<10s old)
 - Avoids scanning 100K+ files on every query

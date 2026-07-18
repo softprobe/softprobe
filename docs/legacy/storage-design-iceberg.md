@@ -1,12 +1,15 @@
 # HTTP Body Storage & Business Attribute Indexing Design
 
-> **Historical / pre-DuckLake.** Runtime durable storage is DuckLake. See [iceberg-legacy-cleanup.md](iceberg-legacy-cleanup.md) and ADR-014 in [decision_log.md](decision_log.md). Iceberg-foundation sections below are retained for history.
+> **Historical / pre-DuckLake.** Runtime durable storage is DuckLake. See
+> [the current design](../design.md) and
+> [current ADR-014](../decision_log.md#adr-014-ducklake-is-the-only-runtime-table-format).
+> Iceberg-foundation sections below are retained for history.
 
 **Date**: 2025-12-31
 **Status**: Historical (brainstorming / design discussion)
 **Purpose**: Explore options for storing HTTP request/response bodies and enabling efficient search by business attributes
 
-> **Strategic Context**: This design directly supports [Softprobe's business vision](goals.md) of building an AI-ready enterprise data lake. HTTP body storage is **Phase 1** of our broader strategy to capture all business data for LLM-based AI agents.
+> **Strategic Context**: This design directly supports [Softprobe's business vision](goals-2025-iceberg.md) of building an AI-ready enterprise data lake. HTTP body storage is **Phase 1** of our broader strategy to capture all business data for LLM-based AI agents.
 
 ---
 
@@ -955,8 +958,8 @@ traces (
 ## References
 
 ### Internal Documentation
-- **[Softprobe Strategic Goals](goals.md)** - Business vision and long-term roadmap
-- **[Technical Design](design.md)** - Overall architecture and implementation
+- **[Softprobe Strategic Goals](goals-2025-iceberg.md)** - Business vision and long-term roadmap
+- **[Technical Design](design-iceberg-buffer-wal.md)** - Overall architecture and implementation
 
 ### External Research
 - [Observe + Snowflake Architecture](https://www.observeinc.com/blog/observe-o2-architecture)

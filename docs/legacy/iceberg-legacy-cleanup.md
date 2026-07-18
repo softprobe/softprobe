@@ -1,14 +1,23 @@
 # Iceberg Legacy Cleanup
 
+> **Legacy migration record.** This inventory captured the tree before the
+> cleanup phases completed. Present-tense statements below describe that
+> historical snapshot and are not current implementation guidance. See
+> [`../design.md`](../design.md) for the current architecture.
+
 **Date**: 2026-07-16  
 **Status**: Done (Phases A–E implemented)  
-**Context**: The runtime write and query path for committed telemetry is **DuckLake** (Postgres/SQLite metadata + object-store `data_path`). Apache Iceberg (REST catalog / Lakekeeper / `iceberg-rust`) remains as a large leftover footprint from the pre-migration stack.
+**Historical context**: At the time of this inventory, the runtime write and
+query path had moved to **DuckLake**, while Apache Iceberg REST catalog,
+Lakekeeper, and `iceberg-rust` remnants still existed in the tree.
 
-This document inventories that footprint and proposes phased cleanup. It is not an OpenSpec change proposal; use it as the source list when filing follow-up PRs or an OpenSpec change.
+This file preserves the inventory and proposed sequence used during the
+completed cleanup. It is historical evidence only; do not use it to open new
+cleanup work or infer the current tree.
 
 ---
 
-## Current architecture (truth)
+## Historical pre-cleanup inventory (not current truth)
 
 | Layer | Active path | Legacy path still in tree |
 | --- | --- | --- |
@@ -204,60 +213,60 @@ Still defines:
 
 ---
 
-## 5. Documentation drift
+## 5. Documentation drift found at the time
 
-These docs still describe Iceberg as the primary store (misleading for newcomers):
+The pre-cleanup audit found Iceberg-primary material in the root README,
+design, goals, storage design, decision log, Grafana guide, and cloud benchmark
+guides.
 
-| Doc | Issue |
-| --- | --- |
-| `docs/design.md` | Title and architecture: “Apache Iceberg Storage” |
-| `docs/goals.md` | Positioning tables list Iceberg; OpenSpec link to Iceberg migration |
-| `docs/storage_design.md` | Large “Is Iceberg the Right Foundation?” section |
-| `docs/decision_log.md` | ADR-001 Accepted Iceberg — needs **Superseded by DuckLake** entry |
-| `docs/grafana.md` | DuckDB → `iceberg_scan()` diagrams and SQL |
-| `docs/aws_benchmark_guide.md` / `gcs_benchmark_guide.md` | Lakekeeper-centric topology |
-| `README.md` | Points at missing/legacy `migration-to-iceberg-design.md` |
+That documentation migration is now closed:
 
-**Keep as historical** (with status banners) or update in place. Prefer adding an ADR: “DuckLake supersedes Iceberg for Softprobe runtime storage” rather than rewriting every paragraph on day one.
-
-Canonical current how-to for ad hoc SQL: `docs/adhoc-duckdb-ducklake.md`.
+- current runtime truth is [`../design.md`](../design.md);
+- current decisions are in [`../decision_log.md`](../decision_log.md);
+- current ad hoc SQL guidance is
+  [`../adhoc-duckdb-ducklake.md`](../adhoc-duckdb-ducklake.md);
+- superseded Iceberg, buffering, WAL, Grafana, benchmark, and migration
+  documents are retained in this `legacy/` directory.
 
 ---
 
-## 6. Suggested cleanup phases
+## 6. Historical proposed cleanup phases
+
+The bullets below preserve the original proposed sequencing. They are not a
+live checklist or a description of the current tree.
 
 ### Phase A — Stop the bleeding (low risk)
 
-- [ ] Ban new Iceberg-only APIs; document DuckLake as the only write path (this doc).
-- [ ] Fix misleading comments in `storage/mod.rs`, models, Cargo package description.
-- [ ] Mark ADR-001 superseded; add short DuckLake ADR pointing here.
-- [ ] Banner outdated docs (`design.md`, `grafana.md`) with “historical / pre-DuckLake”.
+- Ban new Iceberg-only APIs; document DuckLake as the only write path.
+- Fix misleading comments in `storage/mod.rs`, models, Cargo package description.
+- Mark ADR-001 superseded; add a DuckLake ADR.
+- Banner outdated docs (`design.md`, `grafana.md`) with “historical / pre-DuckLake”.
 
 ### Phase B — Delete unreachable Iceberg write path (medium)
 
-- [ ] Delete Iceberg-only integration tests / skip branches.
-- [ ] Remove `IcebergWriter`, `writer.rs`, `catalog.rs` once unreferenced.
-- [ ] Remove Lakekeeper from `docker-compose.yml` and AWS benchmark Lakekeeper deploy.
-- [ ] Drop `iceberg:` from default test YAML; stop deriving WAL bucket from Iceberg warehouse.
+- Delete Iceberg-only integration tests / skip branches.
+- Remove `IcebergWriter`, `writer.rs`, `catalog.rs` once unreferenced.
+- Remove Lakekeeper from `docker-compose.yml` and AWS benchmark Lakekeeper deploy.
+- Drop `iceberg:` from default test YAML; stop deriving WAL bucket from Iceberg warehouse.
 
 ### Phase C — Query + maintenance simplification (medium–high)
 
-- [ ] Delete Iceberg ATTACH / `iceberg_scan` / pinned-metadata code in `duckdb.rs`.
-- [ ] Delete Iceberg branch of `MaintenanceExecutor`.
-- [ ] Remove `INSTALL iceberg` from session init if unused.
-- [ ] Rename `iceberg_metadata` cache directory and `iceberg_*` SQL aliases.
+- Delete Iceberg ATTACH / `iceberg_scan` / pinned-metadata code in `duckdb.rs`.
+- Delete Iceberg branch of `MaintenanceExecutor`.
+- Remove `INSTALL iceberg` from session init if unused.
+- Rename `iceberg_metadata` cache directory and `iceberg_*` SQL aliases.
 
 ### Phase D — Schema decoupling + dependency removal (highest leverage)
 
-- [ ] Extract telemetry schema + Arrow conversion out of `iceberg::spec`.
-- [ ] Remove `IcebergConfig` from `Config`.
-- [ ] Remove Cargo feature `iceberg_catalog` and crates `iceberg`, `iceberg-catalog-rest`.
-- [ ] Update CI / Makefile env vars and rename `tests/integration/iceberg*`.
+- Extract telemetry schema + Arrow conversion out of `iceberg::spec`.
+- Remove `IcebergConfig` from `Config`.
+- Remove Cargo feature `iceberg_catalog` and crates `iceberg`, `iceberg-catalog-rest`.
+- Update CI / Makefile env vars and rename `tests/integration/iceberg*`.
 
 ### Phase E — Doc & script finish
 
-- [ ] Rewrite or archive Iceberg-centric guides; align Grafana / manual test SQL with DuckLake.
-- [ ] Clean `scripts/TEST_RESULTS.md` and legacy fixture names.
+- Rewrite or archive Iceberg-centric guides; align Grafana / manual test SQL with DuckLake.
+- Clean `scripts/TEST_RESULTS.md` and legacy fixture names.
 
 **Quality gates:** every phase PR must satisfy [§9](#9-quality-gates-for-the-cleanup) before merge.
 
@@ -300,13 +309,13 @@ Cleanup will span multiple PRs. Each phase must pass the gates below before merg
 Do not rely on “it compiles” alone — DuckLake attach, MinIO, and Postgres-catalog
 paths fail in ways unit tests miss.
 
-### 9.1 Local end-to-end environment (exists today)
+### 9.1 Local end-to-end environment at inventory time
 
 | Component | How to start | Needed for |
 | --- | --- | --- |
 | MinIO (`:9000`, bucket `warehouse`) | `make setup-local` or `make setup-minio` | Almost all `integration-e2e` tests (`check-local`) |
 | DuckLake Postgres (`localhost:5432`, db/user `ducklake`) | `make setup-local` | Tenant registry, OTLP isolation, promotion DDL/metadata tests |
-| Lakekeeper (`:8181`) | Still in `docker-compose.yml` | **Not required** for current DuckLake e2e; remove in Phase B |
+| Lakekeeper (`:8181`) | Was still in `docker-compose.yml` | **Not required** for DuckLake e2e; proposed for removal in Phase B |
 
 ```bash
 make setup-local          # MinIO + ducklake-postgres
@@ -321,7 +330,7 @@ make lint && make check-fmt
 Automated DuckLake shape checks live in
 `tests/integration/storage_contract_validation.rs`
 (replaces removed `verify_e2e.sh` / Iceberg SQL scripts).
-Ad hoc SQL: [adhoc-duckdb-ducklake.md](adhoc-duckdb-ducklake.md) / `make duckdb-shell`.
+Ad hoc SQL: [adhoc-duckdb-ducklake.md](../adhoc-duckdb-ducklake.md) / `make duckdb-shell`.
 
 **Note:** `make test-local` sets `ICEBERG_TEST_TYPE=local` for historical reasons;
 backend under test is DuckLake + MinIO. Rename env vars in Phase D, not as a gate blocker.
@@ -392,6 +401,6 @@ Keep these green; if a test is deleted as Iceberg-only, **replace** with a DuckL
 
 ## Related docs
 
-- [Ad hoc DuckDB / DuckLake](adhoc-duckdb-ducklake.md) — current query CLI path
-- [Decision log](decision_log.md) — ADR-001 Iceberg (to be superseded)
-- [Storage design](storage_design.md) — pre-migration Iceberg analysis (historical)
+- [Ad hoc DuckDB / DuckLake](../adhoc-duckdb-ducklake.md) — current query CLI path
+- [Legacy decision log](decision-log-iceberg-era.md) — superseded ADR-001 Iceberg
+- [Storage design](storage-design-iceberg.md) — pre-migration Iceberg analysis (historical)
