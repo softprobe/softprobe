@@ -73,3 +73,17 @@ or DuckLake scope after binding.
 
 For PostgreSQL catalogs, store each tenant's metadata schema and data path in
 the durable scope registry.
+
+## Current invariant: explicit business attributes and tenant promotion
+
+Business identifiers use an application-owned `sp.*` attribute convention.
+Softprobe does not invent or auto-promote those keys.
+
+Schema promotion is tenant-scoped:
+
+- apply manifests with authenticated `POST /v1/promotions/apply`;
+- store active specs in the tenant metadata schema (`promotion_specs`);
+- add only nullable telemetry columns, extracted on **future** ingest;
+- do not configure promotion through process-global `config.yaml`.
+
+Canonical contract: [`promotion.md`](promotion.md).

@@ -135,8 +135,9 @@ captures, promotions, and dropdown catalog lookups. `/v1/*` operational routes
 require bearer authentication; tenant provisioning validates its admin bearer
 inside the handler.
 
-The focused ingestion contract is
-[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml).
+The focused ingestion and promotion HTTP contract is
+[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml). Schema promotion
+semantics are in [`docs/promotion.md`](docs/promotion.md).
 
 ## Query DuckLake locally
 
@@ -148,13 +149,17 @@ This renders the configured DuckLake ATTACH statement, performs a `SELECT 1`
 smoke, and starts DuckDB. See
 [`docs/adhoc-duckdb-ducklake.md`](docs/adhoc-duckdb-ducklake.md).
 
-## Instrumentation
+## Instrumentation and promotion
 
 HTTP bodies are captured from `http.request` and `http.response` span events.
 When those event fields are absent, the runtime accepts equivalent span
-attributes, including OBI `.content` body keys. Business identifiers use
-searchable `sp.*` span attributes. See
-[`docs/instrumentation_guide.md`](docs/instrumentation_guide.md).
+attributes, including OBI `.content` body keys. Business identifiers are
+explicit searchable `sp.*` span attributes set by the application — Softprobe
+does not invent them.
+
+- Instrumentation: [`docs/instrumentation_guide.md`](docs/instrumentation_guide.md)
+- Schema promotion (explicit manifests for declared `sp.*` and other sources):
+  [`docs/promotion.md`](docs/promotion.md)
 
 ## Maintenance
 

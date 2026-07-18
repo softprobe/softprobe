@@ -383,6 +383,9 @@ SORT BY (session_id, trace_id, timestamp)
    - But start simple and validate performance first
 
 5. **Schema Promotion**: User-defined attribute promotion to top-level columns
+   - **Superseded:** current contract is [`../promotion.md`](../promotion.md)
+     (`POST /v1/promotions/apply`, no process-global auto-type config).
+   - Historical note below retained for Iceberg-era context only:
    - Configure specific attributes to be promoted from `attributes` or `resource_attributes` MAP to top-level columns
    - Enables direct SQL queries: `WHERE user_id = '123'` instead of `WHERE attributes['user.id'] = '123'`
    - Supports auto-type detection (STRING, INT, DOUBLE, BOOLEAN) or explicit type specification

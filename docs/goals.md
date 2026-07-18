@@ -41,7 +41,10 @@ with SQL.
 
 6. **Schema evolution without parallel storage paths**
    - Keep canonical trace, log, and metric schemas in one shared module.
-   - Add tenant-scoped nullable columns through promotion manifests.
+   - Add tenant-scoped nullable columns through promotion manifests
+     (`POST /v1/promotions/apply`).
+   - Keep `sp.*` as an explicit instrumentation convention; promote only the
+     fields a tenant declares.
 
 ## Non-goals
 
@@ -56,5 +59,6 @@ with SQL.
 - [Current architecture](design.md)
 - [Current architecture decisions](decision_log.md)
 - [Instrumentation guide](instrumentation_guide.md)
+- [Schema promotion](promotion.md)
 - [Ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md)
 - [Legacy documentation](legacy/README.md)

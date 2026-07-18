@@ -49,7 +49,7 @@ async function handleRequest(req, res) {
       span.setAttribute('http.request.method', 'POST');
       span.setAttribute('http.request.path', '/api/orders');
 
-      // Business attributes for search (sp.* convention)
+      // Explicit business attributes for search (sp.* convention; not automatic)
       span.setAttribute('sp.user.id', req.body.user.id);
       span.setAttribute('sp.tenant.id', req.headers['x-tenant-id']);
 
@@ -99,7 +99,7 @@ def handle_request(request):
         span.set_attribute("http.request.method", "POST")
         span.set_attribute("http.request.path", "/api/orders")
 
-        # Business attributes for search (sp.* convention)
+        # Explicit business attributes for search (sp.* convention; not automatic)
         span.set_attribute("sp.user.id", request.json["user.id"])
         span.set_attribute("sp.tenant.id", request.headers.get("X-Tenant-Id"))
 
@@ -107,7 +107,7 @@ def handle_request(request):
             # Process request
             order_result = create_order(request.json)
 
-            # Business attribute from result
+            # Explicit business attribute from result
             span.set_attribute("sp.order.id", order_result["orderId"])
 
             # Capture HTTP response data as span event
@@ -152,14 +152,14 @@ public class OrderController {
             span.setAttribute("http.request.method", "POST");
             span.setAttribute("http.request.path", "/api/orders");
 
-            // Business attributes for search (sp.* convention)
+            // Explicit business attributes for search (sp.* convention; not automatic)
             span.setAttribute("sp.user.id", request.getUserId());
             span.setAttribute("sp.tenant.id", headers.getFirst("X-Tenant-Id"));
 
             // Process request
             OrderResponse orderResult = orderService.createOrder(request);
 
-            // Business attribute from result
+            // Explicit business attribute from result
             span.setAttribute("sp.order.id", orderResult.getOrderId());
 
             // Capture HTTP response data as span event
@@ -186,45 +186,39 @@ public class OrderController {
 
 ## Business Attribute Convention: `sp.*` Namespace
 
-Use the `sp.*` prefix for all business-specific attributes that you want to query on:
+A **business attribute** is application-domain metadata you want to search or
+correlate on later (user id, order id, booking reference, workflow name). Softprobe
+does **not** invent these fields. Your application must set them explicitly on
+the span (or log/metric attributes).
 
-### Common Patterns
+Use the `sp.*` prefix for Softprobe-specific business keys:
 
 ```javascript
-// User identification
+// Explicit application instrumentation — nothing here is automatic
 span.setAttribute('sp.user.id', 'user-123');
 span.setAttribute('sp.user.email', 'user@example.com');
-
-// Order/transaction tracking
 span.setAttribute('sp.order.id', 'ORD-456');
 span.setAttribute('sp.transaction.id', 'TXN-789');
-
-// Multi-tenancy
 span.setAttribute('sp.tenant.id', 'tenant-abc');
 span.setAttribute('sp.organization.id', 'org-xyz');
-
-// Session tracking
 span.setAttribute('sp.session.id', 'sess-12345');
-
-// Travel industry
 span.setAttribute('sp.pnr', 'ABC123');
 span.setAttribute('sp.booking.reference', 'BK-456');
-
-// E-commerce
 span.setAttribute('sp.cart.id', 'cart-789');
 span.setAttribute('sp.product.sku', 'PROD-001');
-
-// SaaS applications
 span.setAttribute('sp.workspace.id', 'ws-123');
 span.setAttribute('sp.project.id', 'proj-456');
 ```
 
 ### Why `sp.*`?
 
-The `sp.` prefix stands for "Softprobe" and ensures:
-- No conflicts with OpenTelemetry semantic conventions
-- Clear separation from standard attributes (`http.*`, `db.*`, etc.)
-- Easy identification of business-specific searchable fields
+- Avoids collisions with OpenTelemetry semantic conventions (`http.*`, `db.*`, …)
+- Makes Softprobe business keys easy to spot in the `attributes` MAP
+- Gives promotion manifests a stable key to extract into typed columns
+
+`sp.*` is only a naming convention. Softprobe stores these keys in
+`attributes` like any other attribute. Promoting them to dedicated columns is a
+separate, explicit step — see [`promotion.md`](promotion.md).
 
 ## Standard HTTP Attributes
 
@@ -280,10 +274,20 @@ body keys within the same source, the shorter key without `.content` wins.
 
 ## Column promotion (runtime-scoped)
 
-Telemetry column promotion is **not** configured via process-global
-`config.yaml`. Active promotion manifests are stored in Postgres
-(`promotion_specs` in **this runtime’s** configured DuckLake metadata schema)
-and applied through authenticated `POST /v1/promotions/apply`.
+After you emit business attributes, you can promote selected keys to dedicated
+typed SQL columns for that tenant. Promotion is **not** configured in
+process-global `config.yaml`.
+
+Canonical contract (manifests, apply API, lifecycle, failure modes):
+[`promotion.md`](promotion.md).
+
+Summary:
+
+1. Instrument attributes such as `sp.user.id`.
+2. Apply a `softprobe.promotion.v1` manifest with
+   `POST /v1/promotions/apply`.
+3. New ingest writes the promoted column; historical rows stay `NULL`.
+4. Query either `attributes['sp.user.id']` or the promoted column name.
 
 ## Querying Your Data
 
@@ -297,13 +301,8 @@ WHERE attributes['sp.user.id'] = 'user-123'
 ORDER BY timestamp DESC;
 ```
 
-**Using promoted column** (if configured):
-```sql
-SELECT session_id, trace_id, span_id, timestamp, http_request_path
-FROM traces
-WHERE user_id = 'user-123'
-ORDER BY timestamp DESC;
-```
+**Using a promoted column** only after an explicit telemetry promotion creates
+that column (example SQL and manifests in [`promotion.md`](promotion.md)).
 
 ### Find Orders with Request Bodies
 
@@ -414,11 +413,13 @@ span.setAttribute('sp.session.id', sessionId);
 
 1. **Validate Instrumentation**: Use the OTLP endpoint at `http://localhost:8090/v1/traces`.
 2. **Query Your Data**: Use the runtime telemetry APIs or DuckDB attached to the same DuckLake scope.
-3. **Promote important fields**: Use the tenant-scoped promotion workflow when a business attribute needs a dedicated column.
+3. **Promote important fields**: Follow [`promotion.md`](promotion.md) when a
+   business attribute needs a dedicated column.
 
 ## Support
 
 For questions or issues:
 - Check the [current design](design.md) for the runtime architecture.
+- See [schema promotion](promotion.md) for `sp.*`, manifests, and apply API.
 - See [ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md) for local SQL access.
 - Review the [legacy ADR-006](legacy/decision-log-iceberg-era.md#adr-006-http-bodies-via-span-events-not-span-attributes) for the original event-versus-attribute rationale.
