@@ -140,6 +140,13 @@ resource attributes, trace/span correlation, and `record_date`.
 Core columns include metric name, description, unit, type, timestamp, value,
 attributes, resource attributes, and `record_date`.
 
+### `scores`
+
+Immutable LLM evaluation records are stored separately from spans because an
+evaluation commonly arrives after the observed work. A score targets at least
+one trace, span, or session and contains one typed numeric, categorical,
+boolean, or text value. `score_id` is the tenant-local idempotency key.
+
 ## Schema promotion
 
 Promotion is tenant-scoped and applied through authenticated

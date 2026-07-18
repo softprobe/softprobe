@@ -139,6 +139,66 @@ async fn unit_health_ready_traces_logs_metrics_query() {
 }
 
 #[tokio::test]
+async fn unit_score_create_is_validated_and_idempotent() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+    let body = json!({
+        "score_id": "score-unit-1",
+        "timestamp": "2026-07-18T23:22:00Z",
+        "trace_id": "trace-unit-1",
+        "span_id": null,
+        "session_id": null,
+        "name": "correctness",
+        "data_type": "numeric",
+        "numeric_value": 0.9,
+        "string_value": null,
+        "boolean_value": null,
+        "source": "evaluator",
+        "metadata": { "evaluator": "unit-test" }
+    })
+    .to_string();
+
+    let create = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/llm/scores")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    let first = router
+        .clone()
+        .oneshot(create())
+        .await
+        .expect("first score request");
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let retry = router.clone().oneshot(create()).await.expect("score retry");
+    assert_eq!(retry.status(), StatusCode::OK);
+
+    let invalid = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "score_id": "score-unit-invalid",
+                "timestamp": "2026-07-18T23:22:00Z",
+                "name": "correctness",
+                "data_type": "numeric",
+                "numeric_value": 0.9,
+                "source": "evaluator"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let invalid_response = router
+        .oneshot(invalid)
+        .await
+        .expect("invalid score request");
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn unit_openapi_and_swagger_endpoints_are_served() {
     let (router, _state, _t) = local_router_and_state().await.expect("router");
 
@@ -153,6 +213,21 @@ async fn unit_openapi_and_swagger_endpoints_are_served() {
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()),
         Some("application/json")
+    );
+    let openapi_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("openapi body");
+    let openapi: serde_json::Value =
+        serde_json::from_slice(&openapi_body).expect("valid openapi json");
+    let score_post = &openapi["paths"]["/v1/llm/scores"]["post"];
+    assert_eq!(score_post["operationId"], "createScore");
+    assert_eq!(
+        score_post["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/CreateScoreRequest"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["CreateScoreRequest"]["properties"]["data_type"]["enum"],
+        json!(["numeric", "categorical", "boolean", "text"])
     );
 
     let req = Request::builder()

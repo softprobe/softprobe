@@ -129,6 +129,10 @@ OTLP ingestion:
 - `POST /v1/logs`
 - `POST /v1/metrics`
 
+LLM evaluation:
+
+- `POST /v1/llm/scores`
+
 Query and telemetry:
 
 - `POST /v1/query/sql` (internal/debug SQL surface)

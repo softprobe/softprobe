@@ -8,7 +8,7 @@
 mod promotion_store;
 
 use crate::config::{Config, DuckLakeConfig};
-use crate::models::{Log, Metric, Span};
+use crate::models::{Log, Metric, Score, Span};
 use crate::promotion::{
     business_spec_activation, business_table_create_ddls, extract_telemetry_promoted_value,
     run_business_apply, run_telemetry_apply, telemetry_column_add_ddls, telemetry_spec_activation,
@@ -17,7 +17,7 @@ use crate::promotion::{
 };
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::arrow;
-use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
+use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, ScoreTable, TraceTable};
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
@@ -434,6 +434,67 @@ impl DuckLakeWriter {
             self.write_record_batches_internal("traces", record_batches)
                 .await
         }
+    }
+
+    pub async fn write_score_batches(&self, batches: Vec<Vec<Score>>) -> Result<()> {
+        let scores: Vec<Score> = batches.into_iter().flatten().collect();
+        if scores.is_empty() {
+            return Ok(());
+        }
+        for score in &scores {
+            score
+                .validate()
+                .map_err(|message| anyhow!("invalid score: {message}"))?;
+        }
+
+        let schema = ScoreTable::schema();
+        let record_batch = arrow::scores_to_record_batch(&scores, &schema)?;
+        if self.use_tenant_scoped_ducklake() {
+            let scope = self
+                .tenant_bound_scope()
+                .ok_or_else(|| anyhow!("score writes require a tenant-bound DuckLake writer"))?;
+            let dk = self.effective_ducklake(&scope);
+            return self
+                .write_record_batches_internal_with_ducklake(
+                    &dk,
+                    ScoreTable::table_name(),
+                    vec![record_batch],
+                )
+                .await;
+        }
+
+        self.write_record_batches_internal(ScoreTable::table_name(), vec![record_batch])
+            .await
+    }
+
+    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
+        let dk = if self.use_tenant_scoped_ducklake() {
+            let scope = self
+                .tenant_bound_scope()
+                .ok_or_else(|| anyhow!("score lookup requires a tenant-bound DuckLake writer"))?;
+            self.effective_ducklake(&scope)
+        } else {
+            self.ducklake.clone()
+        };
+        let candidates = self.table_name_candidates_for(ScoreTable::table_name(), &dk);
+        let pool = self.get_or_create_pool(&dk)?;
+        let score_id = score_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            pool.with_conn(|conn| {
+                for table in candidates {
+                    let sql =
+                        format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? LIMIT 1)");
+                    match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
+                        Ok(exists) => return Ok(exists),
+                        Err(error) if error.to_string().contains("does not exist") => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(false)
+            })
+        })
+        .await
+        .map_err(|error| anyhow!("DuckLake score lookup task failed: {error}"))?
     }
 
     async fn write_tenant_log_batches(
@@ -908,6 +969,7 @@ impl DuckLakeWriter {
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
         let candidates = self.table_name_candidates_for(table_name, dk);
         let order_clause = self.insert_order_clause(table_name);
+        let deduplicate_scores = table_name == ScoreTable::table_name();
         let option_stmts: Vec<String> = candidates
             .iter()
             .flat_map(|qualified_table| {
@@ -939,12 +1001,27 @@ impl DuckLakeWriter {
                     // BY NAME keeps ingest shrink-safe: physical promoted columns absent from the
                     // active manifest (and thus from this Parquet batch) are filled with NULL
                     // instead of failing a positional column-count match.
-                    let insert = format!(
-                        "INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}') {order_clause};",
-                        table = qualified_table,
-                        path = escaped_path,
-                        order_clause = order_clause,
-                    );
+                    let insert = if deduplicate_scores {
+                        format!(
+                            "INSERT INTO {table} BY NAME
+                             SELECT incoming.* FROM read_parquet('{path}') incoming
+                             WHERE NOT EXISTS (
+                               SELECT 1 FROM {table} existing
+                               WHERE existing.score_id = incoming.score_id
+                             )
+                             {order_clause};",
+                            table = qualified_table,
+                            path = escaped_path,
+                            order_clause = order_clause,
+                        )
+                    } else {
+                        format!(
+                            "INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}') {order_clause};",
+                            table = qualified_table,
+                            path = escaped_path,
+                            order_clause = order_clause,
+                        )
+                    };
                     conn.execute_batch("BEGIN TRANSACTION;")?;
                     match conn
                         .execute_batch(&ddl)
@@ -1145,12 +1222,13 @@ impl DuckLakeWriter {
             "traces" => "ORDER BY record_date, app_id, session_id, timestamp",
             "logs" => "ORDER BY record_date, session_id, timestamp",
             "metrics" => "ORDER BY record_date, metric_name, timestamp",
+            "scores" => "ORDER BY record_date, name, timestamp",
             _ => "",
         }
     }
 
     fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {
-        for table in ["traces", "logs", "metrics"] {
+        for table in ["traces", "logs", "metrics", "scores"] {
             let qualified = self.qualified_table_name(table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
             conn.execute_batch(&format!(

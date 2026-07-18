@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Softprobe Runtime Ingestion API
+  title: Softprobe Runtime Write API
   version: 0.1.0
   description: |
     Authenticated OTLP-compatible ingestion API exposed by softprobe-runtime.
@@ -12,6 +12,9 @@ info:
 
     It also documents the tenant-scoped schema promotion endpoint:
     - `POST /v1/promotions/apply`
+
+    LLM evaluations are written through:
+    - `POST /v1/llm/scores`
 
     For JSON payloads, requests are expected to follow the OpenTelemetry collector export
     request shapes (`ExportTraceServiceRequest`, `ExportLogsServiceRequest`, and
@@ -38,6 +41,8 @@ tags:
     description: OTLP ingestion endpoints
   - name: promotion
     description: Tenant-scoped schema promotion
+  - name: llm
+    description: LLM observability records
 security:
   - bearerAuth: []
 paths:
@@ -170,6 +175,78 @@ paths:
           description: Request exceeds `server.max_body_size`
         "503":
           $ref: "#/components/responses/IngestUnavailable"
+  /v1/llm/scores:
+    post:
+      tags:
+        - llm
+      summary: Create an immutable LLM evaluation score
+      description: |
+        Creates a score in the authenticated tenant's DuckLake scope. Tenant
+        identity is resolved from the bearer token and is never accepted in
+        the request body.
+
+        At least one target (`trace_id`, `span_id`, or `session_id`) is
+        required. Exactly one value field must be present and must match
+        `data_type`:
+
+        - `numeric` uses `numeric_value`
+        - `categorical` and `text` use `string_value`
+        - `boolean` uses `boolean_value`
+
+        `score_id` is the tenant-local idempotency key. Repeating a previously
+        accepted ID does not append another score row.
+      operationId: createScore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScoreRequest"
+            examples:
+              correctness:
+                value:
+                  score_id: score-01JZ8YH3KQBZ8V2CA9ZB1W7Q9A
+                  timestamp: "2026-07-18T23:22:00Z"
+                  trace_id: 4bf92f3577b34da6a3ce929d0e0e4736
+                  span_id: 00f067aa0ba902b7
+                  name: correctness
+                  data_type: numeric
+                  numeric_value: 0.92
+                  source: evaluator
+                  comment: Answer is supported by the retrieved context.
+                  metadata:
+                    evaluator: groundedness-v2
+      responses:
+        "201":
+          description: Score created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Score"
+        "200":
+          description: Idempotent retry; the score ID already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Score"
+        "400":
+          description: Missing target, missing value, or value does not match `data_type`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "422":
+          description: Malformed JSON or field type mismatch
+        "503":
+          description: Tenant runtime, idempotency lookup, or DuckLake write unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/promotions/apply:
     post:
       tags:
@@ -342,6 +419,73 @@ components:
         OTLP metrics export request (JSON mapping).
         See OpenTelemetry protocol spec for the canonical schema.
       additionalProperties: true
+    CreateScoreRequest:
+      type: object
+      required:
+        - score_id
+        - timestamp
+        - name
+        - data_type
+        - source
+      description: |
+        At least one target ID and exactly one value matching `data_type` are
+        required. Tenant identity is intentionally absent.
+      properties:
+        score_id:
+          type: string
+          minLength: 1
+        timestamp:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        session_id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+        data_type:
+          type: string
+          enum: [numeric, categorical, boolean, text]
+        numeric_value:
+          type: number
+        string_value:
+          type: string
+        boolean_value:
+          type: boolean
+        source:
+          type: string
+          enum: [api, user, evaluator, annotation]
+        comment:
+          type: string
+        config_id:
+          type: string
+        author_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+    Score:
+      allOf:
+        - $ref: "#/components/schemas/CreateScoreRequest"
+        - type: object
+          required:
+            - record_date
+          properties:
+            record_date:
+              type: string
+              format: date
+    ApiError:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
     PromotionApplyRequest:
       type: object
       required:
