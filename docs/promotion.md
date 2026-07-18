@@ -159,25 +159,36 @@ Example validation error:
 }
 ```
 
-### PostgreSQL-only promotion path
+### Catalog backends
 
-Promotion apply and ingest-time telemetry extraction require a **PostgreSQL**
-DuckLake catalog with a tenant scope registry:
+Promotion apply and ingest-time telemetry extraction work on both backends:
 
-- apply returns `503` with `ducklake_connection_unavailable` when the registry
-  is absent (including SQLite local catalogs);
-- ingest skips promotion extraction entirely when
-  `catalog_type != "postgres"` — manifests are ignored and no promoted columns
-  are populated.
+| Backend | Scope model | Spec storage | Apply serialization |
+|---------|-------------|--------------|---------------------|
+| **PostgreSQL** | Multi-tenant (per-tenant metadata schema via scope registry) | `{tenant_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
+| **SQLite** (local/dev) | Single configured catalog scope | `{catalog_alias}.promotion_specs` in the DuckLake catalog | Process-global mutex across DDL + activate |
 
-Local SQLite DuckLake is fine for basic ingest/query, but it is not a
-promotion environment.
+Both backends serialize the full apply critical section (physical DDL +
+activate/deactivate). Physical DDL still runs on DuckLake (outside the Postgres
+metadata transaction); the lock/mutex only prevents concurrent applies from
+interleaving.
+
+SQLite promotion is intentionally **single-scope**: every tenant id in a local
+process shares the configured DuckLake catalog. Multi-tenant isolation still
+requires PostgreSQL. Cross-process concurrent apply against the same SQLite
+file is out of scope for local/dev (WAL/busy-timeout still protect storage).
+DuckLake tables cannot declare `PRIMARY KEY`; uniqueness of `spec_id` is
+enforced by the activate path.
+
+Endpoints that need a tenant registry (for example
+`/v1/data/ducklake-connection`) still return `503 ducklake_connection_unavailable`
+when the Postgres resolver is absent.
 
 Other apply `503` codes:
 
 | `error.code` | Meaning |
 |--------------|---------|
-| `ducklake_connection_unavailable` | Tenant DuckLake resolver / registry unavailable |
+| `ducklake_connection_unavailable` | Tenant DuckLake resolver / registry unavailable (Postgres-only endpoints) |
 | `ducklake_scope_unavailable` | Authenticated tenant scope could not be resolved |
 | `promotion_schema_apply_failed` | DuckLake DDL failed |
 | `promotion_spec_record_failed` | Writing `promotion_specs` failed |
@@ -288,7 +299,8 @@ query either attributes['sp.user.id'] or user_id
 - Re-applying the **same** YAML is idempotent: DDL uses `IF NOT EXISTS`, and
   the existing `promotion_specs` row is upserted back to `active`.
 - Applying an **updated** YAML activates the new content-hash `spec_id` and
-  marks prior active telemetry specs `inactive` in the same Postgres transaction.
+  marks prior active telemetry specs `inactive` in the same metadata transaction
+  (Postgres `BEGIN` / DuckDB `BEGIN TRANSACTION` on SQLite).
 - Physical columns are **additive only**: DuckLake never drops a column when
   YAML removes it. Extraction follows the active document only, so removed
   columns stop being populated on new rows while the physical column remains.
@@ -299,8 +311,9 @@ query either attributes['sp.user.id'] or user_id
 1. Active manifests are loaded from the tenant metadata schema
    (`promotion_specs` where `status = 'active'` and
    `target_kind = 'telemetry_columns'`). Under normal apply that set has size
-   0 or 1. Loading requires PostgreSQL tenant-scoped DuckLake; otherwise
-   extraction is skipped.
+   0 or 1. On PostgreSQL this loads from the tenant metadata schema; on SQLite
+   it loads from `{catalog_alias}.promotion_specs` in the local DuckLake
+   catalog. Other catalog types skip extraction.
 2. For each target table, columns from matching manifests are applied.
 3. Missing source values become SQL `NULL` in the promoted column.
 4. Invalid JSON bodies or type mismatches raise
@@ -422,20 +435,19 @@ that ingest path is wired.
 
 ## Metadata tables
 
-Each tenant metadata schema owns:
-
-| Table | Purpose |
-|-------|---------|
-| `promotion_specs` | Active/applied manifests (`spec_id`, `target_kind`, `manifest_json`, `status`, …) |
-| `promotion_errors` | Row-level extraction diagnostics for business promotion errors |
+| Backend | Location | Tables |
+|---------|----------|--------|
+| PostgreSQL | Each tenant metadata schema | `promotion_specs`, `promotion_errors` |
+| SQLite (local) | DuckLake catalog (`softprobe.promotion_specs`) | `promotion_specs` (control table; errors table remains Postgres-oriented for now) |
 
 These are control/diagnostic tables for the promotion system, not telemetry
 payload storage.
 
 ## Operator checklist
 
-1. Run promotion against a **PostgreSQL** DuckLake catalog with tenant scopes.
-   SQLite local catalogs do not apply or extract promotions.
+1. For **production multi-tenant** promotion, use a **PostgreSQL** DuckLake
+   catalog with tenant scopes. For **local/dev**, SQLite single-scope
+   promotion (apply + ingest extraction + query) is supported.
 2. Instrument consistent business attributes (`sp.user.id`, …).
 3. Verify MAP queries work before promoting anything.
 4. Promote only high-value filters you query often.

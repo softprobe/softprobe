@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 pub const PROMOTION_SPEC_VERSION: &str = "softprobe.promotion.v1";
 
@@ -192,10 +194,11 @@ pub fn parse_promotion_manifest(
     raw.validate()
 }
 
-/// Failed to read or parse promotion specs from Postgres for the configured DuckLake metadata schema.
+/// Failed to read or parse promotion specs from the configured DuckLake metadata store.
 #[derive(Debug)]
 pub enum PromotionSpecLoadError {
     Postgres(tokio_postgres::Error),
+    Backend(String),
     InvalidRowManifest {
         spec_id: String,
         source: PromotionValidationError,
@@ -206,6 +209,7 @@ impl std::fmt::Display for PromotionSpecLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Postgres(e) => write!(f, "postgres error loading promotion_specs: {e}"),
+            Self::Backend(e) => write!(f, "error loading promotion_specs: {e}"),
             Self::InvalidRowManifest { spec_id, source } => {
                 write!(
                     f,
@@ -220,9 +224,90 @@ impl std::error::Error for PromotionSpecLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Postgres(e) => Some(e),
+            Self::Backend(_) => None,
             Self::InvalidRowManifest { source, .. } => Some(source),
         }
     }
+}
+
+/// Content-hash of raw promotion YAML used as the durable identity suffix for `spec_id`.
+pub fn promotion_manifest_hash(manifest_yaml: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    manifest_yaml.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Stable `promotion_specs.spec_id` for a telemetry_columns document.
+pub fn telemetry_spec_id(manifest_yaml: &str) -> String {
+    format!(
+        "telemetry_columns_{}",
+        promotion_manifest_hash(manifest_yaml)
+    )
+}
+
+/// Stable `promotion_specs.spec_id` for a business_table document.
+pub fn business_spec_id(table_name: &str, manifest_yaml: &str) -> String {
+    format!(
+        "business_table_{}_{}",
+        table_name,
+        promotion_manifest_hash(manifest_yaml)
+    )
+}
+
+/// Parse one `(spec_id, manifest_json)` row into a telemetry columns manifest.
+pub fn telemetry_manifest_from_row(
+    spec_id: &str,
+    manifest_json: &str,
+) -> Result<Option<TelemetryColumnsManifest>, PromotionSpecLoadError> {
+    match parse_promotion_manifest(manifest_json) {
+        Ok(PromotionManifest::TelemetryColumns(m)) => Ok(Some(m)),
+        Ok(PromotionManifest::BusinessTable(_)) => Ok(None),
+        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest {
+            spec_id: spec_id.to_string(),
+            source: e,
+        }),
+    }
+}
+
+/// Parse one `(spec_id, manifest_json)` row into a business-table manifest.
+pub fn business_manifest_from_row(
+    spec_id: &str,
+    manifest_json: &str,
+) -> Result<Option<BusinessTableManifest>, PromotionSpecLoadError> {
+    match parse_promotion_manifest(manifest_json) {
+        Ok(PromotionManifest::BusinessTable(m)) => Ok(Some(m)),
+        Ok(PromotionManifest::TelemetryColumns(_)) => Ok(None),
+        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest {
+            spec_id: spec_id.to_string(),
+            source: e,
+        }),
+    }
+}
+
+/// DuckDB-dialect DDL for the local (single-scope) `promotion_specs` control table.
+///
+/// Qualifies as `{catalog_alias}.promotion_specs` so the table lives in the attached DuckLake
+/// catalog (not the ephemeral in-memory DuckDB `main`). No `CREATE SCHEMA` — DuckLake catalogs
+/// already expose the alias as the qualification root for local SQLite.
+pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
+    let catalog = quote_sql_ident(catalog_alias);
+    // DuckLake tables do not support PRIMARY KEY / UNIQUE constraints. Uniqueness of
+    // `spec_id` is enforced by the activate path (UPDATE-then-INSERT, no ON CONFLICT).
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS {catalog}.promotion_specs (
+  spec_id TEXT NOT NULL,
+  spec_version TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_table TEXT,
+  target_tables TEXT,
+  business_version BIGINT,
+  manifest_json TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_by TEXT,
+  status TEXT NOT NULL
+);"#
+    )
 }
 
 /// Load every **active** telemetry column manifest for one tenant DuckLake metadata schema.
@@ -248,12 +333,8 @@ pub async fn load_active_telemetry_columns_manifests(
     for row in rows {
         let spec_id: String = row.get(0);
         let manifest_json: String = row.get(1);
-        match parse_promotion_manifest(&manifest_json) {
-            Ok(PromotionManifest::TelemetryColumns(m)) => out.push(m),
-            Ok(PromotionManifest::BusinessTable(_)) => {}
-            Err(e) => {
-                return Err(PromotionSpecLoadError::InvalidRowManifest { spec_id, source: e });
-            }
+        if let Some(m) = telemetry_manifest_from_row(&spec_id, &manifest_json)? {
+            out.push(m);
         }
     }
     Ok(out)
@@ -284,11 +365,7 @@ LIMIT 1;"#
     };
     let spec_id: String = row.get(0);
     let manifest_json: String = row.get(1);
-    match parse_promotion_manifest(&manifest_json) {
-        Ok(PromotionManifest::BusinessTable(m)) => Ok(Some(m)),
-        Ok(PromotionManifest::TelemetryColumns(_)) => Ok(None),
-        Err(e) => Err(PromotionSpecLoadError::InvalidRowManifest { spec_id, source: e }),
-    }
+    business_manifest_from_row(&spec_id, &manifest_json)
 }
 
 /// Ensure the hardcoded promotion metadata tables exist inside one tenant schema.
@@ -1401,6 +1478,86 @@ columns:
         assert!(ddl[1].contains("manifest_hash TEXT NOT NULL"));
         assert!(ddl[2].contains(r#""tenant_alpha".promotion_errors"#));
         assert!(ddl[2].contains("raw_value_preview TEXT"));
+    }
+
+    #[test]
+    fn telemetry_and_business_spec_ids_are_stable_content_hashes() {
+        let yaml = "specVersion: softprobe.promotion.v1\n";
+        assert_eq!(
+            super::telemetry_spec_id(yaml),
+            format!("telemetry_columns_{}", super::promotion_manifest_hash(yaml))
+        );
+        assert_eq!(
+            super::business_spec_id("checkout_orders", yaml),
+            format!(
+                "business_table_checkout_orders_{}",
+                super::promotion_manifest_hash(yaml)
+            )
+        );
+        assert_ne!(
+            super::promotion_manifest_hash(yaml),
+            super::promotion_manifest_hash("different")
+        );
+    }
+
+    #[test]
+    fn local_promotion_specs_ddl_is_catalog_qualified() {
+        let ddl = super::local_promotion_specs_table_ddl("softprobe");
+        assert!(ddl.starts_with(
+            r#"CREATE TABLE IF NOT EXISTS "softprobe".promotion_specs ("#
+        ));
+        assert!(ddl.contains(r#"spec_id TEXT NOT NULL"#));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(ddl.contains("manifest_hash TEXT NOT NULL"));
+        assert!(ddl.contains("status TEXT NOT NULL"));
+        assert!(!ddl.contains("CREATE SCHEMA"));
+    }
+
+    #[test]
+    fn telemetry_manifest_from_row_parses_and_skips_business() {
+        let telemetry = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name
+"#;
+        let parsed = super::telemetry_manifest_from_row("spec-1", telemetry)
+            .expect("parse")
+            .expect("telemetry");
+        assert_eq!(parsed.columns[0].name, "service_name");
+
+        let business = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: checkout_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: total_cents
+    type: int64
+    nullable: true
+    source:
+      from: http_response_body
+      json_path: $.order.total_cents
+"#;
+        assert!(super::telemetry_manifest_from_row("biz-1", business)
+            .expect("parse")
+            .is_none());
+        let biz = super::business_manifest_from_row("biz-1", business)
+            .expect("parse")
+            .expect("business");
+        assert_eq!(biz.target.table, "checkout_orders");
     }
 
     #[test]
