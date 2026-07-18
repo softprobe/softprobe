@@ -12,21 +12,19 @@ use tempfile::TempDir;
 /// File-backed DuckLake under `temp`; compaction and metadata maintenance disabled.
 pub fn file_backed_test_config(temp: &TempDir) -> Config {
     let mut config = Config::default();
-    config.compaction.enabled = false;
-    config.compaction.metadata_maintenance_enabled = false;
-    config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().into_owned());
+    config.maintenance.enabled = false;
+    config.maintenance.metadata_enabled = false;
+    config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into_owned());
 
     let duck_dir = temp.path().join("ducklake");
     std::fs::create_dir_all(duck_dir.join("data")).expect("ducklake data");
 
-    let mut dl = config.ducklake_or_default();
-    dl.catalog_type = "sqlite".to_string();
-    dl.metadata_path = duck_dir
+    config.ducklake.catalog_type = "sqlite".to_string();
+    config.ducklake.metadata_path = duck_dir
         .join("metadata.sqlite")
         .to_string_lossy()
         .into_owned();
-    dl.data_path = duck_dir.join("data").to_string_lossy().into_owned() + "/";
-    config.ducklake = Some(dl);
+    config.ducklake.data_path = duck_dir.join("data").to_string_lossy().into_owned() + "/";
 
     config
 }

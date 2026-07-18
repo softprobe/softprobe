@@ -93,13 +93,12 @@ services:
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - DUCKLAKE_METADATA_SCHEMA=softprobe
-      - GCS_HMAC_ACCESS_KEY_ID=minioadmin
-      - GCS_HMAC_SECRET=minioadmin
       - SOFTPROBE_AUTH_URL=http://auth-mock:8080/validate
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - OTEL_GRPC_PORT=4317
       - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
+      - CONFIG_FILE=/app/config.yaml
     volumes:
       - ./tests/config/test-docker.yaml:/app/config.yaml:ro
     networks:

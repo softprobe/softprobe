@@ -1,42 +1,32 @@
 # GCS Benchmark Configuration
-# For running full stress performance benchmarks on a server with Google Cloud Storage
-#
 # Setup:
-#   1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON key file
-#   2. Update warehouse bucket name and region below
-#   3. Update Iceberg catalog URI if using REST catalog
-#   4. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin perf_stress -- [args]
+#   1. Set GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET (DuckDB httpfs for gs://)
+#   2. Update ducklake.data_path and postgres metadata_path
+#   3. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin softprobe-runtime
 
 server:
   port: 8090
   host: "0.0.0.0"
-  max_body_size: 104857600  # 100MB
+  max_body_size: 104857600
   worker_threads: null
 
-storage:
-  s3_region: "us-central1"  # GCP region (us-central1, us-east1, etc.)
+object_store:
+  region: "us-central1"
 
-ingest_engine:
-  cache_dir: "/var/tmp/datalake/cache"  # Server-local cache directory
+query:
+  max_connections: 16
+  cache_dir: "/var/tmp/datalake/cache"
 
-compaction:
+maintenance:
   enabled: true
-  target_file_size_bytes: 67108864  # 64MB
-  compaction_interval_seconds: 3600  # 1 hour
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
 
-duckdb:
-  max_connections: 16  # Higher for server benchmarks
-  max_memory_per_query: "4GB"  # More memory for server
-  max_query_duration_seconds: 60  # Longer timeout for complex queries
-  enable_spill_to_disk: true
-  spill_directory: "/var/tmp/datalake/duckdb_spill"
-
-# GCS Configuration
-# DuckDB uses Application Default Credentials (ADC) when endpoint is null
-# Set GOOGLE_APPLICATION_CREDENTIALS env var to your service account JSON key
-# Alternative: Use HMAC keys for S3-compatible API (set endpoint to storage.googleapis.com)
-s3:
-  endpoint: null  # null = use ADC, or set to "storage.googleapis.com" for HMAC
-  access_key_id: null  # Set if using HMAC keys instead of ADC
-  secret_access_key: null  # Set if using HMAC keys instead of ADC
-
+ducklake:
+  catalog_type: "postgres"
+  metadata_path: "host=YOUR_PG_HOST port=5432 dbname=ducklake user=ducklake password=YOUR_PASSWORD"
+  data_path: "gs://YOUR-GCS-BUCKET/ducklake/"
+  catalog_alias: "softprobe"
+  metadata_schema: "softprobe"
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

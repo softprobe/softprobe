@@ -6,9 +6,8 @@ use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use duckdb::types::Value as DuckValue;
-use duckdb::{Connection, ToSql};
+use duckdb::Connection;
 use serde_json::Value;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -156,7 +155,7 @@ impl DuckDBQueryEngine {
         core.install_extensions(&temp_conn)?;
         drop(temp_conn); // Extensions are installed globally, connection no longer needed
 
-        let worker_count = std::cmp::max(1, config.duckdb.max_connections);
+        let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
@@ -235,10 +234,8 @@ impl DuckDBQueryEngine {
         scope: &DuckLakeScope,
     ) -> Result<QueryResult> {
         let mut config = self.config.clone();
-        let mut ducklake = config.ducklake_or_default();
-        ducklake.metadata_schema = scope.metadata_schema.clone();
-        ducklake.data_path = scope.data_path.clone();
-        config.ducklake = Some(ducklake);
+        config.ducklake.metadata_schema = scope.metadata_schema.clone();
+        config.ducklake.data_path = scope.data_path.clone();
 
         let core = DuckDBCore {
             cache: CacheSettings::new(&config),
@@ -271,14 +268,6 @@ impl Drop for DuckDBQueryEngine {
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
         Connection::open_in_memory().map_err(|err| anyhow!("DuckDB open failed: {}", err))
-    }
-
-    fn cache_dir(&self) -> Option<&Path> {
-        self.config
-            .ingest_engine
-            .cache_dir
-            .as_deref()
-            .map(Path::new)
     }
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
@@ -453,53 +442,13 @@ impl DuckDBCore {
             "sqlite" => conn.execute_batch("LOAD sqlite;")?,
             _ => {}
         }
-        let dk = self.config.ducklake_or_default();
-        crate::storage::ducklake::configure_httpfs_gcs_for_data_path(conn, &dk.data_path)?;
+        let dk = &self.config.ducklake;
+        crate::storage::ducklake::configure_object_store(conn, &self.config, &dk.data_path)?;
 
         // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
         if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {
             warn!("Failed to enable DuckDB object cache: {}", err);
         }
-
-        if let Some(endpoint) = self.config.s3.endpoint.as_ref() {
-            let trimmed = endpoint
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            conn.execute("SET s3_endpoint = ?;", [&trimmed as &dyn ToSql])?;
-            conn.execute("SET s3_url_style = 'path';", [])?;
-            if endpoint.starts_with("http://") {
-                conn.execute("SET s3_use_ssl = false;", [])?;
-            } else if endpoint.starts_with("https://") {
-                conn.execute("SET s3_use_ssl = true;", [])?;
-            }
-        }
-        // Fetch credentials from config or instance metadata
-        let (access_key, secret_key, session_token) =
-            if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
-                // Use explicit credentials from config
-                (
-                    Some(access_key.clone()),
-                    self.config.s3.secret_access_key.clone(),
-                    None,
-                )
-            } else {
-                // Try to fetch from instance metadata (IAM role)
-                fetch_instance_metadata_credentials().unwrap_or((None, None, None))
-            };
-
-        if let Some(access_key) = access_key.as_ref() {
-            conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
-        }
-        if let Some(secret_key) = secret_key.as_ref() {
-            conn.execute("SET s3_secret_access_key = ?;", [secret_key as &dyn ToSql])?;
-        }
-        if let Some(session_token) = session_token.as_ref() {
-            conn.execute("SET s3_session_token = ?;", [session_token as &dyn ToSql])?;
-        }
-        conn.execute(
-            "SET s3_region = ?;",
-            [&self.config.storage.s3_region as &dyn ToSql],
-        )?;
 
         // 2) Native external file cache for raw bytes (in-memory). This complements cache_httpfs'
         // on-disk persistence; we disable cache_httpfs in-memory caching to avoid double-caching.
@@ -543,7 +492,12 @@ impl DuckDBCore {
         let logs = self.ducklake_qualified_table("logs");
         let metrics = self.ducklake_qualified_table("metrics");
         let mut s = sql.to_string();
-        for name in ["tm_icb_metric", "tm_cq_metric", "tm_all_metric", "tm_buf_metric"] {
+        for name in [
+            "tm_icb_metric",
+            "tm_cq_metric",
+            "tm_all_metric",
+            "tm_buf_metric",
+        ] {
             s = replace_standalone_ident(&s, name, &metrics);
         }
         for name in ["tm_icb_log", "tm_cq_log", "tm_all_log", "tm_buf_log"] {
@@ -590,7 +544,7 @@ impl DuckDBCore {
                     )];
                     if ducklake.catalog_type == "sqlite" {
                         fallback_options.push("META_JOURNAL_MODE 'WAL'".to_string());
-                        fallback_options.push("META_BUSY_TIMEOUT 500".to_string());
+                        fallback_options.push("META_BUSY_TIMEOUT 5000".to_string());
                     }
                     if let Some(limit) = ducklake.data_inlining_row_limit {
                         fallback_options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
@@ -631,53 +585,8 @@ impl DuckDBCore {
     }
 
     fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
-        self.config.ducklake_or_default()
+        self.config.ducklake.clone()
     }
-
-    fn catalog_alias(&self) -> String {
-        self.ducklake_config().catalog_alias
-    }
-
-    fn catalog_schema(&self) -> String {
-        self.ducklake_config().metadata_schema
-    }
-}
-
-/// Fetch AWS credentials from EC2 instance metadata service
-fn fetch_instance_metadata_credentials() -> Result<(Option<String>, Option<String>, Option<String>)>
-{
-    // Use blocking reqwest for synchronous call (this is called from sync context)
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()?;
-
-    // First, get the IAM role name
-    let role_url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
-    let role_response = match client.get(role_url).send() {
-        Ok(resp) => resp,
-        Err(_) => return Ok((None, None, None)), // Not on EC2 or metadata service unavailable
-    };
-
-    let role_name = role_response.text()?.trim().to_string();
-    if role_name.is_empty() {
-        return Ok((None, None, None));
-    }
-
-    // Fetch credentials for the role
-    let creds_url = format!(
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
-        role_name
-    );
-    let creds_response = client.get(&creds_url).send()?;
-    let creds_json: serde_json::Value = creds_response.json()?;
-
-    let access_key = creds_json["AccessKeyId"].as_str().map(|s| s.to_string());
-    let secret_key = creds_json["SecretAccessKey"]
-        .as_str()
-        .map(|s| s.to_string());
-    let session_token = creds_json["Token"].as_str().map(|s| s.to_string());
-
-    Ok((access_key, secret_key, session_token))
 }
 
 fn duck_value_to_json(value: DuckValue) -> Value {

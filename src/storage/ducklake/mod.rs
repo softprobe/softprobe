@@ -27,43 +27,66 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-/// DuckDB `httpfs` uses GCS **HMAC interoperability keys** for `gs://` paths, not OAuth /
-/// Workload Identity. Set `GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET` (or `GCP_HMAC_*`).
+/// Configure DuckDB httpfs for the configured object store + `data_path`.
+///
+/// Credentials come from the environment (never YAML):
+/// - `gs://` → `GCS_HMAC_*` / `GCP_HMAC_*`
+/// - `s3://` → `AWS_*` (or EC2 instance metadata)
+///
 /// See <https://duckdb.org/docs/current/guides/network_cloud_storage/gcs_import.html>.
-pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) -> Result<()> {
-    if !data_path.starts_with("gs://") {
+pub fn configure_object_store(conn: &Connection, config: &Config, data_path: &str) -> Result<()> {
+    if data_path.starts_with("gs://") {
+        let creds = config.resolve_object_store_credentials(data_path);
+        let (Some(key_id), Some(secret)) = (creds.access_key_id, creds.secret_access_key) else {
+            warn!(
+                "DuckLake data_path is {} but GCS_HMAC_ACCESS_KEY_ID/GCS_HMAC_SECRET are unset; gs:// I/O may return HTTP 403",
+                data_path
+            );
+            return Ok(());
+        };
+        let kid = key_id.replace('\'', "''");
+        let sec = secret.replace('\'', "''");
+        let sql = format!(
+            "CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '{kid}', SECRET '{sec}');"
+        );
+        conn.execute_batch(&sql)?;
         return Ok(());
     }
-    let key_id = match std::env::var("GCS_HMAC_ACCESS_KEY_ID")
-        .or_else(|_| std::env::var("GCP_HMAC_ACCESS_KEY_ID"))
-    {
-        Ok(k) => k,
-        Err(_) => {
-            warn!(
-                "DuckLake data_path is {} but GCS_HMAC_ACCESS_KEY_ID is unset; gs:// writes may return HTTP 403",
-                data_path
-            );
-            return Ok(());
+
+    if let Some(endpoint) = config.object_store.endpoint.as_ref() {
+        let trimmed = endpoint
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        conn.execute("SET s3_endpoint = ?;", [&trimmed as &dyn ToSql])?;
+        conn.execute("SET s3_url_style = 'path';", [])?;
+        if endpoint.starts_with("http://") {
+            conn.execute("SET s3_use_ssl = false;", [])?;
+        } else if endpoint.starts_with("https://") {
+            conn.execute("SET s3_use_ssl = true;", [])?;
         }
-    };
-    let secret = match std::env::var("GCS_HMAC_SECRET")
-        .or_else(|_| std::env::var("GCP_HMAC_SECRET"))
-    {
-        Ok(s) => s,
-        Err(_) => {
-            warn!(
-                "DuckLake data_path is {} but GCS_HMAC_SECRET is unset; gs:// writes may return HTTP 403",
-                data_path
-            );
-            return Ok(());
-        }
-    };
-    let kid = key_id.replace('\'', "''");
-    let sec = secret.replace('\'', "''");
-    let sql =
-        format!("CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '{kid}', SECRET '{sec}');");
-    conn.execute_batch(&sql)?;
+    }
+
+    let creds = config.resolve_object_store_credentials(data_path);
+    if let Some(access_key) = creds.access_key_id.as_ref() {
+        conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
+    }
+    if let Some(secret) = creds.secret_access_key.as_ref() {
+        conn.execute("SET s3_secret_access_key = ?;", [secret as &dyn ToSql])?;
+    }
+    if let Some(token) = creds.session_token.as_ref() {
+        conn.execute("SET s3_session_token = ?;", [token as &dyn ToSql])?;
+    }
+    conn.execute(
+        "SET s3_region = ?;",
+        [&config.object_store.region as &dyn ToSql],
+    )?;
     Ok(())
+}
+
+/// Backward-compatible alias used by older call sites / docs.
+pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) -> Result<()> {
+    let config = Config::default();
+    configure_object_store(conn, &config, data_path)
 }
 
 /// Per-scope pool of already-ATTACH'd DuckDB connections for concurrent DuckLake commits.
@@ -132,7 +155,7 @@ impl DuckLakeWriter {
         scope_bound: bool,
     ) -> Result<Self> {
         config.validate_ducklake_catalog()?;
-        let ducklake = config.ducklake_or_default();
+        let ducklake = config.ducklake.clone();
         let writer = Self {
             config: config.clone(),
             ducklake,
@@ -190,6 +213,8 @@ impl DuckLakeWriter {
         }
         let size = dk.effective_writer_pool_size();
         let mut conns = Vec::with_capacity(size);
+        // Attach sequentially: the first connection initializes DuckLake metadata tables; later
+        // pool members ATTACH the already-initialized Postgres schema (with retry on races).
         for _ in 0..size {
             let conn = self.open_connection_for(dk)?;
             apply_ducklake_retry_settings(&conn)?;
@@ -422,19 +447,20 @@ impl DuckLakeWriter {
     pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
+            // Non-scope-bound writers (single-tenant / tests) use the configured DuckLake scope.
             let scope = self.tenant_bound_scope().unwrap_or_else(|| DuckLakeScope {
-                metadata_schema: String::new(),
-                data_path: String::new(),
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
             });
-            let manifests = if scope.metadata_schema.is_empty() {
+            let manifests = if self.scope_bound {
+                resolver
+                    .load_active_telemetry_columns_manifests_for_scope(&scope)
+                    .await?
+            } else {
                 resolver
                     .load_active_telemetry_columns_manifests("")
                     .await?
                     .1
-            } else {
-                resolver
-                    .load_active_telemetry_columns_manifests_for_scope(&scope)
-                    .await?
             };
             return self
                 .write_tenant_log_batches(&scope, &manifests, batches)
@@ -477,19 +503,20 @@ impl DuckLakeWriter {
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
         if self.use_tenant_scoped_ducklake() {
             let resolver = self.tenant_ducklake.as_ref().unwrap();
+            // Non-scope-bound writers (single-tenant / tests) use the configured DuckLake scope.
             let scope = self.tenant_bound_scope().unwrap_or_else(|| DuckLakeScope {
-                metadata_schema: String::new(),
-                data_path: String::new(),
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
             });
-            let manifests = if scope.metadata_schema.is_empty() {
+            let manifests = if self.scope_bound {
+                resolver
+                    .load_active_telemetry_columns_manifests_for_scope(&scope)
+                    .await?
+            } else {
                 resolver
                     .load_active_telemetry_columns_manifests("")
                     .await?
                     .1
-            } else {
-                resolver
-                    .load_active_telemetry_columns_manifests_for_scope(&scope)
-                    .await?
             };
             return self
                 .write_tenant_metric_batches(&scope, &manifests, batches)
@@ -605,21 +632,37 @@ impl DuckLakeWriter {
     ) -> Result<Vec<String>> {
         let dk = self.effective_ducklake(scope);
         let ddls = self.with_attached_conn(&dk, |conn| {
-            let prefix = if dk.metadata_schema == "main" {
-                dk.catalog_alias.clone()
+            // Prefer catalog.schema when metadata lives outside `main`; fall back to catalog-only
+            // (matches write-path table name candidates when ATTACH uses METADATA_SCHEMA).
+            let prefixes = if dk.metadata_schema == "main" {
+                vec![dk.catalog_alias.clone()]
             } else {
-                format!(
-                    "{}.{}",
-                    quote_duckdb_ident(&dk.catalog_alias),
-                    quote_duckdb_ident(&dk.metadata_schema)
-                )
+                vec![
+                    format!(
+                        "{}.{}",
+                        quote_duckdb_ident(&dk.catalog_alias),
+                        quote_duckdb_ident(&dk.metadata_schema)
+                    ),
+                    dk.catalog_alias.clone(),
+                ]
             };
-            let ddls = business_table_create_ddls(&prefix, spec)
-                .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
-            for ddl in &ddls {
-                conn.execute_batch(ddl)?;
+            let mut last_err: Option<anyhow::Error> = None;
+            for prefix in prefixes {
+                let ddls = business_table_create_ddls(&prefix, spec)
+                    .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
+                match ddls
+                    .iter()
+                    .try_for_each(|ddl| conn.execute_batch(ddl).map(|_| ()))
+                {
+                    Ok(()) => return Ok(ddls),
+                    Err(err) => {
+                        last_err = Some(anyhow!(
+                            "business table promotion failed with prefix {prefix}: {err}"
+                        ));
+                    }
+                }
             }
-            Ok(ddls)
+            Err(last_err.unwrap_or_else(|| anyhow!("business table promotion failed")))
         })?;
         Ok(ddls)
     }
@@ -694,7 +737,7 @@ impl DuckLakeWriter {
                     format!(
                         "CALL {}.set_option('target_file_size', '{}', {});",
                         self.ducklake.catalog_alias,
-                        size_literal(self.config.compaction.target_file_size_bytes),
+                        size_literal(self.config.maintenance.target_file_size_bytes),
                         scope
                     ),
                     format!(
@@ -789,7 +832,7 @@ impl DuckLakeWriter {
         let conn =
             Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
-        configure_httpfs_gcs_for_data_path(&conn, &dk.data_path)?;
+        configure_object_store(&conn, &self.config, &dk.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
         if dk.catalog_type == "postgres" {
             conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
@@ -797,34 +840,7 @@ impl DuckLakeWriter {
         if dk.catalog_type == "sqlite" {
             conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
         }
-        self.apply_s3_settings(&conn)?;
         Ok(conn)
-    }
-
-    fn apply_s3_settings(&self, conn: &Connection) -> Result<()> {
-        if let Some(endpoint) = self.config.s3.endpoint.as_ref() {
-            let trimmed = endpoint
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            conn.execute("SET s3_endpoint = ?;", [&trimmed as &dyn ToSql])?;
-            conn.execute("SET s3_url_style = 'path';", [])?;
-            if endpoint.starts_with("http://") {
-                conn.execute("SET s3_use_ssl = false;", [])?;
-            } else if endpoint.starts_with("https://") {
-                conn.execute("SET s3_use_ssl = true;", [])?;
-            }
-        }
-        if let Some(access_key) = self.config.s3.access_key_id.as_ref() {
-            conn.execute("SET s3_access_key_id = ?;", [access_key as &dyn ToSql])?;
-        }
-        if let Some(secret) = self.config.s3.secret_access_key.as_ref() {
-            conn.execute("SET s3_secret_access_key = ?;", [secret as &dyn ToSql])?;
-        }
-        conn.execute(
-            "SET s3_region = ?;",
-            [&self.config.storage.s3_region as &dyn ToSql],
-        )?;
-        Ok(())
     }
 
     fn attach_ducklake_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
@@ -841,11 +857,27 @@ impl DuckLakeWriter {
         match conn.execute_batch(&sql) {
             Ok(()) => Ok(()),
             Err(err) => {
-                if err.to_string().contains("already exists") {
-                    Ok(())
-                } else {
-                    Err(anyhow!("DuckLake attach failed: {}", err))
+                let message = err.to_string();
+                if catalog_is_attached(conn, &dk.catalog_alias) {
+                    return Ok(());
                 }
+                // Writer-pool bootstrap can race DuckLake metadata CREATE TABLE on the same
+                // Postgres schema. Retry once after the first connection finishes initializing.
+                let retryable = message.to_lowercase().contains("already exists")
+                    || message.contains("ducklake_metadata");
+                if retryable {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    match conn.execute_batch(&sql) {
+                        Ok(()) => return Ok(()),
+                        Err(err2) if catalog_is_attached(conn, &dk.catalog_alias) => return Ok(()),
+                        Err(err2) => {
+                            return Err(anyhow!(
+                                "DuckLake attach failed after retry: {err2} (first: {message})"
+                            ));
+                        }
+                    }
+                }
+                Err(anyhow!("DuckLake attach failed: {message}"))
             }
         }
     }
@@ -863,9 +895,10 @@ impl DuckLakeWriter {
             if let Some(parent) = metadata_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            if !dk.data_path.contains("://") {
-                std::fs::create_dir_all(&dk.data_path)?;
-            }
+        }
+        // Local file DATA_PATH must exist for both sqlite and postgres catalogs.
+        if !dk.data_path.contains("://") {
+            std::fs::create_dir_all(&dk.data_path)?;
         }
         Ok(())
     }
@@ -910,7 +943,7 @@ impl DuckLakeWriter {
             format!(
                 "CALL {}.set_option('target_file_size', '{}', {});",
                 self.ducklake.catalog_alias,
-                size_literal(self.config.compaction.target_file_size_bytes),
+                size_literal(self.config.maintenance.target_file_size_bytes),
                 scope
             ),
             format!(
@@ -952,6 +985,14 @@ fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
 }
 
+fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
+    let sql = format!(
+        "SELECT 1 FROM duckdb_databases() WHERE database_name = '{}' LIMIT 1;",
+        escape_sql_literal(alias)
+    );
+    conn.query_row(&sql, [], |_| Ok(())).is_ok()
+}
+
 /// Pin DuckLake extension conflict-retry defaults (official concurrent-write mechanism).
 fn apply_ducklake_retry_settings(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -991,9 +1032,10 @@ pub(crate) fn ducklake_attach_options(dk: &DuckLakeConfig) -> Vec<String> {
         options.push(format!("META_SCHEMA '{}'", schema));
     }
     // Official SQLite multi-client guidance: WAL + busy timeout (DuckLake / sqlite extension).
+    // 5s absorbs concurrent query-worker ATTACH / snapshot races better than 500ms.
     if dk.catalog_type == "sqlite" {
         options.push("META_JOURNAL_MODE 'WAL'".to_string());
-        options.push("META_BUSY_TIMEOUT 500".to_string());
+        options.push("META_BUSY_TIMEOUT 5000".to_string());
     }
     if let Some(limit) = dk.data_inlining_row_limit {
         options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));

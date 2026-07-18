@@ -133,13 +133,11 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
 
 async fn postgres_resolver() -> DuckLakeScopeResolver {
     let mut config = Config::default();
-    let mut dl = config.ducklake_or_default();
-    dl.catalog_type = "postgres".to_string();
-    dl.metadata_path =
+    config.ducklake.catalog_type = "postgres".to_string();
+    config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
-    dl.metadata_schema = "softprobe_registry_test".to_string();
-    dl.data_path = "s3://warehouse/ducklake/data/".to_string();
-    config.ducklake = Some(dl);
+    config.ducklake.metadata_schema = "softprobe_registry_test".to_string();
+    config.ducklake.data_path = "s3://warehouse/ducklake/data/".to_string();
 
     DuckLakeScopeResolver::connect(&config)
         .await

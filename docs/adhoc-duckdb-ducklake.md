@@ -6,7 +6,7 @@ root **`make test`**.
 
 ## Same scope as the runtime (multi-tenant / per-config)
 
-The query worker ATTACHes using **`ducklake.catalog_alias`**, **`ducklake.metadata_schema`**, **`ducklake.data_path`**, and **`ducklake.metadata_path`** from the runtime YAML. **`make duckdb-shell`** does the same: it runs `scripts/duckdb_ducklake_render_init.py` on **`CONFIG_FILE`**.
+The query worker ATTACHes using **`ducklake.catalog_alias`**, **`ducklake.metadata_schema`**, **`ducklake.data_path`**, and **`ducklake.metadata_path`** from the runtime YAML. **`make duckdb-shell`** does the same: it runs `scripts/duckdb_ducklake_render_init.py` on **`CONFIG_FILE`**. Object-store endpoint/region come from **`object_store`**; credentials come from the environment (`AWS_*` for `s3://`, `GCS_HMAC_*` / `GCP_HMAC_*` for `gs://`) — never from YAML.
 
 1. **Default on the host:** `tests/config/duckdb-shell-host.yaml` (localhost Postgres + MinIO, same `metadata_schema` / `data_path` as typical e2e stacks).
 2. **Match a running container:**  

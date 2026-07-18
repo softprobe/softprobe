@@ -11,31 +11,24 @@ use uuid::Uuid;
 
 pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
-    config.s3.endpoint = Some("http://localhost:9000".to_string());
-    config.s3.access_key_id = Some("minioadmin".to_string());
-    config.s3.secret_access_key = Some("minioadmin".to_string());
-    config.storage.s3_region = "us-east-1".to_string();
+    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    config.object_store.region = "us-east-1".to_string();
 
-    std::env::set_var("S3_ENDPOINT", "http://localhost:9000");
-    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
-    std::env::set_var("S3_SECRET_KEY", "minioadmin");
+    std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");
 
     let cache_dir = TempDir::new().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-    if config.ducklake.is_none() {
-        config.ducklake = Some(config.ducklake_or_default());
-    }
-    if let Some(ducklake) = config.ducklake.as_mut() {
-        let dl_dir = cache_dir.path().join("ducklake");
-        std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
-        ducklake.metadata_path = dl_dir
-            .join(format!("metadata-{}.ducklake", Uuid::new_v4()))
-            .to_string_lossy()
-            .to_string();
-        ducklake.data_path = dl_dir.join("data").to_string_lossy().to_string();
-        std::fs::create_dir_all(&ducklake.data_path).expect("ducklake data dir");
-    }
+    config.query.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+    let dl_dir = cache_dir.path().join("ducklake");
+    std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
+    config.ducklake.catalog_type = "sqlite".to_string();
+    config.ducklake.metadata_path = dl_dir
+        .join(format!("metadata-{}.sqlite", Uuid::new_v4()))
+        .to_string_lossy()
+        .to_string();
+    config.ducklake.data_path = dl_dir.join("data").to_string_lossy().to_string();
+    std::fs::create_dir_all(&config.ducklake.data_path).expect("ducklake data dir");
 
     let config = Arc::new(config);
     let pipeline = IngestPipeline::new(config.as_ref())

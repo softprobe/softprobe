@@ -60,24 +60,15 @@ server:
   host: "127.0.0.1"
   max_body_size: 104857600
   worker_threads: null
-storage:
-  s3_region: "us-central1"
-ingest_engine:
+object_store:
+  region: "us-central1"
+query:
+  max_connections: 10
   cache_dir: "${cache}/cache"
-compaction:
+maintenance:
   enabled: true
   target_file_size_bytes: 67108864
-  compaction_interval_seconds: 3600
-duckdb:
-  max_connections: 10
-  max_memory_per_query: "2GB"
-  max_query_duration_seconds: 60
-  enable_spill_to_disk: true
-  spill_directory: "${cache}/spill"
-s3:
-  endpoint: null
-  access_key_id: "${GCS_HMAC_ACCESS_KEY_ID}"
-  secret_access_key: "${GCS_HMAC_SECRET}"
+  interval_seconds: 3600
 ducklake:
   catalog_type: "postgres"
   metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"

@@ -1,0 +1,36 @@
+# Local runtime + GCS object store (DuckLake data_path).
+# Requires:
+#   GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET
+#   GCS_BUCKET (optional; Make injects a unique e2e prefix under softprobe-datalake-ducklake)
+#
+# Usage:
+#   make test-gcs
+#   # or: E2E_BACKEND=gcs GCS_BUCKET=softprobe-datalake-ducklake cargo test ...
+
+server:
+  port: 8090
+  host: 127.0.0.1
+  max_body_size: 104857600
+  worker_threads: null
+
+object_store:
+  region: us-central1
+
+query:
+  max_connections: 10
+  cache_dir: /tmp/splake-gcs-e2e/cache
+
+maintenance:
+  enabled: false
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
+
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/splake-gcs-e2e/metadata.sqlite
+  # Make/test harness rewrites this to a unique gs://softprobe-datalake-ducklake/ducklake/e2e/<id>/ prefix.
+  data_path: gs://softprobe-datalake-ducklake/ducklake/e2e/placeholder/
+  catalog_alias: softprobe
+  metadata_schema: main
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

@@ -15,7 +15,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test test-all test-local test-smoke test-r2 test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables
 
 # Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
 # tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
@@ -46,6 +46,7 @@ help:
 	@echo "  make test-all        - Same as make test"
 	@echo "  make test-local      - Full integration only (MinIO + Postgres + integration-e2e)"
 	@echo "  make test-r2         - Integration tests with Cloudflare R2 (+ integration-e2e)"
+	@echo "  make test-gcs        - Integration tests with GCS DuckLake data_path (+ integration-e2e)"
 	@echo "  make test-ci         - CI: MinIO+Postgres present → test-quick + integration-e2e; else test-quick only"
 	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no Docker)"
 	@echo ""
@@ -195,20 +196,47 @@ test-local: check-local-e2e
 	@echo "📝 Configuration: tests/config/test.yaml"
 	@echo "🗄️  Backend: MinIO :9000 + Postgres catalog (ducklake-postgres)"
 	@echo ""
-	@for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
+	@export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
+	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
+	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
+	for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
 		echo "🧪 Running integration $$test_name in an isolated process..."; \
 		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-	done
-	@for test_name in $(INTEGRATION_PERF_TESTS); do \
+	done; \
+	for test_name in $(INTEGRATION_PERF_TESTS); do \
 		echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
 		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
 	done
 
+test-gcs: check-local-e2e
+	@echo "🧪 Running integration tests with GCS object store..."
+	@echo "📝 Configuration: tests/config/test-gcs.yaml"
+	@set -e; \
+		: "$${GCS_HMAC_ACCESS_KEY_ID:?Set GCS_HMAC_ACCESS_KEY_ID}"; \
+		: "$${GCS_HMAC_SECRET:?Set GCS_HMAC_SECRET}"; \
+		GCS_BUCKET=$${GCS_BUCKET:-softprobe-datalake-ducklake}; \
+		RUN_ID=$$(date +%Y%m%d-%H%M%S)-$$$$; \
+		GCS_E2E_PREFIX="gs://$$GCS_BUCKET/ducklake/e2e/$$RUN_ID/"; \
+		echo "☁️  Backend prefix: $$GCS_E2E_PREFIX"; \
+		export GCS_BUCKET GCS_HMAC_ACCESS_KEY_ID GCS_HMAC_SECRET GCS_E2E_PREFIX; \
+		export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
+		export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
+		export PERF_TARGET_MS=$${PERF_TARGET_MS:-3000}; \
+		trap 'echo "🧹 Cleaning GCS prefix $$GCS_E2E_PREFIX"; gcloud storage rm -r "$$GCS_E2E_PREFIX"** >/dev/null 2>&1 || gcloud storage rm -r "$$GCS_E2E_PREFIX" >/dev/null 2>&1 || true' EXIT; \
+		for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
+			echo "🧪 Running integration $$test_name in an isolated process..."; \
+			SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+		done; \
+		for test_name in $(INTEGRATION_PERF_TESTS); do \
+			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+			SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+		done
+
 test-r2:
 	@echo "🧪 Running integration tests with Cloudflare R2..."
 	@echo "📝 Configuration: tests/config/test-r2.yaml"
-	@echo "☁️  Backend: Cloudflare R2 Iceberg Catalog"
-	@echo "⚠️  Note: Requires valid R2 credentials in test-r2.yaml"
+	@echo "☁️  Backend: Cloudflare R2 (S3-compatible DuckLake data_path)"
+	@echo "⚠️  Note: Requires AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and a real R2 endpoint/bucket"
 	@echo ""
 	@if [ -z "$$E2E_DISABLE_TLS_VALIDATION" ]; then \
 		echo "🔒 Detecting environment..."; \
@@ -373,33 +401,21 @@ stress-test-r2-ducklake:
 			echo "❌ R2 config file not found: $$R2_CONFIG"; \
 			exit 1; \
 		fi; \
-		R2_BUCKET=$${R2_BUCKET:-$$(rg "^\\s*wal_bucket:\\s*" "$$R2_CONFIG" -m 1 | sed -E 's/^[^:]*:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)}; \
-		if [ "$$R2_BUCKET" = "your-bucket-name" ]; then \
-			echo "❌ R2 bucket in $$R2_CONFIG is still placeholder: ingest_engine.wal_bucket=your-bucket-name"; \
-			echo "   Update $$R2_CONFIG with your real Iceberg R2 settings OR pass R2_BUCKET=<real-bucket>."; \
+		if ! rg -n "^ducklake:\\s*$$" "$$R2_CONFIG" >/dev/null; then \
+			echo "❌ $$R2_CONFIG is missing required ducklake: block."; \
 			exit 1; \
 		fi; \
-		if [ -z "$$R2_BUCKET" ]; then \
-			echo "❌ Could not resolve R2 bucket from $$R2_CONFIG."; \
-			echo "   Set ingest_engine.wal_bucket or pass R2_BUCKET=<real-bucket>."; \
-			exit 1; \
-		fi; \
-		if rg -n "your-bucket-name" "$$R2_CONFIG" >/dev/null; then \
-			echo "❌ $$R2_CONFIG still appears to contain placeholder/sample R2 values."; \
-			echo "   Set real R2 credentials/bucket first, then rerun."; \
+		R2_BUCKET=$${R2_BUCKET:-$$(rg "^\\s*data_path:\\s*" "$$R2_CONFIG" -m 1 | sed -E 's|.*s3://([^/]+)/.*|\1|' | xargs)}; \
+		if [ -z "$$R2_BUCKET" ] || [ "$$R2_BUCKET" = "YOUR-R2-BUCKET" ] || [ "$$R2_BUCKET" = "your-bucket-name" ]; then \
+			echo "❌ Could not resolve a real R2 bucket from $$R2_CONFIG."; \
+			echo "   Set ducklake.data_path to s3://<bucket>/ducklake/ or pass R2_BUCKET=<real-bucket>."; \
 			exit 1; \
 		fi; \
 		TMP_CONFIG=/tmp/splake-r2-ducklake-stress.yaml; \
 		cp $$R2_CONFIG $$TMP_CONFIG; \
 		sed -i.bak "s/port: 8090/port: $$PORT/" $$TMP_CONFIG && rm -f $$TMP_CONFIG.bak; \
-		printf "\nducklake:\n" >> $$TMP_CONFIG; \
-		printf "  catalog_type: \"duckdb\"\n" >> $$TMP_CONFIG; \
-		printf "  metadata_path: \"/tmp/splake-r2-ducklake/metadata.ducklake\"\n" >> $$TMP_CONFIG; \
-		printf "  data_path: \"s3://%s/ducklake/\"\n" "$$R2_BUCKET" >> $$TMP_CONFIG; \
-		printf "  catalog_alias: \"softprobe\"\n" >> $$TMP_CONFIG; \
-		printf "  metadata_schema: \"main\"\n" >> $$TMP_CONFIG; \
-		printf "  data_inlining_row_limit: 0\n" >> $$TMP_CONFIG; \
-		echo "🚀 Starting splake with $$R2_CONFIG on port $$PORT..."; \
+		sed -i.bak "s|data_path: .*|data_path: \"s3://$$R2_BUCKET/ducklake/\"|" $$TMP_CONFIG && rm -f $$TMP_CONFIG.bak; \
+		echo "🚀 Starting splake with $$R2_CONFIG on port $$PORT (bucket $$R2_BUCKET)..."; \
 		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin softprobe-runtime > /tmp/splake-r2-ducklake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \
 		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f $$TMP_CONFIG' EXIT; \
@@ -441,41 +457,27 @@ stress-test-gcs-ducklake:
 			echo "❌ GCP config file not found: $$GCP_CONFIG"; \
 			exit 1; \
 		fi; \
-		GCS_BUCKET=$${GCS_BUCKET:-$$(rg "^\\s*wal_bucket:\\s*" "$$GCP_CONFIG" -m 1 | sed -E 's/^[^:]*:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)}; \
-		if [ -z "$$GCS_BUCKET" ]; then \
-			echo "❌ Could not resolve wal_bucket from $$GCP_CONFIG."; \
-			echo "   Set ingest_engine.wal_bucket or pass GCS_BUCKET=<real-bucket>."; \
+		if ! rg -n "^ducklake:\\s*$$" "$$GCP_CONFIG" >/dev/null; then \
+			echo "❌ $$GCP_CONFIG is missing required ducklake: block."; \
 			exit 1; \
 		fi; \
-		if [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET-NAME" ] || [ "$$GCS_BUCKET" = "your-bucket-name" ]; then \
-			echo "❌ GCS bucket appears to be placeholder in $$GCP_CONFIG."; \
+		GCS_BUCKET=$${GCS_BUCKET:-$$(rg "^\\s*data_path:\\s*" "$$GCP_CONFIG" -m 1 | sed -E 's|.*(gs|s3)://([^/]+)/.*|\2|' | xargs)}; \
+		if [ -z "$$GCS_BUCKET" ] || [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET" ] || [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET-NAME" ] || [ "$$GCS_BUCKET" = "your-bucket-name" ]; then \
+			echo "❌ Could not resolve a real GCS bucket from $$GCP_CONFIG."; \
+			echo "   Set ducklake.data_path to gs://<bucket>/ducklake/ or pass GCS_BUCKET=<real-bucket>."; \
 			exit 1; \
 		fi; \
-		if [ -z "$$GOOGLE_APPLICATION_CREDENTIALS" ]; then \
-			echo "❌ GOOGLE_APPLICATION_CREDENTIALS is not set for GCS auth."; \
+		if [ -z "$$GCS_HMAC_ACCESS_KEY_ID" ] || [ -z "$$GCS_HMAC_SECRET" ]; then \
+			echo "❌ GCS_HMAC_ACCESS_KEY_ID and GCS_HMAC_SECRET are required for gs:// DuckLake I/O."; \
 			exit 1; \
 		fi; \
 		TMP_CONFIG=/tmp/splake-gcs-ducklake-stress.yaml; \
 		cp "$$GCP_CONFIG" "$$TMP_CONFIG"; \
 		sed -i.bak "s/port: 8090/port: $$PORT/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		sed -i.bak "s/max_buffer_spans: 10000/max_buffer_spans: 1/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		sed -i.bak "s/flush_interval_seconds: 60/flush_interval_seconds: 1/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		sed -i.bak "s/optimizer_interval_seconds: 300/optimizer_interval_seconds: 2/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
 		rm -rf "$$CACHE_ROOT"; \
-		mkdir -p "$$CACHE_ROOT/cache" "$$CACHE_ROOT/wal"; \
+		mkdir -p "$$CACHE_ROOT/cache"; \
 		sed -i.bak "s|cache_dir: .*|cache_dir: \"$$CACHE_ROOT/cache\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		if rg -n "^\\s*wal_dir:\\s*" "$$TMP_CONFIG" >/dev/null; then \
-			sed -i.bak "s|wal_dir: .*|wal_dir: \"$$CACHE_ROOT/wal\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		else \
-			awk -v wal="  wal_dir: \"$$CACHE_ROOT/wal\"" '1; /cache_dir:/ {print wal}' "$$TMP_CONFIG" > "$$TMP_CONFIG.inject" && mv "$$TMP_CONFIG.inject" "$$TMP_CONFIG"; \
-		fi; \
-		printf "\nducklake:\n" >> "$$TMP_CONFIG"; \
-		printf "  catalog_type: \"duckdb\"\n" >> "$$TMP_CONFIG"; \
-		printf "  metadata_path: \"/tmp/splake-gcs-ducklake/metadata.ducklake\"\n" >> "$$TMP_CONFIG"; \
-		printf "  data_path: \"s3://%s/ducklake/\"\n" "$$GCS_BUCKET" >> "$$TMP_CONFIG"; \
-		printf "  catalog_alias: \"softprobe\"\n" >> "$$TMP_CONFIG"; \
-		printf "  metadata_schema: \"main\"\n" >> "$$TMP_CONFIG"; \
-		printf "  data_inlining_row_limit: 0\n" >> "$$TMP_CONFIG"; \
+		sed -i.bak "s|data_path: .*|data_path: \"gs://$$GCS_BUCKET/ducklake/\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
 		echo "🚀 Starting local splake on port $$PORT using GCS bucket $$GCS_BUCKET..."; \
 		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="$$TMP_CONFIG" cargo run --bin softprobe-runtime > /tmp/splake-gcs-ducklake-stress.log 2>&1 & \
 		SPLAKE_PID=$$!; \

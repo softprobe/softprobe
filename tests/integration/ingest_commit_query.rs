@@ -1,9 +1,7 @@
 use crate::util::perf::{PerformanceMetrics, Timer};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
-use crate::util::storage_config::{
-    load_test_config, warn_if_minio_unresolvable,
-};
+use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
@@ -21,8 +19,8 @@ async fn build_test_pipeline(mut config: Config) -> TestPipeline {
 async fn test_config_loading() {
     let config = load_test_config();
     assert!(
-        config.ducklake.is_some(),
-        "DuckLake config should be present for local e2e"
+        matches!(config.ducklake.catalog_type.as_str(), "sqlite" | "postgres"),
+        "DuckLake catalog_type should be sqlite or postgres for local e2e"
     );
 }
 
@@ -349,7 +347,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     // After optimizer commits, data is in Iceberg and should be immediately queryable via union view.
     // For DuckLake-backed tests we currently validate staged cleanup and pre-optimizer union-read.
-    if test_pipeline.config.ducklake.is_none() {
+    // Legacy Iceberg-only post-optimizer assertions (removed with Iceberg cleanup).
+    if false {
         for (session_idx, session_id) in session_ids.iter().enumerate() {
             let escaped = session_id.replace('\'', "''");
             // Query union_spans - should include all three tiers (buffer + staged + iceberg)
@@ -716,7 +715,8 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each session through DuckDB union view...");
 
-    if test_pipeline.config.ducklake.is_none() {
+    // Legacy Iceberg-only post-optimizer assertions (removed with Iceberg cleanup).
+    if false {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
@@ -1099,10 +1099,7 @@ async fn test_pinned_metadata_updates_on_commit() {
         .expect("add spans");
     pipeline.force_flush_spans().await.expect("force flush");
 
-    let pointer_dir = test_pipeline
-        .cache_dir
-        .path()
-        .join("catalog_metadata");
+    let pointer_dir = test_pipeline.cache_dir.path().join("catalog_metadata");
     assert!(
         !pointer_dir.join("traces.json").exists(),
         "legacy catalog_metadata pointer files must not be written"
@@ -1290,88 +1287,9 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 
 #[tokio::test]
 async fn test_wal_replay_recovers_spans() {
-    use softprobe_runtime::query;
-    use tempfile::tempdir;
-
-    let mut config = load_test_config();
-    if config.ducklake.is_some() {
-        // `make test-local` sets SPLAKE_RESET_DUCKLAKE=1; a second `IngestPipeline::new` resets the
-        // DuckLake catalog while WAL replay only refills the buffer—`traces` may not exist until
-        // another flush. Skip until replay + DuckLake bootstrap is aligned.
-        return;
-    }
-
-    let cache_dir = tempdir().expect("tempdir");
-    config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-
-    let session_id = format!("replay-{}", uuid::Uuid::new_v4());
-    let now = Utc::now();
-    let span = SpanData {
-        session_id: session_id.clone(),
-        trace_id: "trace-replay".to_string(),
-        span_id: "span-replay".to_string(),
-        parent_span_id: None,
-        app_id: "app-replay".to_string(),
-        organization_id: None,
-        tenant_id: None,
-        message_type: "span".to_string(),
-        span_kind: Some("server".to_string()),
-        timestamp: now,
-        end_timestamp: Some(now),
-        attributes: HashMap::new(),
-        resource_attributes: HashMap::new(),
-        events: Vec::new(),
-        http_request_method: None,
-        http_request_path: None,
-        http_request_headers: None,
-        http_request_body: None,
-        http_response_status_code: None,
-        http_response_headers: None,
-        http_response_body: None,
-        status_code: None,
-        status_message: None,
-    };
-
-    let pipeline = softprobe_runtime::ingest_engine::IngestPipeline::new(&config)
-        .await
-        .expect("pipeline");
-    pipeline
-        .add_spans(vec![span], 256)
-        .await
-        .expect("add spans");
-    pipeline
-        .force_flush_spans()
-        .await
-        .expect("flush spans to storage");
-    drop(pipeline);
-
-    // Second pipeline: `replay_wal_on_startup` is honored by config; WAL listing is not exposed on
-    // `IngestPipeline` (integration tests assert durability via DuckLake query after restart).
-    let pipeline = softprobe_runtime::ingest_engine::IngestPipeline::new(&config)
-        .await
-        .expect("pipeline");
-
-    let query_engine =
-        query::create_query_engine(&config, std::sync::Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query");
-    let escaped = session_id.replace('\'', "''");
-    let sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
-        escaped
-    );
-
-    wait_for(
-        Duration::from_secs(15),
-        Duration::from_millis(500),
-        || async {
-            let result = query_engine.execute_query(&sql).await?;
-            let count = result.rows[0][0].as_i64().unwrap_or(0);
-            Ok(count > 0)
-        },
-    )
-    .await
-    .expect("expected WAL replay to surface spans in union view");
+    // Flush-through DuckLake ingest has no WAL tier. Kept as a skipped placeholder so historical
+    // test names do not reappear as regressions if someone reintroduces buffer/WAL paths.
+    let _config = load_test_config();
 }
 
 #[tokio::test]
@@ -1380,7 +1298,7 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
 
     let config = load_test_config();
     assert!(
-        config.ducklake.is_some(),
+        !config.ducklake.data_path.is_empty(),
         "DuckLake required for maintenance smoke"
     );
     let executor = MaintenanceExecutor::new(&config, None, None).await.unwrap();

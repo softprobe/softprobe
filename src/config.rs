@@ -1,22 +1,30 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Softprobe runtime configuration.
+///
+/// Secrets for object storage are **not** stored in YAML. Resolve them from the
+/// environment (`AWS_*` for `s3://`, `GCS_HMAC_*` / `GCP_HMAC_*` for `gs://`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
-    pub server: ServerConfig,
-    pub storage: StorageConfig,
-    pub ingest_engine: IngestEngineConfig,
-    pub compaction: CompactionConfig,
-    pub duckdb: DuckDBConfig,
-    pub s3: S3Config,
     #[serde(default)]
-    pub ducklake: Option<DuckLakeConfig>,
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub object_store: ObjectStoreConfig,
+    #[serde(default)]
+    pub query: QueryConfig,
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
+    /// Required DuckLake catalog + data warehouse settings.
+    pub ducklake: DuckLakeConfig,
     #[serde(default)]
     pub dropdown_catalog: DropdownCatalogConfig,
 }
 
 /// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for control-plane UI filter dropdowns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropdownCatalogConfig {
     #[serde(default = "default_dropdown_catalog_enabled")]
     pub enabled: bool,
@@ -24,7 +32,7 @@ pub struct DropdownCatalogConfig {
     pub active_values_days: u32,
     #[serde(default = "default_dropdown_catalog_maintenance_prune")]
     pub maintenance_prune_enabled: bool,
-    /// Max (entity_type, entity_value) pairs per single Postgres `INSERT … VALUES …` (fewer round-trips under high ingest).
+    /// Max (entity_type, entity_value) pairs per single Postgres `INSERT … VALUES …`.
     #[serde(default = "default_dropdown_catalog_upsert_batch_size")]
     pub upsert_batch_size: usize,
     #[serde(default)]
@@ -60,58 +68,154 @@ fn default_dropdown_catalog_upsert_batch_size() -> usize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    #[serde(default = "default_server_port")]
     pub port: u16,
+    #[serde(default = "default_server_host")]
     pub host: IpAddr,
+    #[serde(default = "default_server_max_body_size")]
     pub max_body_size: usize,
+    #[serde(default)]
     pub worker_threads: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageConfig {
-    pub s3_region: String,
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: default_server_port(),
+            host: default_server_host(),
+            max_body_size: default_server_max_body_size(),
+            worker_threads: None,
+        }
+    }
 }
 
+fn default_server_port() -> u16 {
+    8090
+}
+
+fn default_server_host() -> IpAddr {
+    "0.0.0.0".parse().expect("valid default host")
+}
+
+fn default_server_max_body_size() -> usize {
+    100 * 1024 * 1024
+}
+
+/// Non-secret object-store connection settings (region / custom endpoint).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestEngineConfig {
-    #[serde(default = "default_ingest_cache_dir")]
+#[serde(deny_unknown_fields)]
+pub struct ObjectStoreConfig {
+    #[serde(default = "default_object_store_region")]
+    pub region: String,
+    /// Custom S3-compatible endpoint (MinIO, R2). Omit for AWS/GCS native paths.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
+impl Default for ObjectStoreConfig {
+    fn default() -> Self {
+        Self {
+            region: default_object_store_region(),
+            endpoint: None,
+        }
+    }
+}
+
+fn default_object_store_region() -> String {
+    "us-east-1".to_string()
+}
+
+/// DuckDB query-engine worker settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryConfig {
+    #[serde(default = "default_query_max_connections")]
+    pub max_connections: usize,
+    /// Directory for DuckDB `cache_httpfs` on-disk cache (query path).
+    #[serde(default = "default_query_cache_dir")]
     pub cache_dir: Option<String>,
 }
 
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_query_max_connections(),
+            cache_dir: default_query_cache_dir(),
+        }
+    }
+}
+
+fn default_query_max_connections() -> usize {
+    10
+}
+
+fn default_query_cache_dir() -> Option<String> {
+    Some("/var/tmp/softprobe/duckdb".to_string())
+}
+
+/// Compaction + metadata maintenance scheduling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionConfig {
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceConfig {
+    /// Run `ducklake_merge_adjacent_files` compaction.
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    pub target_file_size_bytes: usize,    // 64MB
-    pub compaction_interval_seconds: u64, // 3600 (1 hour)
-    #[serde(default = "default_metadata_maintenance_enabled")]
-    pub metadata_maintenance_enabled: bool,
-    #[serde(default = "default_metadata_maintenance_interval_seconds")]
-    pub metadata_maintenance_interval_seconds: u64,
-    #[serde(default = "default_metadata_max_snapshot_age_seconds")]
-    pub metadata_max_snapshot_age_seconds: u64,
-    #[serde(default = "default_metadata_remove_orphan_files_enabled")]
-    pub metadata_remove_orphan_files_enabled: bool,
-    #[serde(default = "default_metadata_remove_orphan_older_than_seconds")]
-    pub metadata_remove_orphan_older_than_seconds: u64,
+    #[serde(default = "default_target_file_size_bytes")]
+    pub target_file_size_bytes: usize,
+    #[serde(default = "default_interval_seconds")]
+    pub interval_seconds: u64,
+    #[serde(default = "default_true")]
+    pub metadata_enabled: bool,
+    #[serde(default = "default_interval_seconds")]
+    pub metadata_interval_seconds: u64,
+    #[serde(default = "default_max_snapshot_age_seconds")]
+    pub max_snapshot_age_seconds: u64,
+    /// When true (and metadata maintenance runs), call `ducklake_cleanup_old_files`.
+    #[serde(default = "default_true")]
+    pub remove_orphan_files_enabled: bool,
+    #[serde(default = "default_remove_orphan_older_than_seconds")]
+    pub remove_orphan_older_than_seconds: u64,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_file_size_bytes: default_target_file_size_bytes(),
+            interval_seconds: default_interval_seconds(),
+            metadata_enabled: true,
+            metadata_interval_seconds: default_interval_seconds(),
+            max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
+            remove_orphan_files_enabled: true,
+            remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_target_file_size_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+fn default_interval_seconds() -> u64 {
+    3600
+}
+
+fn default_max_snapshot_age_seconds() -> u64 {
+    7 * 24 * 3600
+}
+
+fn default_remove_orphan_older_than_seconds() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuckDBConfig {
-    pub max_connections: usize,          // 10
-    pub max_memory_per_query: String,    // "2GB"
-    pub max_query_duration_seconds: u64, // 30
-    pub enable_spill_to_disk: bool,
-    pub spill_directory: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct S3Config {
-    pub endpoint: Option<String>,
-    pub access_key_id: Option<String>,
-    pub secret_access_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DuckLakeConfig {
     /// Catalog backend: `postgres` (production / multi-tenant) or `sqlite` (local multi-client).
     /// `duckdb` is rejected — DuckLake documents it as single-client only.
@@ -126,14 +230,25 @@ pub struct DuckLakeConfig {
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
     /// Prefer inlining small collector batches into the catalog over tiny Parquet files.
-    /// Default 10000: validated on Postgres+GCS stress (near-zero data parquet for batches ≤10k).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
     /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
-    /// Enables same-tenant concurrent commits (DuckLake/Postgres retries handle conflicts).
-    /// Default 4 (clamped 1..=16). Prefer ≤4 under heavy inlining; 8+ caused 503 storms in stress.
     #[serde(default = "default_writer_pool_size")]
     pub writer_pool_size: usize,
+}
+
+impl Default for DuckLakeConfig {
+    fn default() -> Self {
+        Self {
+            catalog_type: default_ducklake_catalog_type(),
+            metadata_path: default_ducklake_metadata_path(),
+            data_path: default_ducklake_data_path(),
+            catalog_alias: default_ducklake_catalog_alias(),
+            metadata_schema: default_ducklake_metadata_schema(),
+            data_inlining_row_limit: default_data_inlining_row_limit(),
+            writer_pool_size: default_writer_pool_size(),
+        }
+    }
 }
 
 fn default_ducklake_catalog_type() -> String {
@@ -171,154 +286,154 @@ impl DuckLakeConfig {
     }
 }
 
-fn default_metadata_maintenance_enabled() -> bool {
-    true
+/// Resolved object-store credentials (never loaded from YAML).
+#[derive(Debug, Clone, Default)]
+pub struct ObjectStoreCredentials {
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub session_token: Option<String>,
 }
 
-fn default_ingest_cache_dir() -> Option<String> {
-    Some("/var/tmp/softprobe/duckdb".to_string())
-}
-
-fn default_metadata_maintenance_interval_seconds() -> u64 {
-    3600
-}
-
-fn default_metadata_max_snapshot_age_seconds() -> u64 {
-    7 * 24 * 3600
-}
-
-fn default_metadata_remove_orphan_files_enabled() -> bool {
-    true
-}
-
-fn default_metadata_remove_orphan_older_than_seconds() -> u64 {
-    3600
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig {
-                port: 8090,
-                host: "0.0.0.0".parse().unwrap(),
-                max_body_size: 100 * 1024 * 1024, // 100MB
-                worker_threads: None,
-            },
-            storage: StorageConfig {
-                s3_region: "us-east-1".to_string(),
-            },
-            ingest_engine: IngestEngineConfig {
-                cache_dir: default_ingest_cache_dir(),
-            },
-            compaction: CompactionConfig {
-                enabled: true,
-                target_file_size_bytes: 64 * 1024 * 1024, // 64MB
-                compaction_interval_seconds: 3600,
-                metadata_maintenance_enabled: true,
-                metadata_maintenance_interval_seconds: 3600,
-                metadata_max_snapshot_age_seconds: 7 * 24 * 3600,
-                metadata_remove_orphan_files_enabled: true,
-                metadata_remove_orphan_older_than_seconds: 3600,
-            },
-            duckdb: DuckDBConfig {
-                max_connections: 10,
-                max_memory_per_query: "2GB".to_string(),
-                max_query_duration_seconds: 30,
-                enable_spill_to_disk: true,
-                spill_directory: "/tmp/duckdb_spill".to_string(),
-            },
-            s3: S3Config {
-                endpoint: None,
-                access_key_id: None,
-                secret_access_key: None,
-            },
-            ducklake: Some(DuckLakeConfig {
-                catalog_type: default_ducklake_catalog_type(),
-                metadata_path: default_ducklake_metadata_path(),
-                data_path: default_ducklake_data_path(),
-                catalog_alias: default_ducklake_catalog_alias(),
-                metadata_schema: default_ducklake_metadata_schema(),
-                data_inlining_row_limit: default_data_inlining_row_limit(),
-                writer_pool_size: default_writer_pool_size(),
-            }),
-            dropdown_catalog: DropdownCatalogConfig::default(),
-        }
+impl ObjectStoreCredentials {
+    pub fn is_complete(&self) -> bool {
+        self.access_key_id
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .secret_access_key
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
     }
 }
 
 impl Config {
-    pub fn ducklake_or_default(&self) -> DuckLakeConfig {
-        self.ducklake.clone().unwrap_or(DuckLakeConfig {
-            catalog_type: default_ducklake_catalog_type(),
-            metadata_path: default_ducklake_metadata_path(),
-            data_path: default_ducklake_data_path(),
-            catalog_alias: default_ducklake_catalog_alias(),
-            metadata_schema: default_ducklake_metadata_schema(),
-            data_inlining_row_limit: default_data_inlining_row_limit(),
-            writer_pool_size: default_writer_pool_size(),
-        })
-    }
-
     /// Reject unsupported DuckLake catalog backends (official multi-client = postgres or sqlite).
     pub fn validate_ducklake_catalog(&self) -> anyhow::Result<()> {
-        let catalog_type = self.ducklake_or_default().catalog_type;
-        match catalog_type.as_str() {
+        match self.ducklake.catalog_type.as_str() {
             "postgres" | "sqlite" => Ok(()),
             "duckdb" => anyhow::bail!(
                 "ducklake.catalog_type=duckdb is unsupported (DuckLake single-client only). \
                  Use sqlite for local multi-client concurrency or postgres for production."
             ),
-            other => anyhow::bail!(
-                "unsupported ducklake.catalog_type={other}; use postgres or sqlite"
-            ),
+            other => {
+                anyhow::bail!("unsupported ducklake.catalog_type={other}; use postgres or sqlite")
+            }
         }
     }
 
     pub fn load() -> anyhow::Result<Self> {
-        // Load from environment variables or config file
-        // Priority: environment > config file > defaults
-
-        // Try to load from config file first
         let config_file =
             std::env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yaml".to_string());
 
-        if std::path::Path::new(&config_file).exists() {
+        let mut config = if std::path::Path::new(&config_file).exists() {
             let config_str = std::fs::read_to_string(&config_file)?;
-            let mut config: Config = serde_yaml::from_str(&config_str)?;
-
-            // Override with environment variables if present
-            config.apply_env_overrides();
-            config.validate_ducklake_catalog()?;
-
-            Ok(config)
+            serde_yaml::from_str(&config_str)?
+        } else if std::env::var("CONFIG_FILE").is_ok() {
+            anyhow::bail!(
+                "CONFIG_FILE={config_file} does not exist. Provide a valid path or unset CONFIG_FILE."
+            );
         } else {
-            // Use defaults with environment overrides
-            let mut config = Config::default();
-            config.apply_env_overrides();
-            config.validate_ducklake_catalog()?;
-            Ok(config)
-        }
+            Config::default()
+        };
+
+        config.apply_env_overrides()?;
+        config.validate_ducklake_catalog()?;
+        Ok(config)
     }
 
-    fn apply_env_overrides(&mut self) {
+    fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         if let Ok(port) = std::env::var("PORT") {
-            if let Ok(p) = port.parse() {
-                self.server.port = p;
-            }
+            self.server.port = port
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid PORT={port}: {e}"))?;
         }
 
         if let Ok(region) = std::env::var("S3_REGION") {
-            self.storage.s3_region = region;
+            if region.trim().is_empty() {
+                anyhow::bail!("S3_REGION is set but empty");
+            }
+            self.object_store.region = region;
         }
 
         if let Ok(raw) = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES") {
-            if let Ok(n) = raw.trim().parse::<usize>() {
-                if n > 0 {
-                    self.server.max_body_size = n;
-                }
+            let n: usize = raw
+                .trim()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid SOFTPROBE_MAX_HTTP_BODY_BYTES={raw}: {e}"))?;
+            if n == 0 {
+                anyhow::bail!("SOFTPROBE_MAX_HTTP_BODY_BYTES must be > 0");
             }
+            self.server.max_body_size = n;
         }
+        Ok(())
     }
+
+    /// Resolve credentials for `data_path` from the environment (never from YAML).
+    ///
+    /// - `gs://` → `GCS_HMAC_ACCESS_KEY_ID` / `GCS_HMAC_SECRET` (or `GCP_HMAC_*`)
+    /// - `s3://` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [/ `AWS_SESSION_TOKEN`],
+    ///   then EC2 instance metadata when unset
+    pub fn resolve_object_store_credentials(&self, data_path: &str) -> ObjectStoreCredentials {
+        if data_path.starts_with("gs://") {
+            return ObjectStoreCredentials {
+                access_key_id: std::env::var("GCS_HMAC_ACCESS_KEY_ID")
+                    .or_else(|_| std::env::var("GCP_HMAC_ACCESS_KEY_ID"))
+                    .ok(),
+                secret_access_key: std::env::var("GCS_HMAC_SECRET")
+                    .or_else(|_| std::env::var("GCP_HMAC_SECRET"))
+                    .ok(),
+                session_token: None,
+            };
+        }
+        if data_path.starts_with("s3://") || self.object_store.endpoint.is_some() {
+            let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
+            let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+            let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+            if access_key_id.is_some() && secret_access_key.is_some() {
+                return ObjectStoreCredentials {
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                };
+            }
+            return fetch_instance_metadata_credentials().unwrap_or_default();
+        }
+        ObjectStoreCredentials::default()
+    }
+}
+
+fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredentials> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+
+    let role_url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
+    let role_response = match client.get(role_url).send() {
+        Ok(resp) => resp,
+        Err(_) => return Ok(ObjectStoreCredentials::default()),
+    };
+
+    let role_name = role_response.text()?.trim().to_string();
+    if role_name.is_empty() {
+        return Ok(ObjectStoreCredentials::default());
+    }
+
+    let creds_url = format!(
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
+        role_name
+    );
+    let creds_response = client.get(&creds_url).send()?;
+    let creds_json: serde_json::Value = creds_response.json()?;
+
+    Ok(ObjectStoreCredentials {
+        access_key_id: creds_json["AccessKeyId"].as_str().map(|s| s.to_string()),
+        secret_access_key: creds_json["SecretAccessKey"]
+            .as_str()
+            .map(|s| s.to_string()),
+        session_token: creds_json["Token"].as_str().map(|s| s.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -334,7 +449,51 @@ mod tests {
         let yaml = serde_yaml::to_string(&c).expect("serialize");
         let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(parsed.server.port, c.server.port);
-        assert_eq!(parsed.storage.s3_region, c.storage.s3_region);
+        assert_eq!(parsed.object_store.region, c.object_store.region);
+        assert_eq!(parsed.ducklake.catalog_type, c.ducklake.catalog_type);
+    }
+
+    #[test]
+    fn minimal_yaml_only_requires_ducklake() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("minimal ok");
+        assert_eq!(c.server.port, 8090);
+        assert_eq!(c.query.max_connections, 10);
+        assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
+    }
+
+    #[test]
+    fn reject_legacy_top_level_keys() {
+        let yaml = r#"
+storage:
+  s3_region: us-east-1
+ducklake:
+  catalog_type: sqlite
+"#;
+        let err = serde_yaml::from_str::<Config>(yaml).expect_err("legacy rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("storage"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_unused_duckdb_knobs() {
+        let yaml = r#"
+query:
+  max_connections: 2
+  max_memory_per_query: "2GB"
+ducklake:
+  catalog_type: sqlite
+"#;
+        let err = serde_yaml::from_str::<Config>(yaml).expect_err("unused knobs rejected");
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]
@@ -354,6 +513,20 @@ mod tests {
         }
 
         assert_eq!(loaded.server.port, original.server.port);
+        assert_eq!(loaded.ducklake.data_path, original.ducklake.data_path);
+    }
+
+    #[test]
+    fn load_fails_when_config_file_missing() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let prev = std::env::var("CONFIG_FILE").ok();
+        std::env::set_var("CONFIG_FILE", "/tmp/does-not-exist-softprobe-config.yaml");
+        let err = Config::load().expect_err("missing file");
+        match prev {
+            Some(p) => std::env::set_var("CONFIG_FILE", p),
+            None => std::env::remove_var("CONFIG_FILE"),
+        }
+        assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
@@ -368,7 +541,7 @@ mod tests {
         std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES");
 
         let mut c = Config::default();
-        c.apply_env_overrides();
+        c.apply_env_overrides().expect("overrides");
 
         match prev_port {
             Some(p) => std::env::set_var("PORT", p),
@@ -384,7 +557,7 @@ mod tests {
         }
 
         assert_eq!(c.server.port, 9191);
-        assert_eq!(c.storage.s3_region, "eu-west-1");
+        assert_eq!(c.object_store.region, "eu-west-1");
     }
 
     #[test]
@@ -393,7 +566,7 @@ mod tests {
         let prev = std::env::var("SOFTPROBE_MAX_HTTP_BODY_BYTES").ok();
         std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", "5242880");
         let mut c = Config::default();
-        c.apply_env_overrides();
+        c.apply_env_overrides().expect("overrides");
         match prev {
             Some(p) => std::env::set_var("SOFTPROBE_MAX_HTTP_BODY_BYTES", p),
             None => std::env::remove_var("SOFTPROBE_MAX_HTTP_BODY_BYTES"),
@@ -404,10 +577,56 @@ mod tests {
     #[test]
     fn reject_duckdb_catalog_type() {
         let mut c = Config::default();
-        let mut dl = c.ducklake_or_default();
-        dl.catalog_type = "duckdb".to_string();
-        c.ducklake = Some(dl);
+        c.ducklake.catalog_type = "duckdb".to_string();
         let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn reject_config_file_without_ducklake_block() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("no-ducklake.yaml");
+        let yaml = r#"
+server:
+  port: 8090
+object_store:
+  region: us-east-1
+"#;
+        std::fs::write(&path, yaml).expect("write");
+        let prev = std::env::var("CONFIG_FILE").ok();
+        std::env::set_var("CONFIG_FILE", path.to_str().expect("utf8"));
+        let err = Config::load().expect_err("missing ducklake must fail");
+        match prev {
+            Some(p) => std::env::set_var("CONFIG_FILE", p),
+            None => std::env::remove_var("CONFIG_FILE"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ducklake") || msg.contains("missing field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_gcs_credentials_from_env() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock");
+        let prev_id = std::env::var("GCS_HMAC_ACCESS_KEY_ID").ok();
+        let prev_secret = std::env::var("GCS_HMAC_SECRET").ok();
+        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "gcs-key");
+        std::env::set_var("GCS_HMAC_SECRET", "gcs-secret");
+        let c = Config::default();
+        let creds = c.resolve_object_store_credentials("gs://bucket/path/");
+        match prev_id {
+            Some(p) => std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", p),
+            None => std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID"),
+        }
+        match prev_secret {
+            Some(p) => std::env::set_var("GCS_HMAC_SECRET", p),
+            None => std::env::remove_var("GCS_HMAC_SECRET"),
+        }
+        assert_eq!(creds.access_key_id.as_deref(), Some("gcs-key"));
+        assert_eq!(creds.secret_access_key.as_deref(), Some("gcs-secret"));
+        assert!(creds.is_complete());
     }
 }

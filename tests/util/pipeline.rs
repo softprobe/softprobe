@@ -15,26 +15,32 @@ pub struct TestPipeline {
 impl TestPipeline {
     pub async fn new(mut config: Config) -> Self {
         let cache_dir = TempDir::new().expect("tempdir");
-        config.ingest_engine.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
-        if config.ducklake.is_none() {
-            config.ducklake = Some(config.ducklake_or_default());
-        }
-        if let Some(ducklake) = config.ducklake.as_mut() {
-            let dl_dir = cache_dir.path().join("ducklake");
-            std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
-            ducklake.metadata_path = dl_dir
-                .join(format!("metadata-{}.ducklake", Uuid::new_v4()))
-                .to_string_lossy()
-                .to_string();
-            let run_id = Uuid::new_v4();
-            if ducklake.data_path.contains("://") {
-                // Keep object-storage-backed paths for integration validation, but isolate each run.
-                let base = ducklake.data_path.trim_end_matches('/');
-                ducklake.data_path = format!("{}/tests/{}/", base, run_id);
-            } else {
-                // Default to object storage for integration tests to validate committed data persistence.
-                ducklake.data_path = format!("s3://warehouse/ducklake/tests/{}/", run_id);
+        config.query.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
+        let run_id = Uuid::new_v4();
+        match config.ducklake.catalog_type.as_str() {
+            "postgres" => {
+                // Isolate concurrent test runs in the shared local Postgres catalog.
+                let schema = format!("perf_{}", run_id.simple());
+                config.ducklake.metadata_schema = schema;
             }
+            _ => {
+                let dl_dir = cache_dir.path().join("ducklake");
+                std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
+                config.ducklake.catalog_type = "sqlite".to_string();
+                config.ducklake.metadata_path = dl_dir
+                    .join(format!("metadata-{}.sqlite", run_id))
+                    .to_string_lossy()
+                    .to_string();
+                config.ducklake.metadata_schema = "main".to_string();
+            }
+        }
+        if config.ducklake.data_path.contains("://") {
+            // Keep object-storage-backed paths for integration validation, but isolate each run.
+            let base = config.ducklake.data_path.trim_end_matches('/');
+            config.ducklake.data_path = format!("{}/tests/{}/", base, run_id);
+        } else {
+            // Default to object storage for integration tests to validate committed data persistence.
+            config.ducklake.data_path = format!("s3://warehouse/ducklake/tests/{}/", run_id);
         }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
 

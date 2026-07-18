@@ -30,10 +30,8 @@ pub async fn create_query_engine_for_scope(
         return create_query_engine(config, tiered_storage).await;
     }
     let mut cfg = config.clone();
-    let mut ducklake = cfg.ducklake_or_default();
-    ducklake.metadata_schema = scope.metadata_schema.clone();
-    ducklake.data_path = scope.data_path.clone();
-    cfg.ducklake = Some(ducklake);
+    cfg.ducklake.metadata_schema = scope.metadata_schema.clone();
+    cfg.ducklake.data_path = scope.data_path.clone();
     let duckdb = Arc::new(duckdb::DuckDBQueryEngine::new(&cfg, tiered_storage).await?);
     Ok(QueryEngine { duckdb })
 }

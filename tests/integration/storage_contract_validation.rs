@@ -7,7 +7,7 @@
 
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
-use crate::util::storage_config::{load_test_config};
+use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};

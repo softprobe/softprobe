@@ -105,9 +105,9 @@ impl PhaseKind {
                 "ingest" | "ingest_only" | "ingest-only" => PhaseKind::Ingest,
                 "query" | "query_only" | "query-only" => PhaseKind::Query,
                 "mixed" => PhaseKind::Mixed,
-                other => anyhow::bail!(
-                    "unknown phase '{other}' (expected ingest, query, or mixed)"
-                ),
+                other => {
+                    anyhow::bail!("unknown phase '{other}' (expected ingest, query, or mixed)")
+                }
             });
         }
         if out.is_empty() {
@@ -452,7 +452,9 @@ async fn run_phase(
         span: span_stats.snapshot(duration_secs).await,
         log: log_stats.snapshot(duration_secs).await,
         metric: metric_stats.snapshot(duration_secs).await,
-        query: query_stats.snapshot((args.duration.saturating_sub(warmup_secs)) as f64).await,
+        query: query_stats
+            .snapshot((args.duration.saturating_sub(warmup_secs)) as f64)
+            .await,
     })
 }
 
@@ -1273,7 +1275,10 @@ fn sample_metric(counter: u64) -> Metric {
 }
 
 async fn print_phase_report(args: &Args, snap: &PhaseSnapshot) {
-    println!("\n========== Phase Report: {} ==========", snap.kind.label());
+    println!(
+        "\n========== Phase Report: {} ==========",
+        snap.kind.label()
+    );
     println!("Duration: {} seconds", args.duration);
     println!(
         "Offered events/s: span={} log={} metric={} | batch_size={}",
@@ -1358,8 +1363,10 @@ fn print_interference_summary(phases: &[PhaseSnapshot]) {
 
     println!("\n========== Interference Summary ==========");
     if let (Some(ingest), Some(mixed)) = (ingest, mixed) {
-        let ingest_total = ingest.span.achieved_eps + ingest.log.achieved_eps + ingest.metric.achieved_eps;
-        let mixed_total = mixed.span.achieved_eps + mixed.log.achieved_eps + mixed.metric.achieved_eps;
+        let ingest_total =
+            ingest.span.achieved_eps + ingest.log.achieved_eps + ingest.metric.achieved_eps;
+        let mixed_total =
+            mixed.span.achieved_eps + mixed.log.achieved_eps + mixed.metric.achieved_eps;
         let delta = mixed_total - ingest_total;
         let pct = if ingest_total > 0.0 {
             100.0 * delta / ingest_total

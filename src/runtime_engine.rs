@@ -196,10 +196,9 @@ impl RuntimeEngineManager {
         let scope = if let Some(resolver) = resolver {
             resolver.resolve_or_create(tenant_id).await?
         } else {
-            let ducklake = self.config.ducklake_or_default();
             DuckLakeScope {
-                metadata_schema: ducklake.metadata_schema,
-                data_path: ducklake.data_path,
+                metadata_schema: self.config.ducklake.metadata_schema.clone(),
+                data_path: self.config.ducklake.data_path.clone(),
             }
         };
 
@@ -263,11 +262,11 @@ pub struct DuckLakeScopeResolver {
 
 impl DuckLakeScopeResolver {
     pub async fn connect(config: &Config) -> Result<Option<Self>> {
-        let dl = config.ducklake_or_default();
+        let dl = &config.ducklake;
         if dl.catalog_type != "postgres" {
             return Ok(None);
         }
-        let resolver = Self::build_pool(&dl)?;
+        let resolver = Self::build_pool(dl)?;
         resolver.ensure_registry().await?;
         resolver.ensure_scope().await?;
         Ok(Some(resolver))

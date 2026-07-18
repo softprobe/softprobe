@@ -32,12 +32,12 @@ impl DropdownCatalog {
         if !config.dropdown_catalog.enabled {
             return Ok(None);
         }
-        let dl = config.ducklake_or_default();
+        let dl = &config.ducklake;
         if dl.catalog_type != "postgres" {
             warn!("dropdown catalog enabled but ducklake.catalog_type is not postgres; skipping");
             return Ok(None);
         }
-        let cat = std::sync::Arc::new(Self::build_pool(config, &dl)?);
+        let cat = std::sync::Arc::new(Self::build_pool(config, dl)?);
         cat.ensure_table().await?;
         Ok(Some(cat))
     }

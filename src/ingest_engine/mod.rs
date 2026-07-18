@@ -74,7 +74,7 @@ impl IngestPipeline {
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
         let writer =
             Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone(), tenant_ducklake).await?);
-        let cache_dir = config.ingest_engine.cache_dir.as_ref().map(PathBuf::from);
+        let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
         let storage = Storage::new(writer);
 
         Ok(Self {
@@ -93,10 +93,8 @@ impl IngestPipeline {
         scope: DuckLakeScope,
     ) -> Result<Storage> {
         let mut scoped_config = config.clone();
-        let mut ducklake = scoped_config.ducklake_or_default();
-        ducklake.metadata_schema = scope.metadata_schema;
-        ducklake.data_path = scope.data_path;
-        scoped_config.ducklake = Some(ducklake);
+        scoped_config.ducklake.metadata_schema = scope.metadata_schema;
+        scoped_config.ducklake.data_path = scope.data_path;
         let writer = Arc::new(
             DuckLakeWriter::new_scope_bound(&scoped_config, dropdown_catalog, tenant_ducklake)
                 .await?,

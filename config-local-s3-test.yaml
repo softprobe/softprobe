@@ -1,28 +1,30 @@
+# Local S3/MinIO DuckLake smoke config.
+# Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+
 server:
   port: 8090
   host: "0.0.0.0"
   max_body_size: 104857600
   worker_threads: null
 
-storage:
-  s3_region: "us-east-1"
+object_store:
+  region: "us-east-1"
+  endpoint: null
 
-ingest_engine:
+query:
+  max_connections: 10
   cache_dir: "/tmp/datalake-local-test/cache"
 
-compaction:
-  enabled: true
+maintenance:
+  enabled: false
   target_file_size_bytes: 67108864
-  compaction_interval_seconds: 300
+  interval_seconds: 3600
 
-s3:
-  endpoint: null
-  access_key_id: null
-  secret_access_key: null
-
-duckdb:
-  max_connections: 2
-  max_memory_per_query: "2GB"
-  max_query_duration_seconds: 60
-  enable_spill_to_disk: true
-  spill_directory: "/tmp/datalake-local-test/duckdb_spill"
+ducklake:
+  catalog_type: "sqlite"
+  metadata_path: "/tmp/datalake-local-test/metadata.sqlite"
+  data_path: "s3://YOUR-BUCKET/ducklake/"
+  catalog_alias: "softprobe"
+  metadata_schema: "main"
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

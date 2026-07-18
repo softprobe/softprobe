@@ -26,19 +26,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     let mut config = Config::default();
-    config.compaction.enabled = false;
-    config.compaction.metadata_maintenance_enabled = false;
-    config.ingest_engine.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
+    config.maintenance.enabled = false;
+    config.maintenance.metadata_enabled = false;
+    config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    let mut ducklake = config.ducklake_or_default();
-    ducklake.catalog_type = "postgres".to_string();
-    ducklake.metadata_path =
+    config.ducklake.catalog_type = "postgres".to_string();
+    config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
-    ducklake.catalog_alias = "softprobe".to_string();
-    ducklake.metadata_schema = registry_schema;
-    ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
-    ducklake.data_inlining_row_limit = Some(0);
-    config.ducklake = Some(ducklake);
+    config.ducklake.catalog_alias = "softprobe".to_string();
+    config.ducklake.metadata_schema = registry_schema;
+    config.ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
+    config.ducklake.data_inlining_row_limit = Some(0);
     config
 }
 
@@ -174,7 +172,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .await
         .expect("write spans for tenant A");
 
-    let metadata_path = config.ducklake.as_ref().unwrap().metadata_path.clone();
+    let metadata_path = config.ducklake.metadata_path.clone();
 
     let conn = duckdb::Connection::open_in_memory().expect("duckdb");
     let n_b = trace_count_for_session(&conn, &metadata_path, &path_b, &meta_b, &session_id);
@@ -258,14 +256,11 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let registry_schema = format!("softprobe_grpc_it_{suffix}");
     let mut config = postgres_registry_config(&temp, registry_schema.clone());
 
-    std::env::set_var("S3_ENDPOINT", "http://localhost:9000");
-    std::env::set_var("S3_ACCESS_KEY", "minioadmin");
-    std::env::set_var("S3_SECRET_KEY", "minioadmin");
+    std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");
-    config.s3.endpoint = Some("http://localhost:9000".to_string());
-    config.s3.access_key_id = Some("minioadmin".to_string());
-    config.s3.secret_access_key = Some("minioadmin".to_string());
-    config.storage.s3_region = "us-east-1".to_string();
+    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    config.object_store.region = "us-east-1".to_string();
 
     let tenant_id = format!("tenant_grpc_it_{suffix}");
     let tenant_schema = format!("softprobe_grpc_it_data_{suffix}");
@@ -352,7 +347,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
 
     pipeline.force_flush_spans().await.expect("flush spans");
 
-    let metadata_path = config.ducklake.as_ref().unwrap().metadata_path.clone();
+    let metadata_path = config.ducklake.metadata_path.clone();
     let conn = duckdb::Connection::open_in_memory().expect("duckdb");
     let n: i64 = trace_count_for_session(
         &conn,
