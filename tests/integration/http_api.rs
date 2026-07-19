@@ -75,6 +75,66 @@ fn int_kv(key: &str, value: i64) -> KeyValue {
     }
 }
 
+fn double_kv(key: &str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::DoubleValue(value)),
+        }),
+    }
+}
+
+fn llm_generation_request(
+    session_id: &str,
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+) -> ExportTraceServiceRequest {
+    let generation = Span {
+        trace_id: trace_id.to_vec(),
+        span_id: span_id.to_vec(),
+        parent_span_id: vec![],
+        name: "chat.completions".to_string(),
+        kind: span::SpanKind::Client as i32,
+        start_time_unix_nano: 1_721_349_720_000_000_000,
+        end_time_unix_nano: 1_721_349_721_500_000_000,
+        attributes: vec![
+            string_kv("sp.session.id", session_id),
+            string_kv("sp.observation.type", "generation"),
+            string_kv("sp.user.id", "user-llm-1"),
+            string_kv("gen_ai.provider.name", "openai"),
+            string_kv("gen_ai.request.model", "gpt-4o"),
+            string_kv("gen_ai.operation.name", "chat"),
+            int_kv("gen_ai.usage.input_tokens", 12),
+            int_kv("gen_ai.usage.output_tokens", 34),
+            int_kv("gen_ai.usage.total_tokens", 46),
+            double_kv("sp.cost.total", 0.0123),
+        ],
+        status: Some(Status {
+            code: 1,
+            message: String::new(),
+        }),
+        ..Default::default()
+    };
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_kv("service.name", "llm-gateway")],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "softprobe.llm".to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![generation],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    }
+}
+
 fn telemetry_trace_request(session_id: &str, trace_id: [u8; 16]) -> ExportTraceServiceRequest {
     let root = Span {
         trace_id: trace_id.to_vec(),
@@ -543,4 +603,129 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
     assert_eq!(v["spans"][0]["trace_id"], trace_hex);
     assert_eq!(v["logs"][0]["body"], "payment provider timeout");
     assert_eq!(v["metrics"][0]["metric_name"], "http.server.duration");
+}
+
+#[tokio::test]
+async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-llm-query-e2e";
+    let trace_bytes = [
+        0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47,
+        0x36,
+    ];
+    let span_bytes = [0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7];
+    let trace_hex = hex::encode(trace_bytes);
+    let span_hex = hex::encode(span_bytes);
+
+    let ingest = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_string(&llm_generation_request(session_id, trace_bytes, span_bytes))
+                .unwrap(),
+        ))
+        .unwrap();
+    let ingest_resp = router.clone().oneshot(ingest).await.expect("ingest");
+    assert_eq!(ingest_resp.status(), StatusCode::OK);
+
+    let engine = state.engine_for_id("").await.expect("engine");
+    engine
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    let score_body = json!({
+        "score_id": "score-llm-query-1",
+        "timestamp": "2024-07-19T00:02:00Z",
+        "trace_id": trace_hex,
+        "span_id": span_hex,
+        "session_id": session_id,
+        "name": "correctness",
+        "data_type": "numeric",
+        "numeric_value": 0.91,
+        "source": "evaluator",
+        "metadata": { "suite": "integration" }
+    });
+    let score_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(score_body.to_string()))
+        .unwrap();
+    let score_resp = router.clone().oneshot(score_req).await.expect("score");
+    assert_eq!(score_resp.status(), StatusCode::CREATED);
+
+    let search_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "observation_types": ["generation"],
+                "session_id": session_id,
+                "limit": 50
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let search_resp = router.clone().oneshot(search_req).await.expect("search");
+    assert_eq!(search_resp.status(), StatusCode::OK);
+    let search = response_json(search_resp).await;
+    assert_eq!(search["items"].as_array().unwrap().len(), 1);
+    assert_eq!(search["items"][0]["span_id"], span_hex);
+    assert_eq!(search["items"][0]["observation_type"], "generation");
+    assert_eq!(search["items"][0]["model_name"], "gpt-4o");
+    assert_eq!(search["items"][0]["input_tokens"], 12);
+    assert_eq!(search["items"][0]["total_tokens"], 46);
+    assert!(search["items"][0].get("attributes").is_none());
+
+    let obs_req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let obs_resp = router.clone().oneshot(obs_req).await.expect("observation");
+    assert_eq!(obs_resp.status(), StatusCode::OK);
+    let obs = response_json(obs_resp).await;
+    assert_eq!(obs["span_id"], span_hex);
+    assert_eq!(obs["attributes"]["sp.observation.type"], "generation");
+    assert_eq!(obs["scores"].as_array().unwrap().len(), 1);
+    assert_eq!(obs["scores"][0]["score_id"], "score-llm-query-1");
+
+    let trace_req = Request::builder()
+        .uri(format!("/v1/llm/traces/{trace_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let trace_resp = router.clone().oneshot(trace_req).await.expect("trace");
+    assert_eq!(trace_resp.status(), StatusCode::OK);
+    let trace = response_json(trace_resp).await;
+    assert_eq!(trace["trace"]["trace_id"], trace_hex);
+    assert_eq!(trace["trace"]["observation_count"], 1);
+    assert_eq!(trace["observations"].as_array().unwrap().len(), 1);
+    assert_eq!(trace["scores"].as_array().unwrap().len(), 1);
+
+    let session_req = Request::builder()
+        .uri(format!(
+            "/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let session_resp = router.clone().oneshot(session_req).await.expect("session");
+    assert_eq!(session_resp.status(), StatusCode::OK);
+    let session = response_json(session_resp).await;
+    assert_eq!(session["session_id"], session_id);
+    assert_eq!(session["trace_count"], 1);
+    assert_eq!(session["observation_count"], 1);
+    assert_eq!(session["traces"][0]["trace_id"], trace_hex);
+    assert_eq!(session["scores"].as_array().unwrap().len(), 1);
+
+    let missing = Request::builder()
+        .uri("/v1/llm/observations/does-not-exist")
+        .body(Body::empty())
+        .unwrap();
+    let missing_resp = router.oneshot(missing).await.expect("missing");
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 }

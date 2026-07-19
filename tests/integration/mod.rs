@@ -5,6 +5,7 @@ pub mod promotion_apply_e2e;
 pub mod promotion_business_row_extraction;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_business_table_ddl;
+pub mod promotion_llm_v1;
 pub mod promotion_manifest;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
