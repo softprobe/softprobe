@@ -135,6 +135,19 @@ pub async fn create_router(
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/v1/llm/scores", post(llm::create_score))
+        .route(
+            "/v1/llm/observations/search",
+            post(llm::query::search_observations),
+        )
+        .route(
+            "/v1/llm/observations/{span_id}",
+            get(llm::query::get_observation),
+        )
+        .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
+        .route(
+            "/v1/llm/sessions/{session_id}",
+            get(llm::query::get_session),
+        )
         .route("/v1/query/sql", post(query::execute_sql))
         .route("/v1/telemetry/search", post(telemetry::search))
         .route("/v1/telemetry/details", post(telemetry::details_post))
@@ -222,6 +235,186 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                     }
                 }
             },
+            "/v1/llm/observations/search": {
+                "post": {
+                    "summary": "Search lightweight LLM observation projections",
+                    "operationId": "searchObservations",
+                    "security": [{ "bearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ObservationSearchRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Bounded observation page",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ObservationSearchResponse" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Missing time range, invalid filter, or malformed cursor",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "403": { "description": "Bearer token could not be resolved to a tenant" },
+                        "503": {
+                            "description": "Tenant runtime or query unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v1/llm/observations/{span_id}": {
+                "get": {
+                    "summary": "Get one observation with full payload and attached scores",
+                    "operationId": "getObservation",
+                    "security": [{ "bearerAuth": [] }],
+                    "parameters": [
+                        { "name": "span_id", "in": "path", "required": true, "schema": { "type": "string" } },
+                        { "name": "from", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "to", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Observation detail",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ObservationDetail" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "Observation not found",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "503": {
+                            "description": "Tenant runtime or query unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v1/llm/traces/{trace_id}": {
+                "get": {
+                    "summary": "Get a derived trace summary, observations, and scores",
+                    "operationId": "getTrace",
+                    "security": [{ "bearerAuth": [] }],
+                    "parameters": [
+                        { "name": "trace_id", "in": "path", "required": true, "schema": { "type": "string" } },
+                        { "name": "from", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "to", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 } },
+                        { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Trace detail",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/TraceDetail" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid limit or cursor",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "Trace not found",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "503": {
+                            "description": "Tenant runtime or query unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v1/llm/sessions/{session_id}": {
+                "get": {
+                    "summary": "Get a time-bounded session summary",
+                    "operationId": "getSession",
+                    "security": [{ "bearerAuth": [] }],
+                    "parameters": [
+                        { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
+                        { "name": "from", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "to", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
+                        { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Session summary",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionDetail" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Missing time range, invalid limit, or malformed cursor",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "No session activity in the requested range",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "503": {
+                            "description": "Tenant runtime or query unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "/v1/query/sql": { "post": { "summary": "Execute SQL query" } },
             "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
             "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
@@ -286,6 +479,138 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                     "required": ["error"],
                     "properties": {
                         "error": { "type": "string" }
+                    }
+                },
+                "ObservationSearchRequest": {
+                    "type": "object",
+                    "required": ["from", "to"],
+                    "properties": {
+                        "from": { "type": "string", "format": "date-time" },
+                        "to": { "type": "string", "format": "date-time" },
+                        "observation_types": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["span", "event", "generation", "agent", "tool", "chain", "retriever", "evaluator", "embedding", "guardrail"]
+                            }
+                        },
+                        "model_name": { "type": "string" },
+                        "user_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "trace_id": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+                        "cursor": { "type": "string" }
+                    }
+                },
+                "ObservationSummary": {
+                    "type": "object",
+                    "required": ["trace_id", "span_id", "name", "observation_type", "start_time"],
+                    "properties": {
+                        "trace_id": { "type": "string" },
+                        "span_id": { "type": "string" },
+                        "parent_span_id": { "type": "string", "nullable": true },
+                        "session_id": { "type": "string", "nullable": true },
+                        "name": { "type": "string" },
+                        "observation_type": { "type": "string" },
+                        "start_time": { "type": "string", "format": "date-time" },
+                        "end_time": { "type": "string", "format": "date-time", "nullable": true },
+                        "status_code": { "type": "string", "nullable": true },
+                        "model_name": { "type": "string", "nullable": true },
+                        "model_provider": { "type": "string", "nullable": true },
+                        "user_id": { "type": "string", "nullable": true },
+                        "input_tokens": { "type": "integer", "nullable": true },
+                        "output_tokens": { "type": "integer", "nullable": true },
+                        "total_tokens": { "type": "integer", "nullable": true },
+                        "total_cost": { "type": "number", "nullable": true }
+                    }
+                },
+                "ObservationSearchResponse": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ObservationSummary" }
+                        },
+                        "next_cursor": { "type": "string", "nullable": true }
+                    }
+                },
+                "ObservationDetail": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/ObservationSummary" },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "attributes": {
+                                    "type": "object",
+                                    "additionalProperties": { "type": "string" }
+                                },
+                                "events": { "type": "array", "items": { "type": "object" } },
+                                "scores": {
+                                    "type": "array",
+                                    "items": { "$ref": "#/components/schemas/Score" }
+                                }
+                            }
+                        }
+                    ]
+                },
+                "TraceSummary": {
+                    "type": "object",
+                    "required": ["trace_id", "start_time", "end_time", "observation_count"],
+                    "properties": {
+                        "trace_id": { "type": "string" },
+                        "session_id": { "type": "string", "nullable": true },
+                        "name": { "type": "string", "nullable": true },
+                        "start_time": { "type": "string", "format": "date-time" },
+                        "end_time": { "type": "string", "format": "date-time" },
+                        "observation_count": { "type": "integer" },
+                        "error_count": { "type": "integer" },
+                        "input_tokens": { "type": "integer", "nullable": true },
+                        "output_tokens": { "type": "integer", "nullable": true },
+                        "total_tokens": { "type": "integer", "nullable": true },
+                        "total_cost": { "type": "number", "nullable": true },
+                        "user_id": { "type": "string", "nullable": true }
+                    }
+                },
+                "TraceDetail": {
+                    "type": "object",
+                    "required": ["trace", "observations", "scores"],
+                    "properties": {
+                        "trace": { "$ref": "#/components/schemas/TraceSummary" },
+                        "observations": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ObservationDetail" }
+                        },
+                        "scores": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Score" }
+                        },
+                        "next_cursor": { "type": "string", "nullable": true }
+                    }
+                },
+                "SessionDetail": {
+                    "type": "object",
+                    "required": ["session_id", "from", "to", "trace_count", "observation_count", "traces", "scores"],
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "from": { "type": "string", "format": "date-time" },
+                        "to": { "type": "string", "format": "date-time" },
+                        "trace_count": { "type": "integer" },
+                        "observation_count": { "type": "integer" },
+                        "user_ids": { "type": "array", "items": { "type": "string" } },
+                        "input_tokens": { "type": "integer", "nullable": true },
+                        "output_tokens": { "type": "integer", "nullable": true },
+                        "total_tokens": { "type": "integer", "nullable": true },
+                        "total_cost": { "type": "number", "nullable": true },
+                        "traces": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/TraceSummary" }
+                        },
+                        "scores": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Score" }
+                        },
+                        "next_cursor": { "type": "string", "nullable": true }
                     }
                 }
             }

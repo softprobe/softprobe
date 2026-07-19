@@ -229,6 +229,25 @@ async fn unit_openapi_and_swagger_endpoints_are_served() {
         openapi["components"]["schemas"]["CreateScoreRequest"]["properties"]["data_type"]["enum"],
         json!(["numeric", "categorical", "boolean", "text"])
     );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/observations/search"]["post"]["operationId"],
+        "searchObservations"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/observations/{span_id}"]["get"]["operationId"],
+        "getObservation"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/traces/{trace_id}"]["get"]["operationId"],
+        "getTrace"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["operationId"],
+        "getSession"
+    );
+    assert!(openapi["components"]["schemas"]["ObservationSearchRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["TraceDetail"].is_object());
+    assert!(openapi["components"]["schemas"]["SessionDetail"].is_object());
 
     let req = Request::builder()
         .uri("/swagger")

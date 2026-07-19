@@ -491,6 +491,7 @@ impl DuckDBCore {
         let traces = self.ducklake_qualified_table("traces");
         let logs = self.ducklake_qualified_table("logs");
         let metrics = self.ducklake_qualified_table("metrics");
+        let scores = self.ducklake_qualified_table("scores");
         let mut s = sql.to_string();
         for name in [
             "tm_icb_metric",
@@ -506,6 +507,7 @@ impl DuckDBCore {
         for name in ["tm_icb_span", "tm_cq_span", "tm_all_span", "tm_buf_span"] {
             s = replace_standalone_ident(&s, name, &traces);
         }
+        s = replace_standalone_ident(&s, "scores", &scores);
         s
     }
 
