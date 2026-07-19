@@ -100,7 +100,7 @@ impl MaintenanceExecutor {
     }
 
     async fn run_once_ducklake(&self) -> Result<MaintenanceSummary> {
-        let tables = ["traces", "logs", "metrics"];
+        let tables = ["traces", "logs", "metrics", "scores"];
         let mut results = Vec::new();
 
         for (label, ducklake) in self.maintenance_scopes().await? {

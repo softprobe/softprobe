@@ -99,6 +99,36 @@ impl TraceTable {
     }
 }
 
+/// Immutable LLM evaluation scores attached to traces, spans, or sessions.
+pub struct ScoreTable;
+
+impl ScoreTable {
+    pub fn table_name() -> &'static str {
+        "scores"
+    }
+
+    pub fn schema() -> Schema {
+        Schema::new(vec![
+            req("score_id", utf8()),
+            req("timestamp", ts_utc()),
+            opt("trace_id", utf8()),
+            opt("span_id", utf8()),
+            opt("session_id", utf8()),
+            req("name", utf8()),
+            req("data_type", utf8()),
+            opt("numeric_value", DataType::Float64),
+            opt("string_value", utf8()),
+            opt("boolean_value", DataType::Boolean),
+            req("source", utf8()),
+            opt("comment", utf8()),
+            opt("config_id", utf8()),
+            opt("author_id", utf8()),
+            opt("metadata", string_map()),
+            req("record_date", DataType::Date32),
+        ])
+    }
+}
+
 /// OTLP logs table
 pub struct OtlpLogsTable;
 

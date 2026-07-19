@@ -1,4 +1,4 @@
-use crate::models::{Log, Metric, Span};
+use crate::models::{Log, Metric, Score, ScoreDataType, ScoreSource, Span};
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
@@ -10,6 +10,192 @@ use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use std::sync::Arc;
 use tracing::{debug, trace};
+
+pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<RecordBatch> {
+    let arrow_schema = Arc::new(schema.clone());
+    let metadata_field = Arc::new(
+        schema
+            .field_with_name("metadata")
+            .map_err(|e| anyhow::anyhow!("metadata field not found in score schema: {}", e))?
+            .clone(),
+    );
+
+    let score_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.score_id.as_str())
+            .collect::<Vec<_>>(),
+    ));
+    let timestamps: ArrayRef = Arc::new(
+        TimestampMicrosecondArray::from(
+            scores
+                .iter()
+                .map(|score| score.timestamp.timestamp_micros())
+                .collect::<Vec<_>>(),
+        )
+        .with_timezone_utc(),
+    );
+    let trace_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.trace_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let span_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.span_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let session_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.session_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let names: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.name.as_str())
+            .collect::<Vec<_>>(),
+    ));
+    let data_types: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| match score.data_type {
+                ScoreDataType::Numeric => "numeric",
+                ScoreDataType::Categorical => "categorical",
+                ScoreDataType::Boolean => "boolean",
+                ScoreDataType::Text => "text",
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let numeric_values: ArrayRef = Arc::new(Float64Array::from(
+        scores
+            .iter()
+            .map(|score| score.numeric_value)
+            .collect::<Vec<_>>(),
+    ));
+    let string_values: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.string_value.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let boolean_values: ArrayRef = Arc::new(BooleanArray::from(
+        scores
+            .iter()
+            .map(|score| score.boolean_value)
+            .collect::<Vec<_>>(),
+    ));
+    let sources: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| match score.source {
+                ScoreSource::Api => "api",
+                ScoreSource::User => "user",
+                ScoreSource::Evaluator => "evaluator",
+                ScoreSource::Annotation => "annotation",
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let comments: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.comment.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let config_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.config_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let author_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.author_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let metadata = build_score_metadata_array(scores, &metadata_field)?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let record_dates: ArrayRef = Arc::new(Date32Array::from(
+        scores
+            .iter()
+            .map(|score| (score.record_date - epoch).num_days() as i32)
+            .collect::<Vec<_>>(),
+    ));
+
+    Ok(RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            score_ids,
+            timestamps,
+            trace_ids,
+            span_ids,
+            session_ids,
+            names,
+            data_types,
+            numeric_values,
+            string_values,
+            boolean_values,
+            sources,
+            comments,
+            config_ids,
+            author_ids,
+            metadata,
+            record_dates,
+        ],
+    )?)
+}
+
+fn build_score_metadata_array(
+    scores: &[Score],
+    metadata_field: &arrow::datatypes::FieldRef,
+) -> Result<ArrayRef> {
+    use arrow::datatypes::DataType;
+
+    let mut keys = Vec::new();
+    let mut values = Vec::new();
+    let mut offsets = vec![0i32];
+    let mut offset = 0i32;
+    for score in scores {
+        for (key, value) in &score.metadata {
+            keys.push(key.as_str());
+            values.push(value.as_str());
+            offset += 1;
+        }
+        offsets.push(offset);
+    }
+
+    let entries_field = match metadata_field.data_type() {
+        DataType::Map(field, _) => field.clone(),
+        _ => return Err(anyhow::anyhow!("Expected Map type for score metadata")),
+    };
+    let struct_fields = match entries_field.data_type() {
+        DataType::Struct(fields) => fields.clone(),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Expected Struct type in score metadata map"
+            ))
+        }
+    };
+    let entries = StructArray::new(
+        struct_fields,
+        vec![
+            Arc::new(StringArray::from(keys)),
+            Arc::new(StringArray::from(values)),
+        ],
+        None,
+    );
+    Ok(Arc::new(MapArray::try_new(
+        entries_field,
+        OffsetBuffer::new(offsets.into()),
+        entries,
+        None,
+        false,
+    )?))
+}
 
 /// Base field names for traces table (used to identify promoted columns)
 const TRACES_BASE_FIELDS: &[&str] = &[

@@ -7,6 +7,7 @@
 
 pub mod health;
 pub mod ingestion;
+pub mod llm;
 pub mod query;
 pub mod telemetry;
 
@@ -61,6 +62,7 @@ impl AppState {
                 if msg.contains("Table with name traces does not exist")
                     || msg.contains("Table with name logs does not exist")
                     || msg.contains("Table with name metrics does not exist")
+                    || msg.contains("Table with name scores does not exist")
                 {
                     return Ok(crate::query::duckdb::QueryResult {
                         columns: Vec::new(),
@@ -132,6 +134,7 @@ pub async fn create_router(
         .route("/v1/traces", traces)
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
+        .route("/v1/llm/scores", post(llm::create_score))
         .route("/v1/query/sql", post(query::execute_sql))
         .route("/v1/telemetry/search", post(telemetry::search))
         .route("/v1/telemetry/details", post(telemetry::details_post))
@@ -166,12 +169,126 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/v1/traces": { "post": { "summary": "Ingest traces" } },
             "/v1/logs": { "post": { "summary": "Ingest logs" } },
             "/v1/metrics": { "post": { "summary": "Ingest metrics" } },
+            "/v1/llm/scores": {
+                "post": {
+                    "summary": "Create an immutable LLM evaluation score",
+                    "description": "Creates a score in the authenticated tenant's DuckLake scope. At least one of trace_id, span_id, or session_id is required. Exactly one value must match data_type. score_id is the tenant-local idempotency key.",
+                    "operationId": "createScore",
+                    "security": [{ "bearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/CreateScoreRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Score created",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/Score" }
+                                }
+                            }
+                        },
+                        "200": {
+                            "description": "Idempotent retry; the score ID already exists",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/Score" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid score target or typed value",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "403": { "description": "Bearer token could not be resolved to a tenant" },
+                        "422": { "description": "Malformed JSON or field type mismatch" },
+                        "503": {
+                            "description": "Tenant runtime, score lookup, or DuckLake write unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "/v1/query/sql": { "post": { "summary": "Execute SQL query" } },
             "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
             "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
             "/v1/data/ducklake-connection": { "get": { "summary": "DuckLake setup material" } },
             "/v1/promotions/apply": { "post": { "summary": "Apply a promotion manifest to this runtime's DuckLake scope" } },
             "/v1/sessions": { "post": { "summary": "Create session" }, "get": { "summary": "List sessions" } }
+        },
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer"
+                }
+            },
+            "schemas": {
+                "CreateScoreRequest": {
+                    "type": "object",
+                    "required": ["score_id", "timestamp", "name", "data_type", "source"],
+                    "description": "At least one target ID and exactly one value matching data_type are required. Tenant identity is intentionally absent.",
+                    "properties": {
+                        "score_id": { "type": "string", "minLength": 1 },
+                        "timestamp": { "type": "string", "format": "date-time" },
+                        "trace_id": { "type": "string", "nullable": true },
+                        "span_id": { "type": "string", "nullable": true },
+                        "session_id": { "type": "string", "nullable": true },
+                        "name": { "type": "string", "minLength": 1 },
+                        "data_type": {
+                            "type": "string",
+                            "enum": ["numeric", "categorical", "boolean", "text"]
+                        },
+                        "numeric_value": { "type": "number", "format": "double", "nullable": true },
+                        "string_value": { "type": "string", "nullable": true },
+                        "boolean_value": { "type": "boolean", "nullable": true },
+                        "source": {
+                            "type": "string",
+                            "enum": ["api", "user", "evaluator", "annotation"]
+                        },
+                        "comment": { "type": "string", "nullable": true },
+                        "config_id": { "type": "string", "nullable": true },
+                        "author_id": { "type": "string", "nullable": true },
+                        "metadata": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "default": {}
+                        }
+                    }
+                },
+                "Score": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CreateScoreRequest" },
+                        {
+                            "type": "object",
+                            "required": ["record_date"],
+                            "properties": {
+                                "record_date": { "type": "string", "format": "date" }
+                            }
+                        }
+                    ]
+                },
+                "ApiError": {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {
+                        "error": { "type": "string" }
+                    }
+                }
+            }
         }
     }))
 }
