@@ -37,6 +37,11 @@ INTEGRATION_ISOLATED_TEST_PREFIX = integration::ingest_commit_query::
 # Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
+# Host port for runtime-redis (compose maps ${REDIS_PORT}:6379). Default 6380 avoids
+# workspace demo sp-dev-redis on :6379. Integration tests read REDIS_PORT the same way.
+REDIS_PORT ?= 6380
+export REDIS_PORT
+
 # Default target
 help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
@@ -59,12 +64,13 @@ help:
 	@echo "  make test-deployment-stress - Stress test local with large dataset"
 	@echo ""
 	@echo "Infrastructure:"
-	@echo "  make setup-local     - Start MinIO + DuckLake Postgres (required for make test)"
+	@echo "  make setup-local     - Start MinIO + DuckLake Postgres + Redis (required for make test)"
 	@echo "  make teardown-local  - Stop docker-compose stack in this directory"
 	@echo "  make check-local          - Verify MinIO (required for integration tests)"
 	@echo "  make check-local-postgres - Verify DuckLake Postgres (required for make test / test-local)"
 	@echo "  make check-local-redis    - Verify Redis (required for make test / test-local)"
 	@echo "  make check-local-e2e      - Verify MinIO + Postgres + Redis"
+	@echo "  REDIS_PORT=$(REDIS_PORT)  - Host port for runtime-redis (default 6380; demo uses 6379)"
 	@echo ""
 	@echo "Data & Verification:"
 	@echo "  make generate-telemetry - Generate demo OTLP data"
@@ -140,7 +146,7 @@ setup-local:
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  - MinIO API: http://localhost:9000"
 	@echo "  - DuckLake catalog DB: postgres://ducklake@localhost:5432/ducklake"
-	@echo "  - Redis: localhost:6379"
+	@echo "  - Redis: localhost:$(REDIS_PORT) (REDIS_PORT; default 6380, avoids demo :6379)"
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."

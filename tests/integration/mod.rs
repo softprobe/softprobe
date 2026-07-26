@@ -9,6 +9,8 @@ pub mod promotion_llm_v1;
 pub mod promotion_manifest;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
+pub mod mocker_ingest;
+pub mod promotion_mocker_v1;
 pub mod promotion_sqlite_local;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_columns;

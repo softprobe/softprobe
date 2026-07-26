@@ -297,9 +297,14 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
             .await
             .expect("query engine");
 
-    let redis = RedisStore::connect_host_port("127.0.0.1", 6379, None, Duration::from_secs(3600))
+    let redis_port = crate::util::redis::test_redis_port();
+    let redis = RedisStore::connect_host_port("127.0.0.1", redis_port, None, Duration::from_secs(3600))
         .await
-        .expect("redis on 127.0.0.1:6379 (e2e compose publishes this port for integration-e2e)");
+        .unwrap_or_else(|e| {
+            panic!(
+                "redis on 127.0.0.1:{redis_port} (make setup-local; REDIS_PORT, default 6380): {e}"
+            )
+        });
 
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),

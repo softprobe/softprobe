@@ -1,6 +1,10 @@
-//! Verify the canonical softprobe/sp-llm `manifests/llm-v1.yaml` promotion profile.
+//! Verify `sp-llm/manifests/mocker-v1.yaml` merges with the canonical `llm-v1.yaml` promotion
+//! profile into the single platform `telemetry_columns` manifest a tenant may have active
+//! (`thelake/docs/promotion.md`) and applies without colliding with llm-v1 or base `traces`
+//! columns.
 //!
-//! The manifest is loaded from the sibling sp-llm checkout and is not duplicated here.
+//! Phase 0 of `backend/docs/thelake-telemetry-mocker-migration-plan.md`. Both manifests are
+//! loaded from the sibling sp-llm checkout and are not duplicated here.
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -14,68 +18,77 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use serde_json::json;
 use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::promotion::{
+    merge_telemetry_columns_manifests, parse_promotion_manifest,
+    telemetry_columns_manifest_to_yaml, PromotionManifest, TelemetryColumnsManifest,
+};
 use softprobe_runtime::runtime_api::{runtime_control_routes, runtime_post_v1_traces};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::otlp::{double_kv, int_kv, string_kv};
-use crate::util::sp_llm_manifests::sp_llm_manifest_path;
+use crate::util::otlp::{bool_kv, int_kv, string_kv};
+use crate::util::sp_llm_manifests::{load_sp_llm_manifest, sp_llm_manifest_path};
 use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
 
-fn llm_v1_manifest_path() -> PathBuf {
-    if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
-        return PathBuf::from(path);
+fn load_telemetry_manifest(name: &str) -> Option<TelemetryColumnsManifest> {
+    let yaml = load_sp_llm_manifest(name)?;
+    match parse_promotion_manifest(&yaml).unwrap_or_else(|err| {
+        panic!(
+            "{name} at {} failed to parse: {err}",
+            sp_llm_manifest_path(name).display()
+        )
+    }) {
+        PromotionManifest::TelemetryColumns(manifest) => Some(manifest),
+        PromotionManifest::BusinessTable(_) => {
+            panic!("{name} is a business_table manifest, expected telemetry_columns")
+        }
     }
-    sp_llm_manifest_path("llm-v1.yaml")
 }
 
-fn load_llm_v1_manifest() -> Option<String> {
-    let path = llm_v1_manifest_path();
-    std::fs::read_to_string(&path).ok()
-}
-
-fn generation_request(session_id: &str) -> ExportTraceServiceRequest {
+/// One span carrying both llm-v1 (`gen_ai.*` / `sp.*`) and mocker-v1 (`sp_*`) source attributes.
+fn combined_request(session_id: &str) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
                 attributes: vec![
-                    string_kv("service.name", "llm-gateway"),
+                    string_kv("service.name", "mocker-gateway"),
                     string_kv("deployment.environment.name", "staging"),
-                    string_kv("service.version", "1.2.3"),
+                    string_kv("service.version", "4.5.6"),
                 ],
                 dropped_attributes_count: 0,
             }),
             scope_spans: vec![ScopeSpans {
                 scope: Some(InstrumentationScope {
-                    name: "softprobe.llm".to_string(),
+                    name: "softprobe.mocker".to_string(),
                     version: "0.1.0".to_string(),
                     ..Default::default()
                 }),
                 spans: vec![Span {
                     trace_id: Uuid::new_v4().as_bytes().to_vec(),
                     span_id: Uuid::new_v4().as_bytes()[..8].to_vec(),
-                    name: "chat.completions".to_string(),
-                    kind: span::SpanKind::Client as i32,
+                    name: "mocker.replay".to_string(),
+                    kind: span::SpanKind::Server as i32,
                     start_time_unix_nano: 1_721_349_720_000_000_000,
                     end_time_unix_nano: 1_721_349_721_000_000_000,
                     attributes: vec![
                         string_kv("sp.session.id", session_id),
+                        // llm-v1 source attributes.
                         string_kv("sp.observation.type", "generation"),
-                        string_kv("sp.user.id", "user-promo-1"),
-                        string_kv("gen_ai.provider.name", "openai"),
-                        string_kv("gen_ai.request.model", "gpt-4o"),
-                        string_kv("gen_ai.response.model", "gpt-4o-2024-08-06"),
                         string_kv("gen_ai.operation.name", "chat"),
-                        int_kv("gen_ai.usage.input_tokens", 11),
-                        int_kv("gen_ai.usage.output_tokens", 22),
-                        int_kv("gen_ai.usage.total_tokens", 33),
-                        double_kv("sp.cost.input", 0.001),
-                        double_kv("sp.cost.output", 0.002),
-                        double_kv("sp.cost.total", 0.003),
+                        // mocker-v1 source attributes (underscore wire keys).
+                        string_kv("sp_operation_name", "GET /checkout"),
+                        int_kv("sp_record_environment", 2),
+                        string_kv("sp_record_version", "v3"),
+                        string_kv("sp_category_type", "http"),
+                        string_kv("sp_record_id", "record-abc-123"),
+                        string_kv("sp_mocker_id", "mocker-xyz-789"),
+                        string_kv("sp_expiration_time", "2026-08-01T00:00:00Z"),
+                        string_kv("sp_update_time", "2026-07-26T07:00:00Z"),
+                        bool_kv("sp_record_deleted", false),
+                        bool_kv("sp_record_ghost", false),
                     ],
                     status: Some(Status {
                         code: 1,
@@ -91,18 +104,25 @@ fn generation_request(session_id: &str) -> ExportTraceServiceRequest {
 }
 
 #[tokio::test]
-async fn canonical_llm_v1_manifest_promotes_generation_fields() {
-    let Some(manifest_yaml) = load_llm_v1_manifest() else {
+async fn merged_llm_and_mocker_manifest_applies_without_collisions() {
+    let Some(llm) = load_telemetry_manifest("llm-v1.yaml") else {
         eprintln!(
-            "skipping: canonical manifest not found at {}",
-            llm_v1_manifest_path().display()
+            "skipping: llm-v1.yaml not found at {}",
+            sp_llm_manifest_path("llm-v1.yaml").display()
         );
         return;
     };
-    assert!(
-        manifest_yaml.contains("observation_type"),
-        "unexpected llm-v1 manifest contents"
-    );
+    let Some(mocker) = load_telemetry_manifest("mocker-v1.yaml") else {
+        eprintln!(
+            "skipping: mocker-v1.yaml not found at {}",
+            sp_llm_manifest_path("mocker-v1.yaml").display()
+        );
+        return;
+    };
+
+    let merged = merge_telemetry_columns_manifests(&[llm, mocker])
+        .expect("llm-v1 and mocker-v1 must merge without conflicts");
+    let manifest_yaml = telemetry_columns_manifest_to_yaml(&merged);
 
     let temp = TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
@@ -152,13 +172,13 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
     assert_eq!(
         apply_status,
         StatusCode::OK,
-        "apply failed: {}",
+        "merged manifest apply failed: {}",
         String::from_utf8_lossy(&apply_body)
     );
 
-    let session_id = format!("sess-llm-v1-{}", Uuid::new_v4());
+    let session_id = format!("sess-merged-v1-{}", Uuid::new_v4());
     let mut body = Vec::new();
-    generation_request(&session_id)
+    combined_request(&session_id)
         .encode(&mut body)
         .expect("encode");
     let ingest = router
@@ -188,17 +208,21 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
         ))
         .expect("attach");
 
+    // All llm-v1 + mocker-v1 columns must exist on one merged spec, with no name collisions.
     for column in [
         "observation_type",
-        "model_name",
-        "model_provider",
-        "user_id",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "total_cost",
+        "operation_name",
         "environment",
-        "release",
+        "record_operation",
+        "record_environment",
+        "record_version",
+        "record_category",
+        "record_id",
+        "mocker_id",
+        "expiration_time",
+        "update_time",
+        "record_deleted",
+        "record_ghost",
     ] {
         let count: i64 = connection
             .query_row(
@@ -211,13 +235,14 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
                 |row| row.get(0),
             )
             .expect("column exists query");
-        assert!(count > 0, "expected promoted column {column}");
+        assert!(count > 0, "expected merged promoted column {column}");
     }
 
     let sql = format!(
-        "SELECT observation_type, model_name, model_provider, user_id, \
-                input_tokens, output_tokens, total_tokens, total_cost, \
-                environment, release \
+        "SELECT observation_type, operation_name, environment, \
+                record_operation, record_environment, record_version, record_category, \
+                record_id, mocker_id, CAST(expiration_time AS VARCHAR), \
+                CAST(update_time AS VARCHAR), record_deleted, record_ghost \
          FROM softprobe.traces WHERE session_id = '{}'",
         session_id.replace('\'', "''")
     );
@@ -229,23 +254,44 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<bool>>(11)?,
+                row.get::<_, Option<bool>>(12)?,
             ))
         })
-        .expect("query promoted generation");
+        .expect("query merged promoted columns");
 
-    assert_eq!(row.0.as_deref(), Some("generation"));
-    assert_eq!(row.1.as_deref(), Some("gpt-4o"));
-    assert_eq!(row.2.as_deref(), Some("openai"));
-    assert_eq!(row.3.as_deref(), Some("user-promo-1"));
-    assert_eq!(row.4, Some(11));
-    assert_eq!(row.5, Some(22));
-    assert_eq!(row.6, Some(33));
-    assert_eq!(row.7, Some(0.003));
-    assert_eq!(row.8.as_deref(), Some("staging"));
-    assert_eq!(row.9.as_deref(), Some("1.2.3"));
+    // llm-v1 fields populate under their original names.
+    assert_eq!(row.0.as_deref(), Some("generation"), "observation_type");
+    assert_eq!(row.1.as_deref(), Some("chat"), "operation_name (llm-v1)");
+    assert_eq!(row.2.as_deref(), Some("staging"), "environment (llm-v1)");
+
+    // mocker-v1 fields populate under record_*, distinct from the llm-v1 columns above.
+    assert_eq!(
+        row.3.as_deref(),
+        Some("GET /checkout"),
+        "record_operation (mocker-v1)"
+    );
+    assert_eq!(row.4, Some(2), "record_environment (mocker-v1)");
+    assert_eq!(row.5.as_deref(), Some("v3"), "record_version");
+    assert_eq!(row.6.as_deref(), Some("http"), "record_category");
+    assert_eq!(row.7.as_deref(), Some("record-abc-123"), "record_id");
+    assert_eq!(row.8.as_deref(), Some("mocker-xyz-789"), "mocker_id");
+    assert_eq!(
+        row.9.as_deref(),
+        Some("2026-08-01 00:00:00+00"),
+        "expiration_time"
+    );
+    assert_eq!(
+        row.10.as_deref(),
+        Some("2026-07-26 07:00:00+00"),
+        "update_time"
+    );
+    assert_eq!(row.11, Some(false), "record_deleted");
+    assert_eq!(row.12, Some(false), "record_ghost");
 }

@@ -3,6 +3,42 @@ use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, Instrumentatio
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 
+pub fn string_kv(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_string())),
+        }),
+    }
+}
+
+pub fn int_kv(key: &str, value: i64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::IntValue(value)),
+        }),
+    }
+}
+
+pub fn double_kv(key: &str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::DoubleValue(value)),
+        }),
+    }
+}
+
+pub fn bool_kv(key: &str, value: bool) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::BoolValue(value)),
+        }),
+    }
+}
+
 pub fn create_test_otlp_request() -> ExportTraceServiceRequest {
     let span = Span {
         trace_id: vec![

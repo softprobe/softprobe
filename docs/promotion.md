@@ -306,6 +306,32 @@ query either attributes['sp.user.id'] or user_id
   columns stop being populated on new rows while the physical column remains.
 - Spec identity uses a hash of the raw YAML text (`telemetry_columns_{hash}`).
 
+### Merging multiple `telemetry_columns` sources before apply
+
+Because a tenant can only have **one active** `telemetry_columns` document,
+multiple feature-owned manifests (for example llm-v1 ∪ mocker-v1 from
+[`sp-llm/manifests/`](../../sp-llm/manifests/)) must be merged into a single
+manifest client-side before calling apply — applying them one after another
+would just supersede the previous one, not union the columns.
+
+`merge_telemetry_columns_manifests` (`src/promotion.rs`) does this:
+
+- rejects manifests that don't target the exact same `target.tables` set
+  (`merge_target_tables_mismatch`) — merging would otherwise silently add one
+  source's columns to tables it never declared;
+- preserves column order (first manifest's columns first) and deduplicates a
+  column repeated identically across manifests; a column repeated with a
+  *different* type/nullable/source is rejected
+  (`merge_conflicting_duplicate_column`);
+- re-validates the merged result with `validate_telemetry_column_additive`,
+  so collisions with reserved base columns still fail;
+- pairs with `telemetry_columns_manifest_to_yaml` to serialize the merged
+  manifest back to canonical YAML for `POST /v1/promotions/apply`.
+
+See `tests/integration/promotion_mocker_v1.rs` for the end-to-end example:
+load `llm-v1.yaml` and `mocker-v1.yaml` from `sp-llm/manifests/`, merge, apply
+once, and ingest a span carrying both sources' attributes.
+
 ### Ingest semantics
 
 1. Active manifests are loaded from the tenant metadata schema

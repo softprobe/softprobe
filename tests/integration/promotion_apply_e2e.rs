@@ -90,9 +90,12 @@ async fn setup() -> PostgresBackend {
         softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");
-    let redis = RedisStore::connect_host_port("127.0.0.1", 6379, None, Duration::from_secs(3600))
+    let redis_port = crate::util::redis::test_redis_port();
+    let redis = RedisStore::connect_host_port("127.0.0.1", redis_port, None, Duration::from_secs(3600))
         .await
-        .expect("redis from make setup-local");
+        .unwrap_or_else(|e| {
+            panic!("redis from make setup-local (127.0.0.1:{redis_port}): {e}")
+        });
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
         session_store: Arc::new(tokio::sync::Mutex::new(redis)),

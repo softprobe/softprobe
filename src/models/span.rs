@@ -176,31 +176,53 @@ impl Span {
             None
         };
 
-        // Extract app_id from resource attributes
-        let app_id = resource_attributes
-            .get("sp.app.id")
+        // Base identity: prefer mocker underscore wire keys (OtlpMockerAttributeNames /
+        // AgentIdentityWireKeys) when present, then the existing dotted / resource fallbacks.
+        // See backend/docs/thelake-telemetry-mocker-migration-plan.md §"Attribute / column map".
+        let app_id = attributes
+            .get("sp_app_id")
+            .or_else(|| attributes.get("sp.app.id"))
+            .or_else(|| resource_attributes.get("sp_app_id"))
+            .or_else(|| resource_attributes.get("sp.app.id"))
             .or_else(|| resource_attributes.get("service.name"))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let trace_id = hex::encode(&otlp_span.trace_id);
+        let trace_id = attributes
+            .get("sp_trace_id")
+            .or_else(|| attributes.get("sp_transaction_id"))
+            .cloned()
+            .unwrap_or_else(|| hex::encode(&otlp_span.trace_id));
 
-        // Extract session_id from attributes (sp.session.id) or default to trace_id
-        // This must be done before creating the span since we need to look at attributes
+        // Extract session_id from attributes (dotted LLM key or mocker underscore) or default
+        // to trace_id. Done before constructing the span so identity fields stay consistent.
         let session_id = attributes
             .get("sp.session.id")
+            .or_else(|| attributes.get("sp_session_id"))
             .cloned()
             .unwrap_or_else(|| trace_id.clone());
+
+        let span_id = attributes
+            .get("sp_span_id")
+            .cloned()
+            .unwrap_or_else(|| hex::encode(&otlp_span.span_id));
+
+        let parent_span_id = attributes
+            .get("sp_parent_span_id")
+            .cloned()
+            .or_else(|| {
+                if otlp_span.parent_span_id.is_empty() {
+                    None
+                } else {
+                    Some(hex::encode(&otlp_span.parent_span_id))
+                }
+            });
 
         let mut span = Self {
             session_id,
             trace_id,
-            span_id: hex::encode(&otlp_span.span_id),
-            parent_span_id: if otlp_span.parent_span_id.is_empty() {
-                None
-            } else {
-                Some(hex::encode(&otlp_span.parent_span_id))
-            },
+            span_id,
+            parent_span_id,
             app_id,
             organization_id: resource_attributes.get("sp.organization.id").cloned(),
             tenant_id: resource_attributes.get("sp.tenant.id").cloned(),
@@ -558,5 +580,62 @@ mod tests {
 
         assert_eq!(span2.http_request_body.as_deref(), Some("legacy-req-ev"));
         assert_eq!(span2.http_response_body.as_deref(), Some("legacy-res-ev"));
+    }
+
+    #[test]
+    fn from_otlp_accepts_mocker_underscore_identity_wire_keys() {
+        use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let otlp = OtlpSpan {
+            // Binary IDs intentionally differ from the underscore wire attrs below —
+            // mocker wire keys must win (backend dual-write Phase 3).
+            trace_id: vec![0u8; 16],
+            span_id: vec![0u8; 8],
+            parent_span_id: vec![1u8; 8],
+            name: "GET /checkout".to_string(),
+            start_time_unix_nano: 1_721_349_720_000_000_000,
+            end_time_unix_nano: 1_721_349_721_000_000_000,
+            attributes: vec![
+                KeyValue {
+                    key: "sp_app_id".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("checkout-api".to_string())),
+                    }),
+                },
+                KeyValue {
+                    key: "sp_session_id".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("sess-mocker-1".to_string())),
+                    }),
+                },
+                KeyValue {
+                    key: "sp_trace_id".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("trace-mocker-1".to_string())),
+                    }),
+                },
+                KeyValue {
+                    key: "sp_span_id".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("span-mocker-1".to_string())),
+                    }),
+                },
+                KeyValue {
+                    key: "sp_parent_span_id".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("span-parent-1".to_string())),
+                    }),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let span = Span::from_otlp(otlp, &HashMap::new()).expect("from_otlp");
+        assert_eq!(span.app_id, "checkout-api");
+        assert_eq!(span.session_id, "sess-mocker-1");
+        assert_eq!(span.trace_id, "trace-mocker-1");
+        assert_eq!(span.span_id, "span-mocker-1");
+        assert_eq!(span.parent_span_id.as_deref(), Some("span-parent-1"));
     }
 }

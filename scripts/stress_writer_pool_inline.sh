@@ -14,7 +14,8 @@ PORT="${PORT:-38095}"
 export DUCKDB_DOWNLOAD_LIB=1
 export LD_LIBRARY_PATH="${ROOT}/target/duckdb-download/x86_64-unknown-linux-gnu/1.5.2:${LD_LIBRARY_PATH:-}"
 export REDIS_HOST=127.0.0.1
-export REDIS_PORT=6379
+# Host-published redis from make setup-local (default 6380; not demo :6379).
+export REDIS_PORT="${REDIS_PORT:-6380}"
 export SOFTPROBE_AUTH_URL=http://127.0.0.1:8080/validate
 export SOFTPROBE_ADMIN_API_KEY=admin-stress-key
 export RUST_LOG=info

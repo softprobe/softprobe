@@ -55,6 +55,10 @@ make teardown-local
 `make test` is the pre-merge test target. It runs unit tests and isolated
 integration tests against MinIO, PostgreSQL, and Redis.
 
+Local Redis is published on host port **6380** by default (`REDIS_PORT`) so it
+does not collide with workspace demo Redis on **6379**. Override if needed:
+`REDIS_PORT=6390 make setup-local test`.
+
 ## Run
 
 The main binary requires control-plane Redis wiring:

@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::metrics::v1::{
     metric::Data, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
+use crate::util::otlp::{double_kv, int_kv, string_kv};
 
 async fn build_router() -> (Router, tempfile::TempDir) {
     let (router, _state, temp) = build_router_and_state().await;
@@ -55,33 +56,6 @@ async fn response_json(resp: Response<Body>) -> Value {
         .expect("read body")
         .to_bytes();
     serde_json::from_slice(&body).expect("json body")
-}
-
-fn string_kv(key: &str, value: &str) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        }),
-    }
-}
-
-fn int_kv(key: &str, value: i64) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::IntValue(value)),
-        }),
-    }
-}
-
-fn double_kv(key: &str, value: f64) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::DoubleValue(value)),
-        }),
-    }
 }
 
 fn llm_generation_request(
