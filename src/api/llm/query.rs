@@ -876,7 +876,7 @@ fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
     };
     map.iter()
         .filter_map(|(key, value)| {
-            let normalized = normalize_map_key(key);
+            let normalized = key.to_owned();
             match value {
                 Value::Null => None,
                 Value::String(text) => Some((normalized, text.clone())),
@@ -894,7 +894,7 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
                 Value::Object(map) => {
                     let mut normalized = Map::new();
                     for (key, value) in map {
-                        let key = normalize_map_key(key);
+                        let key = key.to_owned();
                         if key == "attributes" {
                             normalized.insert(
                                 key,
@@ -926,19 +926,6 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
             })
             .collect(),
         _ => Vec::new(),
-    }
-}
-
-fn normalize_map_key(key: &str) -> String {
-    // DuckDB map keys are bridged via Debug formatting, e.g. Text("sp.user.id") or "sp.user.id".
-    let trimmed = key
-        .strip_prefix("Text(")
-        .and_then(|rest| rest.strip_suffix(')'))
-        .unwrap_or(key);
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        trimmed[1..trimmed.len() - 1].replace("\\\"", "\"")
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -1076,13 +1063,4 @@ mod tests {
         assert_eq!(summary.model_name.as_deref(), Some("gpt-4o"));
     }
 
-    #[test]
-    fn normalizes_duckdb_debug_map_keys() {
-        assert_eq!(
-            normalize_map_key("Text(\"sp.observation.type\")"),
-            "sp.observation.type"
-        );
-        assert_eq!(normalize_map_key("\"sp.user.id\""), "sp.user.id");
-        assert_eq!(normalize_map_key("plain"), "plain");
-    }
 }
