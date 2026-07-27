@@ -929,17 +929,11 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
     }
 }
 
+/// Identity — `duck_value_to_json` now emits correct MAP keys at the source.
+/// Retained as a no-op passthrough so callers compile; remove once confirmed
+/// no other code path produces Debug-wrapped keys.
 fn normalize_map_key(key: &str) -> String {
-    // DuckDB map keys are bridged via Debug formatting, e.g. Text("sp.user.id") or "sp.user.id".
-    let trimmed = key
-        .strip_prefix("Text(")
-        .and_then(|rest| rest.strip_suffix(')'))
-        .unwrap_or(key);
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        trimmed[1..trimmed.len() - 1].replace("\\\"", "\"")
-    } else {
-        trimmed.to_string()
-    }
+    key.to_string()
 }
 
 fn bad_request(message: String) -> ApiError {
@@ -1077,12 +1071,11 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_duckdb_debug_map_keys() {
-        assert_eq!(
-            normalize_map_key("Text(\"sp.observation.type\")"),
-            "sp.observation.type"
-        );
-        assert_eq!(normalize_map_key("\"sp.user.id\""), "sp.user.id");
+    fn normalize_map_key_is_identity() {
+        // After the duck_value_to_json fix, keys arrive as plain strings.
+        // normalize_map_key is now a passthrough.
+        assert_eq!(normalize_map_key("sp.observation.type"), "sp.observation.type");
+        assert_eq!(normalize_map_key("sp.user.id"), "sp.user.id");
         assert_eq!(normalize_map_key("plain"), "plain");
     }
 }

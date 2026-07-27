@@ -634,8 +634,9 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         DuckValue::Map(entries) => {
             let mut map = serde_json::Map::new();
             for (key, value) in entries.iter() {
-                // Use the logical string for Text keys — Debug (`Text("k")`) breaks SoftProbe
-                // product MAP contracts and CLI `-f key=value` filters.
+                // `format!("{:?}", key)` emits Rust Debug output (`Text("k")`) instead of
+                // the actual string value. Extract the logical key so JSON MAP objects
+                // have correct keys regardless of the DuckValue variant.
                 let key_str = match key {
                     DuckValue::Text(s) => s.clone(),
                     other => match duck_value_to_json(other.clone()) {
@@ -665,6 +666,19 @@ mod tests {
         let out = replace_standalone_ident(s, "tm_cq_span", "softprobe.softprobe.traces");
         assert!(out.contains("softprobe.softprobe.traces"), "got {out}");
         assert!(!out.contains("tm_cq_span"));
+    }
+
+    #[test]
+    fn duck_value_map_keys_are_plain_strings() {
+        let entries = vec![
+            (DuckValue::Text("logger_name".into()), DuckValue::Text("com.example".into())),
+            (DuckValue::Text("sp.source".into()), DuckValue::Text("backend".into())),
+        ];
+        let json = duck_value_to_json(DuckValue::Map(entries.into()));
+        let obj = json.as_object().expect("should be object");
+        assert!(obj.contains_key("logger_name"), "key should be plain string, got: {json}");
+        assert!(obj.contains_key("sp.source"), "key should be plain string, got: {json}");
+        assert!(!json.to_string().contains("Text("), "keys must not contain Debug wrapper");
     }
 
     #[test]
