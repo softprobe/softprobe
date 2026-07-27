@@ -703,3 +703,102 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     let missing_resp = router.oneshot(missing).await.expect("missing");
     assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn logs_promote_scope_name_to_logger_name_attribute() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-logger-name-promote";
+
+    let payload = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: Some(Resource {
+                attributes: vec![
+                    string_kv("service.name", "checkout-api"),
+                    string_kv("sp.session.id", session_id),
+                ],
+                ..Default::default()
+            }),
+            scope_logs: vec![
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "agent.transform.success".to_string(),
+                        ..Default::default()
+                    }),
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_777_802_601_000_000_000,
+                        severity_text: "INFO".to_string(),
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(
+                                "promoted-from-scope".to_string(),
+                            )),
+                        }),
+                        attributes: vec![string_kv("sp.session.id", session_id)],
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                },
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "scope.should.not.win".to_string(),
+                        ..Default::default()
+                    }),
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_777_802_602_000_000_000,
+                        severity_text: "INFO".to_string(),
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(
+                                "explicit-attribute-wins".to_string(),
+                            )),
+                        }),
+                        attributes: vec![
+                            string_kv("sp.session.id", session_id),
+                            string_kv("logger_name", "explicit.logger"),
+                        ],
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                },
+            ],
+            schema_url: String::new(),
+        }],
+    };
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/logs")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("ingest");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_logs()
+        .await
+        .expect("flush logs");
+
+    // CAST keeps this green under both MAP and VARIANT attribute storage.
+    let sql = format!(
+        "SELECT body, CAST(attributes['logger_name'] AS VARCHAR) AS logger_name \
+         FROM union_logs WHERE session_id = '{session_id}' ORDER BY timestamp ASC"
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/query/sql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "sql": sql }).to_string()))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("query");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = response_json(resp).await;
+    let rows = v["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 2, "{v}");
+    assert_eq!(rows[0][0], "promoted-from-scope");
+    assert_eq!(rows[0][1], "agent.transform.success");
+    assert_eq!(rows[1][0], "explicit-attribute-wins");
+    assert_eq!(rows[1][1], "explicit.logger");
+}

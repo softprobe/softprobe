@@ -92,8 +92,17 @@ async fn process_logs(
         let resource_attributes = LogData::extract_resource_attributes(&resource_logs);
 
         for scope_logs in resource_logs.scope_logs {
+            // OTEL stores the logger / instrumentation name on scope.name; SoftProbe product
+            // queries filter attributes['logger_name']. Promote when the record MAP omits it.
+            let scope_name = scope_logs
+                .scope
+                .as_ref()
+                .map(|s| s.name.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             for log_record in scope_logs.log_records {
-                let log_data = LogData::from_otlp(log_record, &resource_attributes)?;
+                let mut log_data = LogData::from_otlp(log_record, &resource_attributes)?;
+                LogData::promote_scope_logger_name(&mut log_data.attributes, scope_name.as_deref());
                 logs.push(log_data);
             }
         }

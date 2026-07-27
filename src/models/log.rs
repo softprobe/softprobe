@@ -149,6 +149,20 @@ impl Log {
         })
     }
 
+    /// SoftProbe product filters use `attributes['logger_name']`. OTEL stores the
+    /// logger name on instrumentation scope; promote when the record MAP omits it.
+    pub fn promote_scope_logger_name(
+        attributes: &mut HashMap<String, String>,
+        scope_name: Option<&str>,
+    ) {
+        let Some(name) = scope_name.map(str::trim).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        attributes
+            .entry("logger_name".to_string())
+            .or_insert_with(|| name.to_string());
+    }
+
     /// Extract resource attributes from OTLP ResourceLogs
     pub fn extract_resource_attributes(
         resource_logs: &opentelemetry_proto::tonic::logs::v1::ResourceLogs,
@@ -329,5 +343,22 @@ mod tests {
         let ra = HashMap::new();
         let log = Log::from_otlp(lr, &ra).expect("from_otlp");
         assert_eq!(log.body, "body");
+    }
+
+    #[test]
+    fn promote_scope_logger_name_fills_missing_attribute() {
+        let mut attrs = HashMap::new();
+        attrs.insert("sp.source".into(), "agent".into());
+        Log::promote_scope_logger_name(&mut attrs, Some("agent.transform.success"));
+        assert_eq!(
+            attrs.get("logger_name").map(String::as_str),
+            Some("agent.transform.success")
+        );
+        // Do not overwrite an explicit attribute.
+        Log::promote_scope_logger_name(&mut attrs, Some("other.logger"));
+        assert_eq!(
+            attrs.get("logger_name").map(String::as_str),
+            Some("agent.transform.success")
+        );
     }
 }
