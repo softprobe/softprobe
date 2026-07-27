@@ -876,7 +876,7 @@ fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
     };
     map.iter()
         .filter_map(|(key, value)| {
-            let normalized = normalize_map_key(key);
+            let normalized = key.to_owned();
             match value {
                 Value::Null => None,
                 Value::String(text) => Some((normalized, text.clone())),
@@ -894,7 +894,7 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
                 Value::Object(map) => {
                     let mut normalized = Map::new();
                     for (key, value) in map {
-                        let key = normalize_map_key(key);
+                        let key = key.to_owned();
                         if key == "attributes" {
                             normalized.insert(
                                 key,
@@ -927,13 +927,6 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// Identity — `duck_value_to_json` now emits correct MAP keys at the source.
-/// Retained as a no-op passthrough so callers compile; remove once confirmed
-/// no other code path produces Debug-wrapped keys.
-fn normalize_map_key(key: &str) -> String {
-    key.to_string()
 }
 
 fn bad_request(message: String) -> ApiError {
@@ -1070,12 +1063,4 @@ mod tests {
         assert_eq!(summary.model_name.as_deref(), Some("gpt-4o"));
     }
 
-    #[test]
-    fn normalize_map_key_is_identity() {
-        // After the duck_value_to_json fix, keys arrive as plain strings.
-        // normalize_map_key is now a passthrough.
-        assert_eq!(normalize_map_key("sp.observation.type"), "sp.observation.type");
-        assert_eq!(normalize_map_key("sp.user.id"), "sp.user.id");
-        assert_eq!(normalize_map_key("plain"), "plain");
-    }
 }
