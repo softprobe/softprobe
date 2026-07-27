@@ -1,10 +1,9 @@
 //! SQLite adapter for the shared promotion E2E contract (no external infrastructure).
 
 use async_trait::async_trait;
-use axum::middleware::{from_fn, Next};
+use axum::middleware::from_fn;
 use axum::routing::post;
 use axum::Router;
-use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::{runtime_control_routes, runtime_post_v1_traces};
@@ -17,24 +16,13 @@ use crate::util::promotion_contract::{
     contract_shrink_safe, contract_update_and_idempotency, ingest_otlp, PromotionContractBackend,
     MANIFEST_V1,
 };
+use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
 
 struct SqliteBackend {
     _temp: TempDir,
     router: Router,
     metadata_path: String,
     data_path: String,
-}
-
-async fn inject_tenant(
-    mut request: axum::extract::Request,
-    next: Next,
-) -> axum::response::Response {
-    request.extensions_mut().insert(TenantInfo {
-        tenant_id: "local-sqlite-tenant".to_string(),
-        bucket_name: String::new(),
-        dataset_id: String::new(),
-    });
-    next.run(request).await
 }
 
 async fn build_router(config: Config) -> Router {

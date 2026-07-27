@@ -4,17 +4,15 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::middleware::{from_fn, Next};
+use axum::middleware::from_fn;
 use axum::routing::post;
-use axum::Router;
 use http_body_util::BodyExt;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
 use serde_json::json;
-use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::{runtime_control_routes, runtime_post_v1_traces};
 use std::path::PathBuf;
@@ -24,56 +22,20 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::util::config::file_backed_test_config;
+use crate::util::otlp::{double_kv, int_kv, string_kv};
+use crate::util::sp_llm_manifests::sp_llm_manifest_path;
+use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
 
 fn llm_v1_manifest_path() -> PathBuf {
     if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
         return PathBuf::from(path);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sp-llm/manifests/llm-v1.yaml")
+    sp_llm_manifest_path("llm-v1.yaml")
 }
 
 fn load_llm_v1_manifest() -> Option<String> {
     let path = llm_v1_manifest_path();
     std::fs::read_to_string(&path).ok()
-}
-
-async fn inject_tenant(
-    mut request: axum::extract::Request,
-    next: Next,
-) -> axum::response::Response {
-    request.extensions_mut().insert(TenantInfo {
-        tenant_id: "local-sqlite-tenant".to_string(),
-        bucket_name: String::new(),
-        dataset_id: String::new(),
-    });
-    next.run(request).await
-}
-
-fn string_kv(key: &str, value: &str) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        }),
-    }
-}
-
-fn int_kv(key: &str, value: i64) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::IntValue(value)),
-        }),
-    }
-}
-
-fn double_kv(key: &str, value: f64) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::DoubleValue(value)),
-        }),
-    }
 }
 
 fn generation_request(session_id: &str) -> ExportTraceServiceRequest {

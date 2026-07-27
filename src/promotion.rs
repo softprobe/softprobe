@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -766,6 +766,165 @@ fn validate_business_table_additive(
     Ok(())
 }
 
+/// Merge several `telemetry_columns` manifests into the single platform manifest a tenant can
+/// have active at once ([`thelake/docs/promotion.md`]).
+///
+/// All input manifests must target the exact same table set. `telemetry_column_add_ddls` /
+/// `validate_telemetry_column_additive` apply **every** column in a manifest to **every** table
+/// listed in `target.tables`; merging manifests with different table sets would silently add
+/// each other's columns to tables they were never meant for, so mismatched table sets are
+/// rejected up front (`merge_target_tables_mismatch`) rather than merged.
+///
+/// Column order is preserved (first manifest's columns first) so the resulting manifest is
+/// deterministic for `telemetry_columns_manifest_to_yaml` / re-apply. A column repeated across
+/// manifests with an identical definition (name, type, nullable, source) is deduplicated
+/// idempotently; a column repeated with a *different* definition is rejected as
+/// `merge_conflicting_duplicate_column`. The merged manifest is validated the same way a
+/// single-source manifest is (`validate_telemetry_column_additive`), so collisions with reserved
+/// base `traces`/`logs`/`metrics` columns are still rejected.
+pub fn merge_telemetry_columns_manifests(
+    manifests: &[TelemetryColumnsManifest],
+) -> Result<TelemetryColumnsManifest, PromotionValidationError> {
+    if manifests.is_empty() {
+        return Err(PromotionValidationError::new(
+            "missing_manifests",
+            "manifests",
+            "merge requires at least one telemetry_columns manifest",
+        ));
+    }
+    let mut tables = Vec::new();
+    let mut seen_tables = HashSet::new();
+    let mut expected_table_set: Option<HashSet<&'static str>> = None;
+    for manifest in manifests {
+        let this_table_set: HashSet<&'static str> = manifest
+            .target
+            .tables
+            .iter()
+            .map(|t| telemetry_table_bare_name(t))
+            .collect();
+        match &expected_table_set {
+            None => expected_table_set = Some(this_table_set),
+            Some(expected) if *expected != this_table_set => {
+                return Err(PromotionValidationError::new(
+                    "merge_target_tables_mismatch",
+                    "target.tables",
+                    "all merged telemetry_columns manifests must target the exact same tables",
+                ));
+            }
+            Some(_) => {}
+        }
+        for table in &manifest.target.tables {
+            if seen_tables.insert(telemetry_table_bare_name(table)) {
+                tables.push(table.clone());
+            }
+        }
+    }
+
+    let mut columns = Vec::new();
+    let mut index_by_name: HashMap<String, usize> = HashMap::new();
+    for manifest in manifests {
+        for column in &manifest.columns {
+            match index_by_name.get(&column.name) {
+                None => {
+                    index_by_name.insert(column.name.clone(), columns.len());
+                    columns.push(column.clone());
+                }
+                Some(&existing_idx) => {
+                    let existing: &PromotionColumn = &columns[existing_idx];
+                    if existing.data_type != column.data_type
+                        || existing.nullable != column.nullable
+                        || existing.source != column.source
+                    {
+                        return Err(PromotionValidationError::new(
+                            "merge_conflicting_duplicate_column",
+                            format!("columns.{}", column.name),
+                            format!(
+                                "column {} is declared with conflicting type/nullable/source across merged manifests",
+                                column.name
+                            ),
+                        ));
+                    }
+                    // Identical redeclaration (e.g. re-merging the same fragment) is idempotent.
+                }
+            }
+        }
+    }
+
+    let merged = TelemetryColumnsManifest {
+        target: TelemetryColumnsTarget { tables },
+        columns,
+    };
+    validate_telemetry_column_additive(&merged)?;
+    Ok(merged)
+}
+
+fn promotion_data_type_name(data_type: &PromotionDataType) -> &'static str {
+    match data_type {
+        PromotionDataType::String => "string",
+        PromotionDataType::Bool => "bool",
+        PromotionDataType::Int64 => "int64",
+        PromotionDataType::Double => "double",
+        PromotionDataType::Decimal => "decimal",
+        PromotionDataType::Timestamp => "timestamp",
+        PromotionDataType::Json => "json",
+    }
+}
+
+fn raw_source_from_domain(source: &PromotionSource) -> RawPromotionSource {
+    match source {
+        PromotionSource::ResourceAttribute { key } => {
+            RawPromotionSource::ResourceAttribute { key: key.clone() }
+        }
+        PromotionSource::Attribute { key } => RawPromotionSource::Attribute { key: key.clone() },
+        PromotionSource::EventAttribute { event_name, key } => RawPromotionSource::EventAttribute {
+            event_name: event_name.clone(),
+            key: key.clone(),
+        },
+        PromotionSource::HttpRequestBody { json_path } => RawPromotionSource::HttpRequestBody {
+            json_path: json_path.clone(),
+        },
+        PromotionSource::HttpResponseBody { json_path } => RawPromotionSource::HttpResponseBody {
+            json_path: json_path.clone(),
+        },
+    }
+}
+
+fn raw_column_from_domain(column: &PromotionColumn) -> RawPromotionColumn {
+    RawPromotionColumn {
+        name: column.name.clone(),
+        data_type: promotion_data_type_name(&column.data_type).to_string(),
+        nullable: column.nullable,
+        source: raw_source_from_domain(&column.source),
+    }
+}
+
+/// Serialize a `telemetry_columns` manifest back to the canonical YAML the apply API accepts.
+///
+/// Used to re-apply a manifest produced by [`merge_telemetry_columns_manifests`] without hand
+/// authoring merged YAML text. Goes through the same `Raw*` shape [`parse_promotion_manifest`]
+/// deserializes from (via `serde_yaml`) so there is one source of truth for the wire shape and no
+/// risk of un-escaped scalars from hand-built YAML strings.
+pub fn telemetry_columns_manifest_to_yaml(manifest: &TelemetryColumnsManifest) -> String {
+    let raw = RawPromotionManifest {
+        spec_version: PROMOTION_SPEC_VERSION.to_string(),
+        target: RawTarget::TelemetryColumns {
+            tables: manifest
+                .target
+                .tables
+                .iter()
+                .map(|t| telemetry_table_bare_name(t).to_string())
+                .collect(),
+        },
+        row_selector: None,
+        columns: manifest
+            .columns
+            .iter()
+            .map(raw_column_from_domain)
+            .collect(),
+    };
+    serde_yaml::to_string(&raw).expect("telemetry columns manifest always serializes to YAML")
+}
+
 /// Reject telemetry promotion columns that collide with canonical table columns or break nullability rules.
 pub fn validate_telemetry_column_additive(
     spec: &TelemetryColumnsManifest,
@@ -1045,36 +1204,40 @@ fn validate_promoted_value_type(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RawPromotionManifest {
     spec_version: String,
     target: RawTarget,
-    #[serde(default, rename = "rowSelector")]
+    #[serde(
+        default,
+        rename = "rowSelector",
+        skip_serializing_if = "Option::is_none"
+    )]
     row_selector: Option<RawRowSelector>,
     #[serde(default)]
     columns: Vec<RawPromotionColumn>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum RawTarget {
     TelemetryColumns { tables: Vec<String> },
     BusinessTable { table: String, version: u32 },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawRowSelector {
     attribute: RawAttributeSelector,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawAttributeSelector {
     key: String,
     equals: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawPromotionColumn {
     name: String,
     #[serde(rename = "type")]
@@ -1083,7 +1246,7 @@ struct RawPromotionColumn {
     source: RawPromotionSource,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 enum RawPromotionSource {
     ResourceAttribute { key: String },
@@ -2068,5 +2231,294 @@ columns:
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].target_column, "order_id");
         assert_eq!(errors[0].error_code, "missing_required_value");
+    }
+
+    fn telemetry_manifest(yaml: &str) -> super::TelemetryColumnsManifest {
+        match parse_promotion_manifest(yaml).expect("valid manifest") {
+            PromotionManifest::TelemetryColumns(m) => m,
+            PromotionManifest::BusinessTable(_) => panic!("expected telemetry manifest"),
+        }
+    }
+
+    #[test]
+    fn merge_combines_disjoint_columns_from_multiple_manifests() {
+        let fragment_a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: operation_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.operation.name
+  - name: environment
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: deployment.environment.name
+"#,
+        );
+        let fragment_b = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: http_route
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: http.route
+  - name: http_status_code
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: http.response.status_code
+"#,
+        );
+
+        let merged =
+            super::merge_telemetry_columns_manifests(&[fragment_a, fragment_b]).expect("merge");
+
+        assert_eq!(merged.target.tables, vec![super::TelemetryTable::Traces]);
+        let names: Vec<&str> = merged.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "operation_name",
+                "environment",
+                "http_route",
+                "http_status_code"
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_for_identical_duplicate_columns() {
+        let a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source: { from: resource_attribute, key: service.name }
+"#,
+        );
+        let b = a.clone();
+
+        let merged = super::merge_telemetry_columns_manifests(&[a, b]).expect("merge");
+
+        assert_eq!(merged.columns.len(), 1);
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_duplicate_column_definitions() {
+        let a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: environment
+    type: string
+    nullable: true
+    source: { from: resource_attribute, key: deployment.environment.name }
+"#,
+        );
+        let b = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: environment
+    type: int64
+    nullable: true
+    source: { from: attribute, key: sp_record_environment }
+"#,
+        );
+
+        let err = super::merge_telemetry_columns_manifests(&[a, b])
+            .expect_err("conflicting duplicate column must be rejected");
+
+        assert_eq!(err.code(), "merge_conflicting_duplicate_column");
+        assert_eq!(err.path(), "columns.environment");
+    }
+
+    #[test]
+    fn merge_rejects_reserved_base_column_names() {
+        let a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: record_operation
+    type: string
+    nullable: true
+    source: { from: attribute, key: sp_operation_name }
+"#,
+        );
+        let b = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: session_id
+    type: string
+    nullable: true
+    source: { from: attribute, key: sp_session_id }
+"#,
+        );
+
+        let err = super::merge_telemetry_columns_manifests(&[a, b])
+            .expect_err("reserved base column name must be rejected");
+
+        assert_eq!(err.code(), "column_already_exists");
+    }
+
+    #[test]
+    fn merged_manifest_round_trips_through_yaml_serialization() {
+        let a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source: { from: resource_attribute, key: service.name }
+"#,
+        );
+        let b = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: record_operation
+    type: string
+    nullable: true
+    source: { from: attribute, key: sp_operation_name }
+  - name: record_deleted
+    type: bool
+    nullable: true
+    source: { from: attribute, key: sp_record_deleted }
+  - name: expiration_time
+    type: timestamp
+    nullable: true
+    source: { from: attribute, key: sp_expiration_time }
+"#,
+        );
+        let merged = super::merge_telemetry_columns_manifests(&[a, b]).expect("merge");
+
+        let yaml = super::telemetry_columns_manifest_to_yaml(&merged);
+        let reparsed = telemetry_manifest(&yaml);
+
+        assert_eq!(reparsed, merged);
+    }
+
+    #[test]
+    fn telemetry_columns_manifest_to_yaml_escapes_special_characters_in_keys() {
+        // Attribute keys / json_paths containing YAML-significant characters (colons, quotes)
+        // must still round-trip; a hand-rolled writer would misparse `foo: bar` as a nested map.
+        let manifest = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: weird_key
+    type: string
+    nullable: true
+    source: { from: attribute, key: "foo: bar \"baz\"" }
+  - name: weird_path
+    type: string
+    nullable: true
+    source: { from: http_response_body, json_path: "$.a[\"b: c\"]" }
+"#,
+        );
+
+        let yaml = super::telemetry_columns_manifest_to_yaml(&manifest);
+        let reparsed = telemetry_manifest(&yaml);
+
+        assert_eq!(reparsed, manifest);
+    }
+
+    #[test]
+    fn merge_rejects_mismatched_target_tables() {
+        let traces_only = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source: { from: resource_attribute, key: service.name }
+"#,
+        );
+        let logs_only = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [logs] }
+columns:
+  - name: log_source
+    type: string
+    nullable: true
+    source: { from: attribute, key: log.source }
+"#,
+        );
+
+        let err = super::merge_telemetry_columns_manifests(&[traces_only, logs_only])
+            .expect_err("mismatched target tables must be rejected");
+
+        assert_eq!(err.code(), "merge_target_tables_mismatch");
+    }
+
+    #[test]
+    fn merge_allows_manifests_with_identical_multi_table_targets() {
+        let a = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces, logs] }
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source: { from: resource_attribute, key: service.name }
+"#,
+        );
+        let b = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [logs, traces] }
+columns:
+  - name: record_category
+    type: string
+    nullable: true
+    source: { from: attribute, key: sp_category_type }
+"#,
+        );
+
+        let merged = super::merge_telemetry_columns_manifests(&[a, b]).expect("merge");
+
+        assert_eq!(
+            merged.target.tables,
+            vec![super::TelemetryTable::Traces, super::TelemetryTable::Logs]
+        );
+        assert_eq!(merged.columns.len(), 2);
+    }
+
+    #[test]
+    fn merge_requires_at_least_one_manifest() {
+        let err = super::merge_telemetry_columns_manifests(&[])
+            .expect_err("empty merge input must be rejected");
+        assert_eq!(err.code(), "missing_manifests");
     }
 }

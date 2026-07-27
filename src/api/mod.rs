@@ -9,6 +9,7 @@ pub mod health;
 pub mod ingestion;
 pub mod llm;
 pub mod query;
+pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;

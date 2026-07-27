@@ -1,10 +1,13 @@
+use crate::api::sql_support::{
+    cursor_predicate, encode_cursor, push_optional_time_bounds, sql_string_literal,
+    timestamp_literal,
+};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -126,12 +129,6 @@ pub struct SessionQuery {
     pub to: DateTime<Utc>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PageCursor {
-    t: DateTime<Utc>,
-    id: String,
 }
 
 pub async fn search_observations(
@@ -540,21 +537,6 @@ pub fn compile_scores_for_session_sql(session_id: &str, trace_ids: &[String]) ->
     )
 }
 
-pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {
-    let payload = PageCursor {
-        t: timestamp,
-        id: id.to_string(),
-    };
-    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("cursor json"))
-}
-
-pub(crate) fn decode_cursor(cursor: &str) -> Result<PageCursor, String> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor.as_bytes())
-        .map_err(|_| "malformed cursor".to_string())?;
-    serde_json::from_slice(&bytes).map_err(|_| "malformed cursor".to_string())
-}
-
 fn observation_projection(include_payload: bool) -> String {
     let mut cols = vec![
         "trace_id".to_string(),
@@ -627,55 +609,8 @@ fn score_columns() -> &'static str {
     "score_id, timestamp, trace_id, span_id, session_id, name, data_type, numeric_value, string_value, boolean_value, source, comment, config_id, author_id, metadata, record_date"
 }
 
-fn push_optional_time_bounds(
-    conditions: &mut Vec<String>,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
-) -> Result<(), String> {
-    match (from, to) {
-        (Some(from), Some(to)) => {
-            if from > to {
-                return Err("`from` must be <= `to`".to_string());
-            }
-            conditions.push(format!(
-                "timestamp >= {} AND timestamp <= {}",
-                timestamp_literal(&from),
-                timestamp_literal(&to)
-            ));
-        }
-        (Some(from), None) => {
-            conditions.push(format!("timestamp >= {}", timestamp_literal(&from)));
-        }
-        (None, Some(to)) => {
-            conditions.push(format!("timestamp <= {}", timestamp_literal(&to)));
-        }
-        (None, None) => {}
-    }
-    Ok(())
-}
-
-fn cursor_predicate(cursor: &str, timestamp_col: &str, id_col: &str) -> Result<String, String> {
-    let decoded = decode_cursor(cursor)?;
-    Ok(format!(
-        "({timestamp_col} < {ts} OR ({timestamp_col} = {ts} AND {id_col} < {id}))",
-        ts = timestamp_literal(&decoded.t),
-        id = sql_string_literal(&decoded.id),
-    ))
-}
-
 fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
     limit.unwrap_or(default).clamp(1, MAX_LIMIT)
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn timestamp_literal(value: &DateTime<Utc>) -> String {
-    format!(
-        "{}::TIMESTAMPTZ",
-        sql_string_literal(&value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    )
 }
 
 async fn query_scores(
@@ -1026,6 +961,7 @@ fn storage_error(error: anyhow::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::sql_support::decode_cursor;
 
     #[test]
     fn search_sql_requires_time_bounds_and_escapes_literals() {
