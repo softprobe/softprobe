@@ -1,4 +1,5 @@
 use crate::models::{Log, Metric, Score, ScoreDataType, ScoreSource, Span};
+use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
@@ -451,7 +452,7 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
         .with_timezone_utc(),
     );
 
-    // Build attributes MAP<STRING, STRING> for each span
+    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let attributes_array = build_span_attributes_array(spans, &attributes_field)?;
 
     // Build events LIST<STRUCT> for each span
@@ -586,50 +587,36 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
     Ok(record_batch)
 }
 
-/// Build attributes MAP<STRING, STRING> array for spans
+/// Build attributes JSON (Utf8) array for spans — staged for DuckLake VARIANT.
 fn build_span_attributes_array(
     spans: &[Span],
     attributes_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
+    build_variant_json_array(
+        &spans.iter().map(|s| &s.attributes).collect::<Vec<_>>(),
+        attributes_field,
+        "attributes",
+    )
+}
+
+fn build_variant_json_array(
+    maps: &[&std::collections::HashMap<String, String>],
+    field: &arrow::datatypes::FieldRef,
+    field_name: &str,
+) -> Result<ArrayRef> {
     use arrow::datatypes::DataType;
 
-    let mut all_keys = Vec::new();
-    let mut all_values = Vec::new();
-    let mut offsets = vec![0i32];
-    let mut current_offset = 0i32;
-
-    for span in spans {
-        for (key, value) in &span.attributes {
-            all_keys.push(key.as_str());
-            all_values.push(value.as_str());
-            current_offset += 1;
+    match field.data_type() {
+        DataType::Utf8 => {
+            let values: Vec<String> = maps.iter().map(|m| encode_attributes_json(m)).collect();
+            Ok(Arc::new(StringArray::from(
+                values.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )))
         }
-        offsets.push(current_offset);
+        other => Err(anyhow::anyhow!(
+            "Expected Utf8 JSON staging type for {field_name}, got {other:?}"
+        )),
     }
-
-    let keys_array: ArrayRef = Arc::new(StringArray::from(all_keys));
-    let values_array: ArrayRef = Arc::new(StringArray::from(all_values));
-
-    let map_data_type = attributes_field.data_type();
-    let (entries_field, _) = if let DataType::Map(f, _) = map_data_type {
-        (f.clone(), true)
-    } else {
-        return Err(anyhow::anyhow!("Expected Map type for attributes field"));
-    };
-
-    let struct_fields = if let DataType::Struct(fields) = entries_field.data_type() {
-        fields.clone()
-    } else {
-        return Err(anyhow::anyhow!("Expected Struct type in Map entries"));
-    };
-
-    let entries_struct = StructArray::new(struct_fields, vec![keys_array, values_array], None);
-
-    let offsets_buffer = OffsetBuffer::new(offsets.into());
-
-    let map_array = MapArray::try_new(entries_field, offsets_buffer, entries_struct, None, false)?;
-
-    Ok(Arc::new(map_array))
 }
 
 /// Build events LIST<STRUCT> array for spans
@@ -798,7 +785,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         logs.iter().map(|l| l.body.as_str()).collect::<Vec<_>>(),
     ));
 
-    // Build attributes MAP<STRING, STRING>
+    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let attributes_array = build_log_map_array(
         logs.iter()
             .map(|l| &l.attributes)
@@ -807,7 +794,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         &attributes_field,
     )?;
 
-    // Build resource_attributes MAP<STRING, STRING>
+    // Build resource_attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let resource_attributes_array = build_log_map_array(
         logs.iter()
             .map(|l| &l.resource_attributes)
@@ -885,50 +872,12 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
     Ok(record_batch)
 }
 
-/// Build a MAP<STRING, STRING> array for log attributes
+/// Build a JSON (Utf8) array for log/metric VARIANT attribute columns.
 fn build_log_map_array(
     maps: &[&std::collections::HashMap<String, String>],
     map_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    use arrow::datatypes::DataType;
-
-    let mut all_keys = Vec::new();
-    let mut all_values = Vec::new();
-    let mut offsets = vec![0i32];
-    let mut current_offset = 0i32;
-
-    for map in maps {
-        for (key, value) in map.iter() {
-            all_keys.push(key.as_str());
-            all_values.push(value.as_str());
-            current_offset += 1;
-        }
-        offsets.push(current_offset);
-    }
-
-    let keys_array: ArrayRef = Arc::new(StringArray::from(all_keys));
-    let values_array: ArrayRef = Arc::new(StringArray::from(all_values));
-
-    let map_data_type = map_field.data_type();
-    let (entries_field, _) = if let DataType::Map(f, _) = map_data_type {
-        (f.clone(), true)
-    } else {
-        return Err(anyhow::anyhow!("Expected Map type for map field"));
-    };
-
-    let struct_fields = if let DataType::Struct(fields) = entries_field.data_type() {
-        fields.clone()
-    } else {
-        return Err(anyhow::anyhow!("Expected Struct type in Map entries"));
-    };
-
-    let entries_struct = StructArray::new(struct_fields, vec![keys_array, values_array], None);
-
-    let offsets_buffer = OffsetBuffer::new(offsets.into());
-
-    let map_array = MapArray::try_new(entries_field, offsets_buffer, entries_struct, None, false)?;
-
-    Ok(Arc::new(map_array))
+    build_variant_json_array(maps, map_field, map_field.name())
 }
 
 /// Convert Metric batch to Arrow RecordBatch using telemetry Arrow schema
@@ -1011,12 +960,12 @@ pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<Re
         metrics.iter().map(|m| m.value).collect::<Vec<_>>(),
     ));
 
-    // Build attributes MAP<STRING, STRING>
+    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let attributes_maps: Vec<&std::collections::HashMap<String, String>> =
         metrics.iter().map(|m| &m.attributes).collect();
     let attributes_array = build_metric_map_array(&attributes_maps, &attributes_field)?;
 
-    // Build resource_attributes MAP<STRING, STRING>
+    // Build resource_attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let resource_attributes_maps: Vec<&std::collections::HashMap<String, String>> =
         metrics.iter().map(|m| &m.resource_attributes).collect();
     let resource_attributes_array =
@@ -1061,48 +1010,10 @@ pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<Re
     Ok(record_batch)
 }
 
-/// Build a MAP<STRING, STRING> array for metric attributes
+/// Build a JSON (Utf8) array for metric VARIANT attribute columns.
 fn build_metric_map_array(
     maps: &[&std::collections::HashMap<String, String>],
     map_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    use arrow::datatypes::DataType;
-
-    let mut all_keys = Vec::new();
-    let mut all_values = Vec::new();
-    let mut offsets = vec![0i32];
-    let mut current_offset = 0i32;
-
-    for map in maps {
-        for (key, value) in map.iter() {
-            all_keys.push(key.as_str());
-            all_values.push(value.as_str());
-            current_offset += 1;
-        }
-        offsets.push(current_offset);
-    }
-
-    let keys_array: ArrayRef = Arc::new(StringArray::from(all_keys));
-    let values_array: ArrayRef = Arc::new(StringArray::from(all_values));
-
-    let map_data_type = map_field.data_type();
-    let (entries_field, _) = if let DataType::Map(f, _) = map_data_type {
-        (f.clone(), true)
-    } else {
-        return Err(anyhow::anyhow!("Expected Map type for map field"));
-    };
-
-    let struct_fields = if let DataType::Struct(fields) = entries_field.data_type() {
-        fields.clone()
-    } else {
-        return Err(anyhow::anyhow!("Expected Struct type in Map entries"));
-    };
-
-    let entries_struct = StructArray::new(struct_fields, vec![keys_array, values_array], None);
-
-    let offsets_buffer = OffsetBuffer::new(offsets.into());
-
-    let map_array = MapArray::try_new(entries_field, offsets_buffer, entries_struct, None, false)?;
-
-    Ok(Arc::new(map_array))
+    build_variant_json_array(maps, map_field, map_field.name())
 }

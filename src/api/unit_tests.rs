@@ -469,5 +469,5 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled.logs.contains("session_id = 'sess_abc'"));
     assert!(compiled
         .metrics
-        .contains("attributes['sp.session.id'] = 'sess_abc'"));
+        .contains("CAST(attributes['sp.session.id'] AS VARCHAR) = 'sess_abc'"));
 }

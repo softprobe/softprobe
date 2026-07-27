@@ -612,6 +612,8 @@ fn duck_value_to_json(value: DuckValue) -> Value {
             .unwrap_or(Value::Null),
         DuckValue::Decimal(v) => Value::String(v.to_string()),
         DuckValue::Timestamp(unit, value) => Value::String(format!("{:?}:{}", unit, value)),
+        // Keep VARCHAR/JSON-as-text as strings. Call sites that need objects
+        // (VARIANT `CAST(... AS JSON)` attributes) parse in map_string_map.
         DuckValue::Text(v) => Value::String(v),
         DuckValue::Blob(v) => Value::String(base64::engine::general_purpose::STANDARD.encode(v)),
         DuckValue::Date32(v) => Value::String(v.to_string()),
@@ -697,5 +699,23 @@ mod tests {
             DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = true;"),
             "expected session init to enable unsafe_enable_version_guessing"
         );
+    }
+
+    #[test]
+    fn duck_value_keeps_json_looking_text_as_string() {
+        let value = duck_value_to_json(DuckValue::Text(
+            r#"{"Content-Type":"application/json"}"#.to_string(),
+        ));
+        assert_eq!(
+            value,
+            Value::String(r#"{"Content-Type":"application/json"}"#.to_string()),
+            "VARCHAR JSON blobs (e.g. http headers) must remain strings"
+        );
+    }
+
+    #[test]
+    fn duck_value_keeps_plain_text() {
+        let value = duck_value_to_json(DuckValue::Text("plain".to_string()));
+        assert_eq!(value, Value::String("plain".to_string()));
     }
 }

@@ -5,6 +5,7 @@ use crate::api::sql_support::{
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
+use crate::storage::schema::variant::{variant_as_json, variant_try_cast, variant_varchar};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -347,18 +348,22 @@ pub fn compile_observation_search_sql(
             .collect::<Vec<_>>()
             .join(", ");
         conditions.push(format!(
-            "COALESCE(attributes['sp.observation.type'], 'span') IN ({values})"
+            "COALESCE({}, 'span') IN ({values})",
+            variant_varchar("attributes", "sp.observation.type")
         ));
     }
     if let Some(model_name) = &request.model_name {
         conditions.push(format!(
-            "attributes['gen_ai.request.model'] = {}",
+            "{} = {}",
+            variant_varchar("attributes", "gen_ai.request.model"),
             sql_string_literal(model_name)
         ));
     }
     if let Some(user_id) = &request.user_id {
         conditions.push(format!(
-            "(attributes['sp.user.id'] = {id} OR attributes['enduser.id'] = {id})",
+            "({sp} = {id} OR {enduser} = {id})",
+            sp = variant_varchar("attributes", "sp.user.id"),
+            enduser = variant_varchar("attributes", "enduser.id"),
             id = sql_string_literal(user_id)
         ));
     }
@@ -544,12 +549,21 @@ fn observation_projection(include_payload: bool) -> String {
         "parent_span_id".to_string(),
         "NULLIF(session_id, '') AS session_id".to_string(),
         "message_type AS name".to_string(),
-        format!("COALESCE(attributes['sp.observation.type'], 'span') AS observation_type"),
+        format!(
+            "COALESCE({}, 'span') AS observation_type",
+            variant_varchar("attributes", "sp.observation.type")
+        ),
         "timestamp AS start_time".to_string(),
         "end_timestamp AS end_time".to_string(),
         "status_code".to_string(),
-        "attributes['gen_ai.request.model'] AS model_name".to_string(),
-        "attributes['gen_ai.provider.name'] AS model_provider".to_string(),
+        format!(
+            "{} AS model_name",
+            variant_varchar("attributes", "gen_ai.request.model")
+        ),
+        format!(
+            "{} AS model_provider",
+            variant_varchar("attributes", "gen_ai.provider.name")
+        ),
         format!("{} AS user_id", expr_user_id()),
         format!("{} AS input_tokens", expr_input_tokens()),
         format!("{} AS output_tokens", expr_output_tokens()),
@@ -557,7 +571,7 @@ fn observation_projection(include_payload: bool) -> String {
         format!("{} AS total_cost", expr_total_cost()),
     ];
     if include_payload {
-        cols.push("attributes".to_string());
+        cols.push(variant_as_json("attributes"));
         cols.push("events".to_string());
     }
     cols.join(", ")
@@ -585,24 +599,28 @@ fn trace_summary_projection() -> String {
     )
 }
 
-fn expr_user_id() -> &'static str {
-    "COALESCE(attributes['sp.user.id'], attributes['enduser.id'])"
+fn expr_user_id() -> String {
+    format!(
+        "COALESCE({}, {})",
+        variant_varchar("attributes", "sp.user.id"),
+        variant_varchar("attributes", "enduser.id")
+    )
 }
 
-fn expr_input_tokens() -> &'static str {
-    "try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT)"
+fn expr_input_tokens() -> String {
+    variant_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT")
 }
 
-fn expr_output_tokens() -> &'static str {
-    "try_cast(attributes['gen_ai.usage.output_tokens'] AS BIGINT)"
+fn expr_output_tokens() -> String {
+    variant_try_cast("attributes", "gen_ai.usage.output_tokens", "BIGINT")
 }
 
-fn expr_total_tokens() -> &'static str {
-    "try_cast(attributes['gen_ai.usage.total_tokens'] AS BIGINT)"
+fn expr_total_tokens() -> String {
+    variant_try_cast("attributes", "gen_ai.usage.total_tokens", "BIGINT")
 }
 
-fn expr_total_cost() -> &'static str {
-    "try_cast(attributes['sp.cost.total'] AS DOUBLE)"
+fn expr_total_cost() -> String {
+    variant_try_cast("attributes", "sp.cost.total", "DOUBLE")
 }
 
 fn score_columns() -> &'static str {
@@ -871,8 +889,13 @@ fn parse_timestamp_text(text: &str) -> Option<DateTime<Utc>> {
 }
 
 fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
-    let Some(Value::Object(map)) = value else {
-        return HashMap::new();
+    let map = match value {
+        Some(Value::Object(map)) => map.clone(),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            _ => return HashMap::new(),
+        },
+        _ => return HashMap::new(),
     };
     map.iter()
         .filter_map(|(key, value)| {
@@ -971,9 +994,10 @@ mod tests {
         assert!(sql.contains("timestamp >="));
         assert!(sql.contains("LIMIT 201"));
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
-        assert!(
-            sql.contains("COALESCE(attributes['sp.observation.type'], 'span') IN ('generation')")
-        );
+        assert!(sql.contains(&format!(
+            "COALESCE({}, 'span') IN ('generation')",
+            variant_varchar("attributes", "sp.observation.type")
+        )));
         assert!(sql.contains("ORDER BY timestamp DESC, span_id DESC"));
     }
 

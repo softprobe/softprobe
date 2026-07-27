@@ -7,6 +7,9 @@
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
+use crate::storage::schema::variant::{
+    parse_projected_json_value, variant_as_json, variant_varchar,
+};
 use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -273,14 +276,24 @@ pub fn compile_details_sql(
             format!("session_id = {escaped_id}"),
             format!("session_id = {escaped_id}"),
             format!(
-                "(attributes['sp.session.id'] = {escaped_id} OR attributes['session.id'] = {escaped_id} OR attributes['session_id'] = {escaped_id} OR resource_attributes['sp.session.id'] = {escaped_id} OR resource_attributes['session.id'] = {escaped_id} OR resource_attributes['session_id'] = {escaped_id})"
+                "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id} OR {e} = {escaped_id} OR {f} = {escaped_id})",
+                a = variant_varchar("attributes", "sp.session.id"),
+                b = variant_varchar("attributes", "session.id"),
+                c = variant_varchar("attributes", "session_id"),
+                d = variant_varchar("resource_attributes", "sp.session.id"),
+                e = variant_varchar("resource_attributes", "session.id"),
+                f = variant_varchar("resource_attributes", "session_id"),
             ),
         ),
         "trace" => (
             format!("trace_id = {escaped_id}"),
             format!("trace_id = {escaped_id}"),
             format!(
-                "(attributes['trace_id'] = {escaped_id} OR attributes['trace.id'] = {escaped_id} OR resource_attributes['trace_id'] = {escaped_id} OR resource_attributes['trace.id'] = {escaped_id})"
+                "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id})",
+                a = variant_varchar("attributes", "trace_id"),
+                b = variant_varchar("attributes", "trace.id"),
+                c = variant_varchar("resource_attributes", "trace_id"),
+                d = variant_varchar("resource_attributes", "trace.id"),
             ),
         ),
         _ => return Err("target.kind must be session or trace".to_string()),
@@ -297,21 +310,32 @@ pub fn compile_details_sql(
     Ok(CompiledDetailsSql {
         spans: detail_sql(
             "union_spans",
-            "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, attributes",
+            &format!(
+                "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, {}",
+                variant_as_json("attributes")
+            ),
             &span_filter,
             time_filter.as_deref(),
             limit,
         ),
         logs: detail_sql(
             "union_logs",
-            "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, attributes, resource_attributes",
+            &format!(
+                "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, {}, {}",
+                variant_as_json("attributes"),
+                variant_as_json("resource_attributes")
+            ),
             &log_filter,
             time_filter.as_deref(),
             limit,
         ),
         metrics: detail_sql(
             "union_metrics",
-            "metric_name, description, unit, metric_type, timestamp, value, attributes, resource_attributes",
+            &format!(
+                "metric_name, description, unit, metric_type, timestamp, value, {}, {}",
+                variant_as_json("attributes"),
+                variant_as_json("resource_attributes")
+            ),
             &metric_filter,
             time_filter.as_deref(),
             limit,
@@ -680,7 +704,14 @@ fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
         .map(|row| {
             let mut object = Map::new();
             for (idx, column) in columns.iter().enumerate() {
-                object.insert(column.clone(), row.get(idx).cloned().unwrap_or(Value::Null));
+                let raw = row.get(idx).cloned().unwrap_or(Value::Null);
+                // VARIANT projections use CAST(... AS JSON); DuckDB returns text — parse so
+                // clients keep object-valued attributes/resource_attributes.
+                let value = match column.as_str() {
+                    "attributes" | "resource_attributes" => parse_projected_json_value(raw),
+                    _ => raw,
+                };
+                object.insert(column.clone(), value);
             }
             Value::Object(object)
         })

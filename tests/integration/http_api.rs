@@ -640,6 +640,8 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
                 "from": "2024-07-18T00:00:00Z",
                 "to": "2024-07-20T00:00:00Z",
                 "observation_types": ["generation"],
+                "model_name": "gpt-4o",
+                "user_id": "user-llm-1",
                 "session_id": session_id,
                 "limit": 50
             })
@@ -653,9 +655,39 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(search["items"][0]["span_id"], span_hex);
     assert_eq!(search["items"][0]["observation_type"], "generation");
     assert_eq!(search["items"][0]["model_name"], "gpt-4o");
+    assert_eq!(search["items"][0]["model_provider"], "openai");
+    assert_eq!(search["items"][0]["user_id"], "user-llm-1");
     assert_eq!(search["items"][0]["input_tokens"], 12);
+    assert_eq!(search["items"][0]["output_tokens"], 34);
     assert_eq!(search["items"][0]["total_tokens"], 46);
+    assert!(
+        (search["items"][0]["total_cost"].as_f64().unwrap_or(0.0) - 0.0123).abs() < 1e-9,
+        "total_cost={}",
+        search["items"][0]["total_cost"]
+    );
     assert!(search["items"][0].get("attributes").is_none());
+
+    // Variant key negative filter: wrong user_id must not match.
+    let miss_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "observation_types": ["generation"],
+                "user_id": "no-such-user",
+                "session_id": session_id,
+                "limit": 50
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let miss_resp = router.clone().oneshot(miss_req).await.expect("miss search");
+    assert_eq!(miss_resp.status(), StatusCode::OK);
+    let miss = response_json(miss_resp).await;
+    assert_eq!(miss["items"].as_array().unwrap().len(), 0);
 
     let obs_req = Request::builder()
         .uri(format!("/v1/llm/observations/{span_hex}"))

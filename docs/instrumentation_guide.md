@@ -214,7 +214,7 @@ span.setAttribute('sp.project.id', 'proj-456');
 ### Why `sp.*`?
 
 - Avoids collisions with OpenTelemetry semantic conventions (`http.*`, `db.*`, …)
-- Makes Softprobe business keys easy to spot in the `attributes` MAP
+- Makes Softprobe business keys easy to spot in the `attributes` VARIANT
 - Gives promotion manifests a stable key to extract into typed columns
 
 `sp.*` is only a naming convention. Softprobe stores these keys in
@@ -258,7 +258,7 @@ structure:
 | `http_request_method` | Span attribute `http.request.method` | `POST` |
 | `http_request_path` | Span attribute `http.request.path` or `http.target` | `/api/orders` |
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
-| `attributes` | All span attributes (MAP) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
+| `attributes` | All span attributes (VARIANT, shredded) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
 ### HTTP payload fallback
 
@@ -288,17 +288,17 @@ Summary:
 2. Apply a `softprobe.promotion.v1` manifest with
    `POST /v1/promotions/apply`.
 3. New ingest writes the promoted column; historical rows stay `NULL`.
-4. Query either `attributes['sp.user.id']` or the promoted column name.
+4. Query either `CAST(attributes['sp.user.id'] AS VARCHAR)` or the promoted column name.
 
 ## Querying Your Data
 
 ### Find Sessions by User ID
 
-**Using MAP lookup** (works with or without promotion):
+**Using VARIANT lookup** (works with or without promotion):
 ```sql
 SELECT session_id, trace_id, span_id, timestamp, http_request_path
 FROM traces
-WHERE attributes['sp.user.id'] = 'user-123'
+WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
 ORDER BY timestamp DESC;
 ```
 
@@ -309,13 +309,13 @@ that column (example SQL and manifests in [`promotion.md`](promotion.md)).
 
 ```sql
 SELECT
-  attributes['sp.order.id'] AS order_id,
+  CAST(attributes['sp.order.id'] AS VARCHAR) AS order_id,
   http_request_body,
   http_response_body,
   timestamp
 FROM traces
 WHERE
-  attributes['sp.order.id'] IS NOT NULL
+  CAST(attributes['sp.order.id'] AS VARCHAR) IS NOT NULL
   AND http_response_status_code = 201
 ORDER BY timestamp DESC;
 ```
@@ -334,7 +334,7 @@ SELECT
   timestamp
 FROM traces
 WHERE
-  attributes['sp.session.id'] = 'sess-12345'
+  CAST(attributes['sp.session.id'] AS VARCHAR) = 'sess-12345'
 ORDER BY timestamp ASC;
 ```
 
@@ -342,20 +342,21 @@ ORDER BY timestamp ASC;
 
 ### Column selection
 
-When data is in Parquet, a query by business attributes can read the
-`attributes` MAP without selecting body columns:
+When data is in Parquet, a query by business attributes can read shredded
+VARIANT subfields without selecting body columns:
 
 ```sql
--- This query reads ONLY: session_id, trace_id, attributes
+-- This query can prune to shredded attribute paths
 -- Body columns (http_request_body, http_response_body) are NOT read
 SELECT session_id, trace_id
 FROM traces
-WHERE attributes['sp.user.id'] = 'user-123';
+WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123';
 ```
 
 This reduces object-store I/O when bodies are large. DuckLake may instead keep
 small committed batches inline in its metadata catalog, depending on
-`ducklake.data_inlining_row_limit`.
+`ducklake.data_inlining_row_limit`. For file-level VARIANT shredding stats,
+set `DATA_INLINING_ROW_LIMIT 0` so data lands in Parquet files.
 
 ## Best Practices
 

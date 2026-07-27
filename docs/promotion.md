@@ -11,12 +11,15 @@ promotion. Other docs link here; do not duplicate the full contract elsewhere.
 
 ## What problem promotion solves
 
-OTLP spans store arbitrary attributes in an `attributes` MAP. That always
-works:
+OTLP spans store arbitrary attributes in an `attributes` VARIANT column
+(Iceberg v3 / DuckLake variant shredding). Nested field filters work:
 
 ```sql
-WHERE attributes['sp.user.id'] = 'user-123'
+WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
 ```
+
+Hot keys with stable types are shredded into typed Parquet sub-columns so
+DuckLake can prune files and skip unused nested fields.
 
 Promotion lets a tenant declare selected fields as dedicated typed SQL columns
 so queries can use:
@@ -44,7 +47,7 @@ OpenTelemetry semantic convention and not a runtime-enforced schema.
 ### Rules
 
 1. Your application must set the attributes explicitly.
-2. Softprobe stores them in the telemetry `attributes` MAP as ordinary keys.
+2. Softprobe stores them in the telemetry `attributes` VARIANT as ordinary keys.
 3. Naming consistency across services matters more than the prefix itself.
 4. Prefer `sp.*` for Softprobe-specific business keys so they do not collide
    with `http.*`, `db.*`, or other OTel conventions.
@@ -290,7 +293,7 @@ later OTLP ingest for that tenant
         +--> write dedicated columns on the new rows
         |
         v
-query either attributes['sp.user.id'] or user_id
+query either CAST(attributes['sp.user.id'] AS VARCHAR) or user_id
 ```
 
 ### Active-spec lifecycle
@@ -350,7 +353,7 @@ domain modules inside thelake.
    promotions for the scope before commit.
 6. Historical rows written before apply remain `NULL` in the new column. There
    is no automatic backfill.
-7. The original attribute keys remain queryable in the `attributes` MAP.
+7. The original attribute keys remain queryable in the `attributes` VARIANT.
 
 ### Reserved names
 
@@ -366,7 +369,7 @@ Without promotion (always available after instrumentation):
 ```sql
 SELECT session_id, trace_id, timestamp, http_request_path
 FROM traces
-WHERE attributes['sp.user.id'] = 'user-123'
+WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
 ORDER BY timestamp DESC;
 ```
 
@@ -476,7 +479,7 @@ payload storage.
    catalog with tenant scopes. For **local/dev**, SQLite single-scope
    promotion (apply + ingest extraction + query) is supported.
 2. Instrument consistent business attributes (`sp.user.id`, …).
-3. Verify MAP queries work before promoting anything.
+3. Verify VARIANT nested-field queries work before promoting anything.
 4. Promote only high-value filters you query often.
 5. Keep telemetry promoted columns nullable.
 6. Prefer `attribute` / `resource_attribute` sources for identifiers. Use
@@ -494,5 +497,7 @@ payload storage.
 - [`instrumentation_guide.md`](instrumentation_guide.md) — how to emit bodies and `sp.*`
 - [`design.md`](design.md) — runtime architecture
 - [`decision_log.md`](decision_log.md) — current architecture decisions
+- [`variant_shredding.md`](variant_shredding.md) — MAP → VARIANT migration notes
+
 - [`ingestion-openapi.yaml`](ingestion-openapi.yaml) — HTTP contract including apply
 - [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) — local SQL against DuckLake

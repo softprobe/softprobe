@@ -20,6 +20,7 @@ pub mod tenant_ducklake_registry;
 pub mod tenant_otlp_isolation;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_promotion_specs;
+pub mod variant_shredding;
 
 #[cfg(feature = "integration-e2e")]
 pub mod ingest_commit_query;
