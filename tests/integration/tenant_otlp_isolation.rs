@@ -5,16 +5,14 @@ use axum::routing::post;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{span, Span};
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::ingestion::traces::{ingest_traces, process_traces};
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::{Resolver, TenantInfo};
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp::GrpcTraceService;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span as ModelSpan;
-use softprobe_runtime::runtime_api::runtime_export_trace_request;
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
-use softprobe_runtime::session_redis::RedisStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -297,18 +295,8 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
             .await
             .expect("query engine");
 
-    let redis_port = crate::util::redis::test_redis_port();
-    let redis = RedisStore::connect_host_port("127.0.0.1", redis_port, None, Duration::from_secs(3600))
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "redis on 127.0.0.1:{redis_port} (make setup-local; REDIS_PORT, default 6380): {e}"
-            )
-        });
-
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
-        session_store: Arc::new(tokio::sync::Mutex::new(redis)),
     };
 
     let config = std::sync::Arc::new(config);
@@ -342,10 +330,13 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         bucket_name: String::new(),
         dataset_id: String::new(),
     };
-    runtime_export_trace_request(
+    let http_export = otlp_export_with_session(&format!("http-sess-{suffix}"));
+    let http_body_size = prost::Message::encoded_len(&http_export);
+    process_traces(
         state,
-        &tenant_info,
-        otlp_export_with_session(&format!("http-sess-{suffix}")),
+        http_export,
+        http_body_size,
+        Some(tenant_info.tenant_id.clone()),
     )
     .await
     .expect("HTTP-path export should write to the same tenant scope");

@@ -892,7 +892,7 @@ traces (
 ### Risk Mitigation
 
 **Risk 1: Iceberg Performance Fails**
-- Mitigation: Query caching (Redis), optimize Parquet file sizes, Z-ordering
+- Mitigation: optimize Parquet file sizes, Z-ordering
 - Escape hatch: Migrate to Delta Lake if ALL mitigations fail
 
 **Risk 2: User Adoption of `sp.*`**

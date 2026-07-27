@@ -46,21 +46,6 @@ services:
         aliases:
           - warehouse.minio
 
-  redis:
-    image: redis:7-alpine
-    container_name: runtime-redis
-    # Host 6380 by default so local tests coexist with workspace demo Redis (:6379).
-    # Override: REDIS_PORT=6379 docker compose up -d redis
-    ports:
-      - "${REDIS_PORT:-6380}:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    networks:
-      - backend_net
-
   auth-mock:
     image: wiremock/wiremock:3.9.2
     container_name: auth-mock
@@ -85,8 +70,6 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       auth-mock:
         condition: service_healthy
     environment:
@@ -96,8 +79,6 @@ services:
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - DUCKLAKE_METADATA_SCHEMA=softprobe
       - SOFTPROBE_AUTH_URL=http://auth-mock:8080/validate
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - OTEL_GRPC_PORT=4317
       - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
       - CONFIG_FILE=/app/config.yaml

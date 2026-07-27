@@ -2,14 +2,12 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
 use softprobe_runtime::api::{self, ControlPlaneRuntime};
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::runtime_api::{
-    runtime_auth_middleware, runtime_control_routes, runtime_post_v1_traces,
-};
-use softprobe_runtime::session_redis::RedisStore;
+use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
         info!("Maintenance scheduler started");
     }
 
-    let control_plane = control_plane_runtime_from_env(config.clone()).await?;
-    let traces = post(runtime_post_v1_traces);
+    let control_plane = control_plane_runtime_from_env()?;
+    let traces = post(ingest_traces);
 
     let (mut app, state) = api::create_router(
         config.clone(),
@@ -106,24 +104,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn control_plane_runtime_from_env(
-    _config: Arc<Config>,
-) -> anyhow::Result<ControlPlaneRuntime> {
-    let redis_host = required_env("REDIS_HOST")?;
-    let port: u16 = std::env::var("REDIS_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6379);
-    let pw = std::env::var("REDIS_PASSWORD")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let store = RedisStore::connect_host_port(
-        &redis_host,
-        port,
-        pw.as_deref(),
-        Duration::from_secs(86_400),
-    )
-    .await?;
+fn control_plane_runtime_from_env() -> anyhow::Result<ControlPlaneRuntime> {
     let auth_url = match optional_env("SOFTPROBE_AUTH_URL") {
         Some(url) => url,
         None => {
@@ -136,19 +117,7 @@ async fn control_plane_runtime_from_env(
         }
     };
     let resolver = Resolver::new(auth_url, Duration::from_secs(60));
-    Ok(ControlPlaneRuntime {
-        resolver,
-        session_store: Arc::new(tokio::sync::Mutex::new(store)),
-    })
-}
-
-fn required_env(name: &str) -> anyhow::Result<String> {
-    let value = std::env::var(name).unwrap_or_default();
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        anyhow::bail!("{name} is required in control-plane-only runtime mode");
-    }
-    Ok(value)
+    Ok(ControlPlaneRuntime { resolver })
 }
 
 fn optional_env(name: &str) -> Option<String> {

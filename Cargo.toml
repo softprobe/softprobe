@@ -3,7 +3,7 @@ name = "softprobe-runtime"
 version = "0.1.0"
 edition = "2021"
 authors = ["SoftProbe Team"]
-description = "Softprobe runtime: OTLP ingest (HTTP + gRPC), DuckLake query/storage, and control API"
+description = "Softprobe runtime: OTLP ingest (HTTP + gRPC), DuckLake query/storage, and tenant control API"
 license = "Apache-2.0"
 repository = "https://github.com/softprobe/hybrid"
 
@@ -73,9 +73,6 @@ flate2 = "1.0"
 
 # HTTP client (auth service)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-
-# Redis session store
-redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
 
 # Postgres (dropdown metadata catalog on DuckLake metadata DB)
 deadpool-postgres = "0.14"

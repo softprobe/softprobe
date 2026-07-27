@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use axum::middleware::from_fn;
 use axum::routing::post;
 use axum::Router;
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::runtime_api::{runtime_control_routes, runtime_post_v1_traces};
+use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -35,7 +36,7 @@ async fn build_router(config: Config) -> Router {
         Arc::new(config),
         pipeline.storage,
         query_engine,
-        post(runtime_post_v1_traces),
+        post(ingest_traces),
         None,
         None,
     )

@@ -55,13 +55,12 @@ Sweep driver: `scripts/stress_writer_pool_inline.sh`.
 
 ## 4. Quality gates (hard bar)
 
-Both MinIO and DuckLake Postgres are **mandatory** for pre-merge. Redis is also required for tenant OTLP/session e2e suites:
+Both MinIO and DuckLake Postgres are **mandatory** for pre-merge:
 
 ```bash
 make setup-local
 make check-local
 make check-local-postgres
-make check-local-redis
 make test                   # test-quick + full integration-e2e
 ```
 

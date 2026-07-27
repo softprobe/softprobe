@@ -13,8 +13,9 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
 use serde_json::json;
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::runtime_api::{runtime_control_routes, runtime_post_v1_traces};
+use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -118,7 +119,7 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
         Arc::new(config),
         pipeline.storage,
         query_engine,
-        post(runtime_post_v1_traces),
+        post(ingest_traces),
         None,
         None,
     )

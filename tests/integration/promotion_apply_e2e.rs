@@ -5,14 +5,12 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::post;
 use axum::Router;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::runtime_api::{
-    runtime_auth_middleware, runtime_control_routes, runtime_post_v1_traces,
-};
+use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
-use softprobe_runtime::session_redis::RedisStore;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -90,22 +88,15 @@ async fn setup() -> PostgresBackend {
         softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
             .await
             .expect("query engine");
-    let redis_port = crate::util::redis::test_redis_port();
-    let redis = RedisStore::connect_host_port("127.0.0.1", redis_port, None, Duration::from_secs(3600))
-        .await
-        .unwrap_or_else(|e| {
-            panic!("redis from make setup-local (127.0.0.1:{redis_port}): {e}")
-        });
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
-        session_store: Arc::new(tokio::sync::Mutex::new(redis)),
     };
     let metadata_path = config.ducklake.metadata_path.clone();
     let (router, state) = create_router(
         Arc::new(config),
         pipeline.storage,
         query_engine,
-        post(runtime_post_v1_traces),
+        post(ingest_traces),
         Some(control),
         None,
     )

@@ -3,8 +3,9 @@
 //! Requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
 //! Listens on `OTEL_GRPC_PORT` (default **4317**) unless the process sets `SOFTPROBE_GRPC_DISABLE=1`.
 
+use crate::api::ingestion::traces::process_traces;
 use crate::api::AppState;
-use crate::runtime_api::{parse_bearer, runtime_export_trace_request};
+use crate::runtime_api::parse_bearer;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
     TraceService, TraceServiceServer,
 };
@@ -44,10 +45,14 @@ impl TraceService for GrpcTraceService {
             .resolve(&token)
             .await
             .map_err(|_| Status::permission_denied("tenant resolution failed"))?;
-        let _ = body_size;
-        runtime_export_trace_request(self.state.clone(), &tenant, inner)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        process_traces(
+            self.state.clone(),
+            inner,
+            body_size,
+            Some(tenant.tenant_id.clone()),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }
@@ -98,12 +103,12 @@ mod tests {
         let svc = GrpcTraceService { state };
         let mut req = Request::new(ExportTraceServiceRequest::default());
         req.metadata_mut()
-            .insert("authorization", "Bearer test-token".parse().unwrap());
+            .insert("authorization", "Bearer test-key".parse().unwrap());
         let got = TraceService::export(&svc, req).await;
-        let err = got.expect_err("gRPC export should fail without control-plane runtime");
+        let err = got.expect_err("gRPC export needs control-plane auth wiring");
         assert_eq!(err.code(), tonic::Code::Internal);
         assert!(
-            err.message().contains("requires control-plane runtime"),
+            err.message().contains("control-plane"),
             "{err}"
         );
     }

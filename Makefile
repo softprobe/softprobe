@@ -37,11 +37,6 @@ INTEGRATION_ISOLATED_TEST_PREFIX = integration::ingest_commit_query::
 # Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
-# Host port for runtime-redis (compose maps ${REDIS_PORT}:6379). Default 6380 avoids
-# workspace demo sp-dev-redis on :6379. Integration tests read REDIS_PORT the same way.
-REDIS_PORT ?= 6380
-export REDIS_PORT
-
 # Default target
 help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
@@ -64,13 +59,11 @@ help:
 	@echo "  make test-deployment-stress - Stress test local with large dataset"
 	@echo ""
 	@echo "Infrastructure:"
-	@echo "  make setup-local     - Start MinIO + DuckLake Postgres + Redis (required for make test)"
+	@echo "  make setup-local     - Start MinIO + DuckLake Postgres (required for make test)"
 	@echo "  make teardown-local  - Stop docker-compose stack in this directory"
 	@echo "  make check-local          - Verify MinIO (required for integration tests)"
 	@echo "  make check-local-postgres - Verify DuckLake Postgres (required for make test / test-local)"
-	@echo "  make check-local-redis    - Verify Redis (required for make test / test-local)"
-	@echo "  make check-local-e2e      - Verify MinIO + Postgres + Redis"
-	@echo "  REDIS_PORT=$(REDIS_PORT)  - Host port for runtime-redis (default 6380; demo uses 6379)"
+	@echo "  make check-local-e2e      - Verify MinIO + Postgres"
 	@echo ""
 	@echo "Data & Verification:"
 	@echo "  make generate-telemetry - Generate demo OTLP data"
@@ -124,8 +117,8 @@ clean:
 # Local infrastructure management
 setup-local:
 	@echo "🚀 Starting local test infrastructure..."
-	@echo "📦 Starting MinIO, DuckLake Postgres, and Redis..."
-	@docker-compose up -d minio ducklake-postgres redis
+	@echo "📦 Starting MinIO and DuckLake Postgres..."
+	@docker-compose up -d minio ducklake-postgres
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
@@ -138,15 +131,12 @@ setup-local:
 	@echo "✅ Bucket 'warehouse' is ready"
 	@echo "🦆 Checking DuckLake Postgres health..."
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "❌ DuckLake Postgres not ready" && exit 1)
-	@echo "🔴 Checking Redis health..."
-	@docker exec runtime-redis redis-cli ping > /dev/null 2>&1 || (echo "❌ Redis not ready" && exit 1)
 	@echo "✅ Local test infrastructure is ready!"
 	@echo ""
 	@echo "Services available:"
 	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
 	@echo "  - MinIO API: http://localhost:9000"
 	@echo "  - DuckLake catalog DB: postgres://ducklake@localhost:5432/ducklake"
-	@echo "  - Redis: localhost:$(REDIS_PORT) (REDIS_PORT; default 6380, avoids demo :6379)"
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."
@@ -183,12 +173,8 @@ check-local-postgres:
 	@echo "🔍 Checking DuckLake Postgres..."
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local')" && exit 1)
 
-check-local-redis:
-	@echo "🔍 Checking Redis..."
-	@docker exec runtime-redis redis-cli ping > /dev/null 2>&1 && echo "✅ Redis is running" || (echo "❌ Redis is not running (run 'make setup-local')" && exit 1)
-
-check-local-e2e: check-local check-local-postgres check-local-redis
-	@echo "✅ Local e2e prerequisites satisfied (MinIO + DuckLake Postgres + Redis)"
+check-local-e2e: check-local check-local-postgres
+	@echo "✅ Local e2e prerequisites satisfied (MinIO + DuckLake Postgres)"
 
 # Test targets
 # Single cargo run: #[cfg(test)] in src/ plus the default integration crate tests/tests.rs
@@ -288,10 +274,10 @@ test-ci:
 test-all: test-quick test-local
 	@echo "✅ All tests completed!"
 
-# Default pre-merge check: lib + full integration (requires MinIO + DuckLake Postgres + Redis).
+# Default pre-merge check: lib + full integration (requires MinIO + DuckLake Postgres).
 test: test-all
 
-.PHONY: check-local-e2e check-local-redis
+.PHONY: check-local-e2e
 
 # Development workflow
 dev-check: check-fmt lint test-quick

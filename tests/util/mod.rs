@@ -5,7 +5,6 @@ pub mod perf;
 pub mod pipeline;
 pub mod poll;
 pub mod promotion_contract;
-pub mod redis;
 pub mod sp_llm_manifests;
 pub mod storage_config;
 pub mod tenant;

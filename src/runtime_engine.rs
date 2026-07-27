@@ -4,7 +4,7 @@
 // Operational APIs MUST NOT accept tenant_id or scope parameters.
 // ============================================================================
 
-//! Per-tenant [`RuntimeEngine`] cache and tenant-bound session helper.
+//! Per-tenant [`RuntimeEngine`] cache.
 
 use crate::authn::TenantInfo;
 use crate::catalog::DropdownCatalog;
@@ -18,7 +18,6 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
-use crate::session_redis::{RedisStore, Session};
 use crate::storage::Storage;
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -31,91 +30,13 @@ use tokio_postgres::NoTls;
 
 pub type TenantId = String;
 
-/// Redis session store with a fixed tenant id (keys use `session:{tenantId}:` only inside [`RedisStore`]).
-pub struct TenantSessionStore {
-    tenant_id: String,
-    store: Arc<Mutex<RedisStore>>,
-}
-
-impl TenantSessionStore {
-    pub fn new(tenant_id: String, store: Arc<Mutex<RedisStore>>) -> Self {
-        Self { tenant_id, store }
-    }
-
-    pub async fn create(&self, mode: &str) -> Option<Session> {
-        self.store.lock().await.create(&self.tenant_id, mode).await
-    }
-
-    pub async fn list(&self) -> Vec<Session> {
-        self.store.lock().await.list(&self.tenant_id).await
-    }
-
-    pub async fn get(&self, id: &str) -> Option<Session> {
-        self.store.lock().await.get(&self.tenant_id, id).await
-    }
-
-    pub async fn close(&self, id: &str) -> bool {
-        self.store.lock().await.close(&self.tenant_id, id).await
-    }
-
-    pub async fn load_case(&self, id: &str, loaded_case: Vec<u8>) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .load_case(&self.tenant_id, id, loaded_case)
-            .await
-    }
-
-    pub async fn apply_policy(&self, id: &str, policy: Vec<u8>) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .apply_policy(&self.tenant_id, id, policy)
-            .await
-    }
-
-    pub async fn apply_rules(&self, id: &str, rules: Vec<u8>) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .apply_rules(&self.tenant_id, id, rules)
-            .await
-    }
-
-    pub async fn apply_fixtures_auth(&self, id: &str, fixtures: Vec<u8>) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .apply_fixtures_auth(&self.tenant_id, id, fixtures)
-            .await
-    }
-
-    pub async fn record_injected_spans(&self, id: &str, n: i64) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .record_injected_spans(&self.tenant_id, id, n)
-            .await
-    }
-
-    pub async fn record_strict_miss(&self, id: &str, n: i64) -> Option<Session> {
-        self.store
-            .lock()
-            .await
-            .record_strict_miss(&self.tenant_id, id, n)
-            .await
-    }
-}
-
-/// One tenant's ingest + query + storage + sessions (canonical tenant-bound surface).
+/// One tenant's ingest + query + storage (canonical tenant-bound surface).
 pub struct RuntimeEngine {
     pub tenant_id: String,
     pub scope: DuckLakeScope,
     pub storage: Arc<Storage>,
     pub ingest: Arc<IngestEngine>,
     pub query: Arc<QueryEngine>,
-    /// Present when the process runs with Redis control-plane wiring.
-    pub sessions: Option<Arc<TenantSessionStore>>,
     pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
 
@@ -202,13 +123,6 @@ impl RuntimeEngineManager {
             }
         };
 
-        let sessions = self.control_plane.as_ref().map(|cp| {
-            Arc::new(TenantSessionStore::new(
-                tenant_id.to_string(),
-                cp.session_store.clone(),
-            ))
-        });
-
         let dropdown_catalog = DropdownCatalog::connect(self.config.as_ref()).await?;
         let storage = Arc::new(
             IngestPipeline::build_tenant_storage(
@@ -231,7 +145,6 @@ impl RuntimeEngineManager {
             storage,
             ingest,
             query,
-            sessions,
             dropdown_catalog,
         }))
     }

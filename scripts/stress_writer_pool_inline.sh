@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Postgres (Docker) + GCS stress matrix for writer_pool_size × data_inlining_row_limit.
-# Requires: release binaries, ducklake-postgres, redis, auth-mock, GCS HMAC env, ADC key.
+# Requires: release binaries, ducklake-postgres, auth-mock, GCS HMAC env, ADC key.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,9 +13,6 @@ cd "$ROOT"
 PORT="${PORT:-38095}"
 export DUCKDB_DOWNLOAD_LIB=1
 export LD_LIBRARY_PATH="${ROOT}/target/duckdb-download/x86_64-unknown-linux-gnu/1.5.2:${LD_LIBRARY_PATH:-}"
-export REDIS_HOST=127.0.0.1
-# Host-published redis from make setup-local (default 6380; not demo :6379).
-export REDIS_PORT="${REDIS_PORT:-6380}"
 export SOFTPROBE_AUTH_URL=http://127.0.0.1:8080/validate
 export SOFTPROBE_ADMIN_API_KEY=admin-stress-key
 export RUST_LOG=info
