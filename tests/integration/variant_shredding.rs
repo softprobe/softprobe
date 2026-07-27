@@ -249,7 +249,7 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
     assert_eq!(logs.rows[0][0].as_i64(), Some(1));
 }
 
-/// Cover every nested VARIANT key path used by LLM / telemetry / capture SQL compilers.
+/// Cover every nested VARIANT key path used by LLM / telemetry SQL compilers.
 #[tokio::test]
 async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::api::llm::query::{
@@ -258,7 +258,6 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::api::telemetry::{
         compile_details_sql, TelemetryDetailsTarget,
     };
-    use softprobe_runtime::capture_export::capture_query_sql;
     use softprobe_runtime::storage::schema::variant::variant_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -509,13 +508,18 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         .expect("run miss");
     assert_eq!(miss_result.row_count, 0);
 
-    // 5) Capture export SQL (VARIANT capture id key).
-    let capture_sql = capture_query_sql(&capture_id, tenant_id);
-    assert!(capture_sql.contains("CAST(attributes['sp.capture.id'] AS VARCHAR)"));
+    // 5) Nested VARIANT capture-id key (SoftProbe capture_export removed with Redis).
+    let capture_sql = format!(
+        "SELECT CAST(attributes AS JSON) AS attributes FROM union_spans \
+         WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
+           AND tenant_id = '{ten}'",
+        cap = capture_id.replace('\'', "''"),
+        ten = tenant_id.replace('\'', "''"),
+    );
     let capture_result = query_engine
         .execute_query(&capture_sql)
         .await
-        .expect("capture");
+        .expect("capture id filter");
     assert_eq!(capture_result.row_count, 1);
     let attr_idx = capture_result
         .columns
