@@ -309,10 +309,9 @@ query either attributes['sp.user.id'] or user_id
 ### Merging multiple `telemetry_columns` sources before apply
 
 Because a tenant can only have **one active** `telemetry_columns` document,
-multiple feature-owned manifests (for example llm-v1 ∪ mocker-v1 from
-[`sp-llm/manifests/`](../../sp-llm/manifests/)) must be merged into a single
-manifest client-side before calling apply — applying them one after another
-would just supersede the previous one, not union the columns.
+multiple feature-owned manifests must be merged into a single manifest
+client-side before calling apply — applying them one after another would just
+supersede the previous one, not union the columns.
 
 `merge_telemetry_columns_manifests` (`src/promotion.rs`) does this:
 
@@ -328,9 +327,9 @@ would just supersede the previous one, not union the columns.
 - pairs with `telemetry_columns_manifest_to_yaml` to serialize the merged
   manifest back to canonical YAML for `POST /v1/promotions/apply`.
 
-See `tests/integration/promotion_mocker_v1.rs` for the end-to-end example:
-load `llm-v1.yaml` and `mocker-v1.yaml` from `sp-llm/manifests/`, merge, apply
-once, and ingest a span carrying both sources' attributes.
+Unit coverage lives in `src/promotion.rs` (`merge_*` tests). Product-specific
+column fragments (if any) belong in the owning product repo — not as
+domain modules inside thelake.
 
 ### Ingest semantics
 

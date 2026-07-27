@@ -1,7 +1,7 @@
 //! Shared helpers to locate/load sibling `sp-llm/manifests/*.yaml` promotion contracts.
 //!
-//! Both the llm-v1 and merged llm+mocker promotion tests load these files from the sibling
-//! `sp-llm` checkout instead of duplicating manifest content in thelake.
+//! `promotion_llm_v1` loads `llm-v1.yaml` from the sibling `sp-llm` checkout instead of
+//! duplicating manifest content in thelake.
 
 use std::path::PathBuf;
 

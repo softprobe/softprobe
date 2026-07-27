@@ -1,8 +1,7 @@
-//! Shared DuckDB SQL-compilation helpers reused across `api/llm/query.rs` and `api/mocker/query.rs`
-//! (Phase 1 of `backend/docs/thelake-telemetry-mocker-migration-plan.md`).
+//! Shared DuckDB SQL-compilation helpers for query modules (e.g. `api/llm/query.rs`).
 //!
-//! Extracted from `api/llm/query.rs` instead of duplicating literal-escaping / cursor logic in a
-//! parallel mocker query stack (DRY; constitution Principle IX holistic-DRY).
+//! Extracted from `api/llm/query.rs` so literal-escaping, cursors, and time-bound clauses
+//! are not copy-pasted across query recipes.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -55,8 +54,7 @@ pub(crate) fn cursor_predicate(
     ))
 }
 
-/// Push a bounded (or half-bounded) `timestamp` range condition; mirrors the `from`/`to` handling
-/// shared by the llm observation-search SQL and the mocker aggregation SQL.
+/// Push a bounded (or half-bounded) `timestamp` range condition.
 pub(crate) fn push_optional_time_bounds(
     conditions: &mut Vec<String>,
     from: Option<DateTime<Utc>>,

@@ -766,8 +766,8 @@ fn validate_business_table_additive(
     Ok(())
 }
 
-/// Merge several `telemetry_columns` manifests (for example llm-v1 ∪ mocker-v1) into the single
-/// platform manifest a tenant can have active at once ([`thelake/docs/promotion.md`]).
+/// Merge several `telemetry_columns` manifests into the single platform manifest a tenant can
+/// have active at once ([`thelake/docs/promotion.md`]).
 ///
 /// All input manifests must target the exact same table set. `telemetry_column_add_ddls` /
 /// `validate_telemetry_column_additive` apply **every** column in a manifest to **every** table
@@ -2242,7 +2242,7 @@ columns:
 
     #[test]
     fn merge_combines_disjoint_columns_from_multiple_manifests() {
-        let llm = telemetry_manifest(
+        let fragment_a = telemetry_manifest(
             r#"
 specVersion: softprobe.promotion.v1
 target:
@@ -2263,29 +2263,30 @@ columns:
       key: deployment.environment.name
 "#,
         );
-        let mocker = telemetry_manifest(
+        let fragment_b = telemetry_manifest(
             r#"
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
   tables: [traces]
 columns:
-  - name: record_operation
+  - name: http_route
     type: string
     nullable: true
     source:
       from: attribute
-      key: sp_operation_name
-  - name: record_environment
+      key: http.route
+  - name: http_status_code
     type: int64
     nullable: true
     source:
       from: attribute
-      key: sp_record_environment
+      key: http.response.status_code
 "#,
         );
 
-        let merged = super::merge_telemetry_columns_manifests(&[llm, mocker]).expect("merge");
+        let merged =
+            super::merge_telemetry_columns_manifests(&[fragment_a, fragment_b]).expect("merge");
 
         assert_eq!(merged.target.tables, vec![super::TelemetryTable::Traces]);
         let names: Vec<&str> = merged.columns.iter().map(|c| c.name.as_str()).collect();
@@ -2294,8 +2295,8 @@ columns:
             vec![
                 "operation_name",
                 "environment",
-                "record_operation",
-                "record_environment"
+                "http_route",
+                "http_status_code"
             ]
         );
     }
