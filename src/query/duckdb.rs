@@ -634,7 +634,16 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         DuckValue::Map(entries) => {
             let mut map = serde_json::Map::new();
             for (key, value) in entries.iter() {
-                map.insert(format!("{:?}", key), duck_value_to_json(value.clone()));
+                // Use the logical string for Text keys — Debug (`Text("k")`) breaks SoftProbe
+                // product MAP contracts and CLI `-f key=value` filters.
+                let key_str = match key {
+                    DuckValue::Text(s) => s.clone(),
+                    other => match duck_value_to_json(other.clone()) {
+                        Value::String(s) => s,
+                        v => v.to_string(),
+                    },
+                };
+                map.insert(key_str, duck_value_to_json(value.clone()));
             }
             Value::Object(map)
         }
