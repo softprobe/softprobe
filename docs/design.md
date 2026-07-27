@@ -12,7 +12,6 @@
 - OTLP trace ingestion over gRPC
 - tenant-scoped DuckLake storage and DuckDB queries
 - telemetry search and detail APIs
-- Redis-backed capture/replay control sessions
 - schema promotion and optional dropdown metadata
 
 DuckLake is the only durable telemetry backend. Apache Iceberg, the
@@ -104,7 +103,6 @@ Authentication resolves a tenant before operational work begins. A
 
 - a tenant-bound DuckLake metadata schema and data path;
 - a tenant-bound writer and query engine;
-- an optional Redis session store;
 - an optional Postgres dropdown catalog.
 
 With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
@@ -246,7 +244,7 @@ Supported direct overrides in `src/config.rs` are `PORT`, `S3_REGION`, and
   `SOFTPROBE_GRPC_DISABLE=1`.
 - `/v1/*` operational routes require bearer authentication, except tenant
   provisioning which performs its own admin-token validation.
-- `REDIS_HOST` is required by the main control-plane runtime.
+- Auth wiring uses `SOFTPROBE_AUTH_URL` (defaults to a local auth stub URL).
 
 The implemented HTTP routes are exposed by `/openapi.json`; the standalone
 ingestion and promotion contract is in
@@ -264,5 +262,5 @@ make lint
 make check-fmt
 ```
 
-`make test` covers unit tests plus isolated MinIO/PostgreSQL/Redis integration
+`make test` covers unit tests plus isolated MinIO/PostgreSQL integration
 tests. `make duckdb-shell` is the supported manual ATTACH smoke.

@@ -1,7 +1,7 @@
 # Softprobe Runtime
 
 Rust runtime for authenticated OTLP ingestion, tenant-scoped DuckLake storage,
-DuckDB queries, telemetry search, and capture/replay control sessions.
+DuckDB queries, and telemetry search.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ Prerequisites:
 - Docker and Docker Compose
 - a dynamic DuckDB library (`DUCKDB_DOWNLOAD_LIB=1` lets the build fetch it)
 
-Start MinIO, DuckLake PostgreSQL, and Redis:
+Start MinIO and DuckLake PostgreSQL:
 
 ```bash
 make setup-local
@@ -53,19 +53,13 @@ make teardown-local
 ```
 
 `make test` is the pre-merge test target. It runs unit tests and isolated
-integration tests against MinIO, PostgreSQL, and Redis.
-
-Local Redis is published on host port **6380** by default (`REDIS_PORT`) so it
-does not collide with workspace demo Redis on **6379**. Override if needed:
-`REDIS_PORT=6390 make setup-local test`.
+integration tests against MinIO and PostgreSQL.
 
 ## Run
 
-The main binary requires control-plane Redis wiring:
-
 ```bash
-export REDIS_HOST=127.0.0.1
 export CONFIG_FILE=config.yaml
+export SOFTPROBE_AUTH_URL=http://127.0.0.1:8091/validate
 cargo run --bin softprobe-runtime
 ```
 
@@ -110,9 +104,8 @@ Supported direct environment overrides are:
 - `S3_REGION`
 - `SOFTPROBE_MAX_HTTP_BODY_BYTES`
 
-The runtime also uses deployment variables such as `REDIS_HOST`,
-`REDIS_PORT`, `REDIS_PASSWORD`, `SOFTPROBE_AUTH_URL`, `SOFTPROBE_LISTEN_ADDR`,
-and `OTEL_GRPC_PORT`.
+The runtime also uses deployment variables such as `SOFTPROBE_AUTH_URL`,
+`SOFTPROBE_LISTEN_ADDR`, and `OTEL_GRPC_PORT`.
 
 For `gs://` DuckLake paths, DuckDB uses GCS HMAC interoperability credentials:
 `GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET` (or their `GCP_HMAC_*`
@@ -148,10 +141,9 @@ Query and telemetry:
 - `GET /v1/telemetry/traces/{trace_id}`
 - `GET /v1/data/ducklake-connection`
 
-Control-plane routes also cover tenant provisioning, sessions, injection,
-captures, promotions, and dropdown catalog lookups. `/v1/*` operational routes
-require bearer authentication; tenant provisioning validates its admin bearer
-inside the handler.
+Control-plane routes also cover tenant provisioning, promotions, and dropdown
+catalog lookups. `/v1/*` operational routes require bearer authentication;
+tenant provisioning validates its admin bearer inside the handler.
 
 The focused ingestion and promotion HTTP contract is
 [`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml). Schema promotion

@@ -649,6 +649,8 @@ fn duck_value_to_json(value: DuckValue) -> Value {
             Value::Object(map)
         }
         DuckValue::Union(value) => duck_value_to_json(*value),
+        // duckdb::types::Value is #[non_exhaustive]; keep forward-compatible.
+        other => Value::String(format!("{other:?}")),
     }
 }
 

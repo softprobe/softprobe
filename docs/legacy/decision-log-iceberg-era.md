@@ -120,7 +120,7 @@ The core insight is that **ecosystem value >> marginal performance difference**.
 **Mitigations**:
 - Monitor query performance with SLAs
 - Optimize Parquet file sizes (128MB → 256MB if needed)
-- Add query result caching (Redis) for hot sessions
+- Add query result caching for hot sessions
 - Z-ordering on session_id + timestamp if needed
 - Escape hatch: Migrate to Delta Lake if ALL mitigations fail
 
