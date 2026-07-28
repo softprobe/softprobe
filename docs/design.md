@@ -145,6 +145,13 @@ evaluation commonly arrives after the observed work. A score targets at least
 one trace, span, or session and contains one typed numeric, categorical,
 boolean, or text value. `score_id` is the tenant-local idempotency key.
 
+### `score_configs`
+
+Append-only score schemas (name + data type + optional numeric bounds /
+categorical values). `config_id` is the tenant-local idempotency key. There is
+no PATCH; replace a config by inserting a new `config_id`. Human annotation and
+queue UX are documented in Softprobe LLM `docs/annotation.md`.
+
 ## Schema promotion
 
 Promotion is tenant-scoped and applied through authenticated

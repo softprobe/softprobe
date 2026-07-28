@@ -199,6 +199,78 @@ async fn unit_score_create_is_validated_and_idempotent() {
 }
 
 #[tokio::test]
+async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+
+    let list_req = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/score-configs")
+        .body(Body::empty())
+        .unwrap();
+    let list_resp = router
+        .clone()
+        .oneshot(list_req)
+        .await
+        .expect("list score configs");
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+        .await
+        .expect("list body");
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).expect("list json");
+    let items = list_json["items"].as_array().expect("items");
+    assert!(items.len() >= 3, "expected seeded defaults, got {items:?}");
+
+    let config_id = items
+        .iter()
+        .find(|item| item["name"] == "correctness")
+        .and_then(|item| item["config_id"].as_str())
+        .expect("correctness config")
+        .to_string();
+
+    let ok_score = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "score_id": "score-anno-1",
+                "timestamp": "2026-07-18T23:22:00Z",
+                "span_id": "span-unit-1",
+                "name": "correctness",
+                "data_type": "boolean",
+                "boolean_value": true,
+                "source": "annotation",
+                "config_id": config_id,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let ok_resp = router.clone().oneshot(ok_score).await.expect("anno score");
+    assert_eq!(ok_resp.status(), StatusCode::CREATED);
+
+    let bad_score = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "score_id": "score-anno-bad",
+                "timestamp": "2026-07-18T23:22:00Z",
+                "span_id": "span-unit-1",
+                "name": "correctness",
+                "data_type": "boolean",
+                "boolean_value": true,
+                "source": "annotation",
+                "config_id": "missing-config",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let bad_resp = router.oneshot(bad_score).await.expect("bad config score");
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn unit_openapi_and_swagger_endpoints_are_served() {
     let (router, _state, _t) = local_router_and_state().await.expect("router");
 
@@ -232,6 +304,20 @@ async fn unit_openapi_and_swagger_endpoints_are_served() {
     assert_eq!(
         openapi["paths"]["/v1/llm/observations/search"]["post"]["operationId"],
         "searchObservations"
+    );
+    assert!(
+        openapi["components"]["schemas"]["ObservationSearchRequest"]["properties"]
+            .get("without_score_name")
+            .is_some(),
+        "ObservationSearchRequest must document without_score_name"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/score-configs"]["get"]["operationId"],
+        "listScoreConfigs"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/score-configs"]["post"]["operationId"],
+        "createScoreConfig"
     );
     assert_eq!(
         openapi["paths"]["/v1/llm/observations/{span_id}"]["get"]["operationId"],

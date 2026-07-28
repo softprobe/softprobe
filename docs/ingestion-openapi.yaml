@@ -15,6 +15,7 @@ info:
 
     LLM evaluations are written through:
     - `POST /v1/llm/scores`
+    - `GET|POST /v1/llm/score-configs`
 
     LLM query surfaces (canonical schemas also live in softprobe/sp-llm):
     - `POST /v1/llm/observations/search`

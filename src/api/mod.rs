@@ -64,6 +64,7 @@ impl AppState {
                     || msg.contains("Table with name logs does not exist")
                     || msg.contains("Table with name metrics does not exist")
                     || msg.contains("Table with name scores does not exist")
+                    || msg.contains("Table with name score_configs does not exist")
                 {
                     return Ok(crate::query::duckdb::QueryResult {
                         columns: Vec::new(),
@@ -137,6 +138,10 @@ pub async fn create_router(
         .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/v1/llm/scores", post(llm::create_score))
         .route(
+            "/v1/llm/score-configs",
+            get(llm::list_score_configs).post(llm::create_score_config),
+        )
+        .route(
             "/v1/llm/observations/search",
             post(llm::query::search_observations),
         )
@@ -190,7 +195,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/v1/llm/scores": {
                 "post": {
                     "summary": "Create an immutable LLM evaluation score",
-                    "description": "Creates a score in the authenticated tenant's DuckLake scope. At least one of trace_id, span_id, or session_id is required. Exactly one value must match data_type. score_id is the tenant-local idempotency key.",
+                    "description": "Creates a score in the authenticated tenant's DuckLake scope. At least one of trace_id, span_id, or session_id is required. Exactly one value must match data_type. score_id is the tenant-local idempotency key. When config_id is set it must exist and match name/data_type.",
                     "operationId": "createScore",
                     "security": [{ "bearerAuth": [] }],
                     "requestBody": {
@@ -219,7 +224,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                             }
                         },
                         "400": {
-                            "description": "Invalid score target or typed value",
+                            "description": "Invalid score target, typed value, or config_id",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -231,6 +236,82 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         "422": { "description": "Malformed JSON or field type mismatch" },
                         "503": {
                             "description": "Tenant runtime, score lookup, or DuckLake write unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v1/llm/score-configs": {
+                "get": {
+                    "summary": "List score configs (seeds defaults when empty)",
+                    "operationId": "listScoreConfigs",
+                    "security": [{ "bearerAuth": [] }],
+                    "responses": {
+                        "200": {
+                            "description": "Score config list",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ScoreConfigListResponse" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "403": { "description": "Bearer token could not be resolved to a tenant" },
+                        "503": {
+                            "description": "Tenant runtime or DuckLake unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                },
+                "post": {
+                    "summary": "Create an append-only score config",
+                    "operationId": "createScoreConfig",
+                    "security": [{ "bearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/CreateScoreConfigRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Score config created",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ScoreConfig" }
+                                }
+                            }
+                        },
+                        "200": {
+                            "description": "Existing config returned after an idempotent retry",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ScoreConfig" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid score config",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "403": { "description": "Bearer token could not be resolved to a tenant" },
+                        "503": {
+                            "description": "Tenant runtime or DuckLake write unavailable",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -502,8 +583,61 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         "user_id": { "type": "string" },
                         "session_id": { "type": "string" },
                         "trace_id": { "type": "string" },
+                        "without_score_name": {
+                            "type": "string",
+                            "description": "Return only observations whose span_id has no score with this name"
+                        },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
                         "cursor": { "type": "string" }
+                    }
+                },
+                "CreateScoreConfigRequest": {
+                    "type": "object",
+                    "required": ["config_id", "timestamp", "name", "data_type"],
+                    "properties": {
+                        "config_id": { "type": "string", "minLength": 1 },
+                        "timestamp": { "type": "string", "format": "date-time" },
+                        "name": { "type": "string", "minLength": 1 },
+                        "data_type": {
+                            "type": "string",
+                            "enum": ["numeric", "categorical", "boolean", "text"]
+                        },
+                        "description": { "type": "string", "nullable": true },
+                        "min_value": { "type": "number", "format": "double", "nullable": true },
+                        "max_value": { "type": "number", "format": "double", "nullable": true },
+                        "categories": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "default": []
+                        },
+                        "author_id": { "type": "string", "nullable": true },
+                        "metadata": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "default": {}
+                        }
+                    }
+                },
+                "ScoreConfig": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CreateScoreConfigRequest" },
+                        {
+                            "type": "object",
+                            "required": ["record_date"],
+                            "properties": {
+                                "record_date": { "type": "string", "format": "date" }
+                            }
+                        }
+                    ]
+                },
+                "ScoreConfigListResponse": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ScoreConfig" }
+                        }
                     }
                 },
                 "ObservationSummary": {
