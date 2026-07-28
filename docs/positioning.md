@@ -1,6 +1,6 @@
 # Softprobe Runtime Competitive Positioning
 
-**Status:** Product and technical positioning  
+**Status:** Product and technical positioning
 **Last researched:** 2026-07-28
 
 ## Primary positioning
