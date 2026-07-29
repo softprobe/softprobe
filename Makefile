@@ -92,9 +92,11 @@ build-release:
 	@echo "🔨 Building release..."
 	cargo build --release
 
+# Official images: GitHub Release vX.Y.Z → .github/workflows/release.yml
+# Local/emergency: ./build.sh [vX.Y.Z]
 publish-docker:
-	@echo "🔨 Publishing Docker image..."
-	docker buildx build --platform linux/amd64 --push -t gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/splake:latest .
+	@echo "🔨 Publishing Docker image (prefer GitHub Release; this is emergency/local)..."
+	./build.sh
 
 # Code quality targets
 lint:
