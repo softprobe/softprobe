@@ -1,13 +1,16 @@
 # Softprobe Runtime Goals
 
 **Status:** Current
-**Last updated:** 2026-07-18
+**Last updated:** 2026-07-28
 
 ## Product goal
 
-Store complete application telemetry, including HTTP request and response
-context, so engineers and AI agents can investigate real business sessions
-with SQL.
+Preserve production AI traces and application recordings as durable,
+customer-controlled evidence that can be reused across investigation,
+evaluation, regression, governance, and continuous-improvement workflows.
+Keep the original business context directly queryable with SQL so engineers
+and AI agents can build those workflows on open data rather than short-lived
+operational telemetry.
 
 ## Current technical goals
 

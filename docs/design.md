@@ -149,8 +149,9 @@ boolean, or text value. `score_id` is the tenant-local idempotency key.
 
 Promotion is tenant-scoped and applied through authenticated
 `POST /v1/promotions/apply`, not process-global YAML. Active manifests live in
-the tenant PostgreSQL metadata schema (`promotion_specs`). Apply and ingest
-extraction require a PostgreSQL catalog; SQLite local catalogs skip promotion.
+the tenant PostgreSQL metadata schema (`promotion_specs`) in production.
+SQLite supports promotion in its configured local single-scope DuckLake
+catalog.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs` /
   `metrics`. Future ingest extracts declared sources into those columns;

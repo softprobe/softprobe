@@ -1,19 +1,21 @@
 # Softprobe Runtime
 
-> **Primary positioning:** Softprobe Runtime is an open, tenant-scoped
-> observability evidence lake. It preserves the application and business
-> context captured in telemetry, combines Parquet VARIANT shredding with
-> tenant-controlled typed-column promotion for workload-specific query paths,
-> and keeps the evidence directly queryable with SQL by engineers and AI
-> agents.
+> **The durable evidence foundation for production AI.** Softprobe preserves
+> AI traces and recordings as customer-controlled data assets, directly
+> queryable with standard SQL and reusable across investigation, evaluation,
+> regression, governance, and continuous-improvement workflows.
 
 Rust runtime for authenticated OTLP ingestion, tenant-scoped DuckLake storage,
 DuckDB queries, and telemetry search.
 
-Softprobe pairs open, customer-controlled storage with workload-specific query
-paths across application and business evidence. The result is an observability
-foundation that engineers and AI agents can investigate directly with standard
-SQL on storage they control. See the
+Traditional software telemetry is often retained only for a short incident
+window. AI traces have lasting value: today's production recording can become
+tomorrow's evaluation case, regression test, audit evidence, or improvement
+dataset. Softprobe keeps that evidence open and durable, while Parquet VARIANT
+shredding and tenant-controlled column promotion provide workload-specific
+query paths without discarding the original context.
+
+See the
 [product and competitive positioning](docs/positioning.md) for the strategy
 and technical rationale.
 

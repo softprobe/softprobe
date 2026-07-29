@@ -1,19 +1,97 @@
-# Softprobe Runtime Competitive Positioning
+# Softprobe Runtime: AI Evidence Lake Positioning
 
 **Status:** Product and technical positioning
 **Last researched:** 2026-07-28
 
 ## Primary positioning
 
-> **Softprobe Runtime is an open, tenant-scoped observability evidence lake. It
-> preserves complete application and business context in DuckLake, uses
-> Parquet VARIANT shredding and tenant-controlled typed-column promotion to
-> create workload-specific query paths for the fields that matter, and keeps
-> the evidence directly queryable with SQL by engineers and AI agents.**
+> **Softprobe Runtime is the durable evidence foundation for production AI. It
+> preserves AI traces and recordings as customer-controlled data assets,
+> directly queryable with standard SQL and reusable across investigation,
+> evaluation, regression, governance, and continuous-improvement workflows.**
 
-The product should lead with complete evidence, data ownership, and adaptive
-physical design. It should not lead with an unsupported claim that a data lake
-is universally faster than ClickHouse or that Parquet shredding is unique.
+The product should lead with the durable value of AI evidence. Open storage,
+DuckLake, Parquet VARIANT shredding, and tenant-controlled column promotion are
+the mechanisms that preserve and keep that evidence useful; they are not the
+category definition.
+
+## Category thesis
+
+Traditional software observability treats most telemetry as operational
+exhaust:
+
+```text
+software telemetry
+  -> detect and diagnose an incident
+  -> retain for a short operational window
+  -> aggregate or discard
+```
+
+Production AI changes the value of a trace:
+
+```text
+AI trace or recording
+  -> investigate behavior and failures
+  -> evaluate quality, safety, cost, and outcomes
+  -> become a regression or replay case
+  -> support audit, governance, and lineage
+  -> contribute to future system improvement
+```
+
+An AI trace can contain prompts, model responses, retrieval context, tool
+calls, business inputs and outcomes, token usage, cost, feedback, and
+evaluations. Those connected facts are not merely developer diagnostics. They
+are a record of how an intelligent system behaved and why.
+
+The same recording can acquire new value long after its original incident
+window. A failure becomes a regression test. A high-quality interaction
+becomes an evaluation example. A disputed outcome becomes audit evidence. A
+population of traces becomes the basis for product analytics or a curated
+improvement dataset.
+
+Softprobe therefore treats production AI evidence as a durable data asset, not
+a disposable by-product of monitoring.
+
+## Product principles
+
+### Preserve before predicting future value
+
+Teams cannot know at ingest time every question they will ask later. Preserve
+the original context without runtime sampling so future investigations and
+evaluations are not constrained by yesterday's dashboards or indexes.
+
+### Keep the evidence customer-controlled and open
+
+AI recordings may outlive the current observability vendor, UI, model, and
+application architecture. Store them in an open Parquet-backed lake and expose
+snapshot-correct tables through DuckDB and DuckLake rather than making a
+proprietary query surface the only path to the data.
+
+### Make retained evidence progressively useful
+
+Flexible storage alone can become expensive to query. VARIANT shredding keeps
+stable paths columnar inside Parquet, while tenant-controlled promotion gives
+important fields governed names and SQL types. The system can optimize what
+becomes important without discarding the full original recording.
+
+### Serve humans and AI agents from the same evidence
+
+Engineers, evaluators, analysts, compliance workflows, and AI agents should
+operate on the same traceable records. Standard SQL and stable evidence
+anchors make findings inspectable and reproducible across those consumers.
+
+### Build a learning lifecycle, not only an incident workflow
+
+The strategic product lifecycle is:
+
+```text
+capture -> investigate -> evaluate -> curate -> regress -> improve
+```
+
+The current runtime implements the storage, query, promotion, and score
+foundations for this direction. Dataset curation, replay/regression workflows,
+and broader governance automation remain product work rather than claims of
+current completeness.
 
 ## What exists today
 
@@ -37,20 +115,21 @@ The implementation provides:
 - DuckLake `VARIANT` columns for hot telemetry attribute maps;
 - Parquet VARIANT shredding and file-level shredded-path statistics when rows
   are stored in Parquet;
-- PostgreSQL-backed, tenant-scoped promotion manifests that add typed nullable
-  columns and extract their values on subsequent ingest;
+- promotion manifests that add typed nullable columns and extract their values
+  on subsequent ingest, using tenant-scoped PostgreSQL metadata in production
+  or a local single-scope SQLite catalog;
 - open SQL access through DuckDB and DuckLake.
 
 These are real implementation properties. They are not, by themselves,
 evidence of lower total cost or faster queries than another platform.
 
-## Why the architecture can be valuable
+## Why the architecture supports the thesis
 
-Observability has an awkward schema problem. Common fields should be typed and
-columnar, but each customer also has high-cardinality business fields that are
-important only to that customer. A single global physical schema either
-becomes extremely wide and sparse or leaves those fields inside JSON-like
-containers that are more expensive to search.
+Durable AI recordings have an awkward schema problem. Common fields should be
+typed and columnar, but each customer, model, agent, tool, and business process
+introduces fields that may become important only later. A single global
+physical schema either becomes extremely wide and sparse or forces evolving
+evidence into rigid schemas chosen before its value is understood.
 
 Softprobe uses two complementary optimization layers:
 
@@ -60,10 +139,11 @@ Softprobe uses two complementary optimization layers:
 2. **Tenant-controlled promotion** gives a field a stable name and SQL type
    when that tenant wants an explicit, governed fast path.
 
-This combination can avoid a global union of every tenant's business schema.
-It is particularly promising for selective investigations over long
-retention, where a query first finds a small set of sessions or traces and
-only then reads large request or response bodies.
+This combination can avoid a global union of every tenant's business schema
+without reducing the retained recording to only the fields promoted today. It
+is particularly promising for selective investigations over long retention,
+where a query first finds a small set of sessions or traces and only then reads
+large prompts, responses, tool payloads, or other bodies.
 
 ## What is and is not differentiated
 
@@ -72,9 +152,13 @@ only then reads large request or response bodies.
 - **Customer-controlled, directly queryable evidence:** customers can retain
   data in open Parquet-backed storage and access snapshot-correct tables
   through DuckDB with the DuckLake extension.
-- **Complete application and business context:** the focus extends beyond
-  infrastructure telemetry to HTTP payloads, business identifiers, and whole
-  sessions useful to engineers and AI agents.
+- **AI recordings as durable assets:** the retention model supports reuse for
+  evaluation, regression, governance, and improvement rather than only
+  short-lived incident diagnosis.
+- **Connected application and business context:** the focus extends beyond
+  infrastructure telemetry to model interactions, HTTP payloads, business
+  identifiers, outcomes, scores, and whole sessions useful to humans and AI
+  agents.
 - **Per-tenant physical design:** one tenant can optimize `customer.id` while
   another optimizes `device.serial` without creating a global sparse schema.
 - **Explicit governance:** promotion manifests make important fields and
@@ -105,9 +189,9 @@ APIs, dashboards, and AI investigations.
 
 | Alternative | Its structural advantage | Softprobe's credible opening |
 |---|---|---|
-| ClickHouse / ClickStack | Mature high-rate ingestion, distributed execution, native JSON paths, indexes, projections, replication, and a growing complete observability product | Customer-controlled open files, tenant-governed schemas, complete business evidence, and simpler embedded/local SQL access |
-| Observe | Managed data-lake observability, semantic context graph, accelerated datasets, integrations, explorers, alerting, and AI investigation | Simpler standard SQL, self-hosted or bring-your-own-cloud operation, direct storage control, and less proprietary transformation |
-| SigNoz and other ClickHouse products | Complete open-source observability experience backed by a proven analytical engine | Evidence-lake workflows and per-tenant business schema control |
+| ClickHouse / ClickStack | Mature high-rate ingestion, distributed execution, native JSON paths, indexes, projections, replication, and a growing complete observability product | Durable AI evidence on customer-controlled open files, tenant-governed schemas, and simpler embedded/local SQL access |
+| Observe | Managed data-lake observability, semantic context graph, accelerated datasets, integrations, explorers, alerting, and AI investigation | AI evidence as a customer-controlled asset, standard SQL, self-hosted or bring-your-own-cloud operation, and less proprietary transformation |
+| SigNoz and other ClickHouse products | Complete open-source observability experience backed by a proven analytical engine | AI evidence-lifecycle workflows and per-tenant business schema control |
 | Grafana Loki | Low-cost object-store log retention with a deliberately small metadata index | Cross-signal relational SQL and efficient typed access to selected business fields |
 | Elastic and search-oriented platforms | Mature full-text search, indexing, security analytics, and ecosystem | Lower-cost long retention and open analytical access where full-text search is not primary |
 | Datadog, New Relic, and Dynatrace | Product completeness, integrations, operational workflows, and managed reliability | Data ownership, transparent storage, business evidence, and potentially lower long-retention cost |
@@ -149,14 +233,17 @@ operational maturity.
 
 Softprobe is best positioned initially for teams that:
 
-- require long retention of unsampled telemetry or application evidence;
-- need HTTP and business payload context, not only infrastructure signals;
+- operate AI applications, agents, or model-powered business workflows;
+- regard production traces as future evaluation, regression, audit, or
+  improvement assets;
+- require long retention of unsampled AI and application evidence;
+- need prompts, responses, tool activity, HTTP payloads, scores, and business
+  outcomes to remain connected;
 - want direct SQL access to customer-controlled storage;
-- run selective investigations rather than constant high-concurrency
-  dashboards over all data;
-- want evidence that both engineers and AI agents can inspect;
+- want the same evidence available to engineers, evaluators, analysts,
+  governance workflows, and AI agents;
 - accept a less mature visualization, alerting, and integration surface in
-  exchange for control and lower potential retention cost.
+  exchange for evidence ownership and long-term reuse.
 
 It should not initially compete for workloads dominated by:
 
@@ -176,9 +263,11 @@ It should not initially compete for workloads dominated by:
   storage.
 - Selected telemetry attribute containers are stored as DuckLake `VARIANT`
   and can be shredded in Parquet.
-- With a PostgreSQL catalog, promotion is tenant-scoped and creates typed
-  columns for future ingest; SQLite catalogs skip promotion.
+- Promotion creates typed columns for future ingest, using tenant-scoped
+  PostgreSQL metadata in production or a local single-scope SQLite catalog.
 - Customers can query tenant-bound evidence through DuckDB SQL.
+- Durable records can be revisited and queried after their original incident
+  window rather than being reduced to short-lived aggregates.
 - The architecture is designed for open access and economical retention.
 
 ### Claims that require benchmark evidence
@@ -198,8 +287,8 @@ Until comparative results exist, use **designed to**, **can**, or
 
 - Promotion affects future ingest; historical rows are not automatically
   backfilled.
-- Promotion apply and ingest extraction require a PostgreSQL catalog; SQLite
-  local catalogs skip promotion.
+- PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
+  to a local single-scope catalog.
 - VARIANT file statistics require data to land in Parquet rather than remain
   catalog-inlined.
 - Existing legacy MAP tables require an operator-owned migration to VARIANT.
@@ -237,35 +326,50 @@ Use identical OTLP data and publish:
 - promotion and historical rewrite cost;
 - behavior across many tenants and divergent schemas.
 
-The decisive workload is not a generic analytical benchmark. It is an
-incident investigation:
+The decisive workload is not a generic analytical benchmark. It is reuse of
+one body of production evidence across its lifecycle:
 
 ```text
-find one user or business transaction in 30 days of telemetry
-  -> locate its sessions and traces
-  -> retrieve the complete payload evidence
+find an AI outcome in months of production evidence
+  -> reconstruct the connected trace, prompts, responses, tools, and outcome
+  -> attach or query evaluations
+  -> curate the case into a durable regression dataset
+  -> revisit it after models, prompts, or agents change
 ```
 
 If Softprobe can demonstrate that workflow with competitive interactive
 latency, substantially fewer bytes read, and lower total retention cost, the
-architecture becomes a measurable advantage rather than a positioning
-hypothesis.
+architecture becomes a measurable advantage. Product proof must also show
+that evidence identity, lineage, and relevant context survive each transition
+without requiring export into a separate closed system.
 
 ## Strategic direction
 
-The most defensible roadmap is a workload-driven promotion control loop:
+The most defensible roadmap completes the evidence learning lifecycle:
+
+1. preserve complete connected AI recordings with stable evidence identity;
+2. attach human, automated, and model-based evaluations without mutating the
+   source evidence;
+3. curate versioned datasets from production evidence with lineage back to
+   the original trace;
+4. turn failures and important edge cases into executable regression cases;
+5. compare behavior across model, prompt, agent, and tool versions;
+6. expose governance, retention, deletion, and audit controls over the same
+   evidence;
+7. make the lifecycle directly usable by engineers and AI agents.
+
+Under that product lifecycle, a workload-driven physical-design loop keeps the
+growing asset economical and responsive:
 
 1. observe tenant query patterns;
 2. recommend candidate fields and types;
 3. estimate latency, bytes-read, and storage effects before applying;
-4. enforce cardinality and schema-width limits;
-5. promote without interrupting ingestion;
-6. optionally rewrite historical files;
-7. demote cold fields without losing raw evidence;
-8. report the realized cost and latency change.
+4. promote, rewrite, or demote fields without losing the original evidence;
+5. report the realized cost and latency change.
 
-That control loop, combined with complete business evidence and open SQL
-access, is more difficult to copy than the storage format alone.
+The combination of a durable evidence lifecycle, business context, lineage,
+open SQL access, and adaptive physical design is more difficult to copy than
+the storage format alone.
 
 ## Primary sources
 
