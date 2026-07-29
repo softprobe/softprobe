@@ -1,8 +1,8 @@
 # Softprobe Runtime
 
 > **Primary positioning:** Softprobe Runtime is an open, tenant-scoped
-> observability evidence lake. It preserves complete application and business
-> context in DuckLake, combines Parquet VARIANT shredding with
+> observability evidence lake. It preserves the application and business
+> context captured in telemetry, combines Parquet VARIANT shredding with
 > tenant-controlled typed-column promotion for workload-specific query paths,
 > and keeps the evidence directly queryable with SQL by engineers and AI
 > agents.
@@ -10,12 +10,12 @@
 Rust runtime for authenticated OTLP ingestion, tenant-scoped DuckLake storage,
 DuckDB queries, and telemetry search.
 
-This project is not positioned as a universally faster replacement for
-ClickHouse or a feature-complete replacement for managed observability
-platforms. Its intended advantage is economical long retention, open access to
-customer-controlled data, and workload-specific optimization of complete
-business evidence. See the [competitive positioning](docs/positioning.md) for
-the claims, boundaries, and evidence still required.
+Softprobe pairs open, customer-controlled storage with workload-specific query
+paths across application and business evidence. The result is an observability
+foundation that engineers and AI agents can investigate directly with standard
+SQL on storage they control. See the
+[product and competitive positioning](docs/positioning.md) for the strategy
+and technical rationale.
 
 ## Architecture
 
