@@ -157,9 +157,18 @@ impl DuckDBQueryEngine {
 
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
+        // Workers report startup outcome so a failed one cannot stay in the pool.
+        // Previously a worker that could not open its connection just logged a
+        // warning and returned; its channel closed, but round-robin dispatch kept
+        // handing queries to that dead slot. Every request landing there failed
+        // with "worker channel closed", which the API layer flattened into a bare
+        // 503 -- a fixed fraction of requests failing while looking like a random
+        // outage.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<usize, String>>();
+        for index in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
             let core = core.clone();
+            let ready_tx = ready_tx.clone();
             let join = std::thread::Builder::new()
                 .name("softprobe-duckdb-query-worker".to_string())
                 .spawn(move || {
@@ -167,17 +176,23 @@ impl DuckDBQueryEngine {
                     let connection = match core.open_connection() {
                         Ok(conn) => conn,
                         Err(err) => {
-                            warn!("DuckDB worker failed to open connection: {}", err);
+                            let _ = ready_tx
+                                .send(Err(format!("worker {index} open_connection: {err}")));
                             return;
                         }
                     };
                     let mut state = match core.init_connection_state_with(connection) {
                         Ok(state) => state,
                         Err(err) => {
-                            warn!("DuckDB worker failed to initialize: {}", err);
+                            let _ = ready_tx
+                                .send(Err(format!("worker {index} init_connection: {err}")));
                             return;
                         }
                     };
+                    if ready_tx.send(Ok(index)).is_err() {
+                        return; // engine construction already aborted
+                    }
+                    drop(ready_tx);
                     while let Some(request) = rx.blocking_recv() {
                         let result = core.execute_query_on_state(&mut state, &request.sql);
                         let _ = request.respond_to.send(result);
@@ -188,6 +203,31 @@ impl DuckDBQueryEngine {
                 sender: Some(tx),
                 join: Some(join),
             });
+        }
+        drop(ready_tx);
+
+        // Fail fast: one unusable worker means a fixed slice of every future
+        // request would fail, which is far harder to diagnose than not starting.
+        let mut failures = Vec::new();
+        for _ in 0..worker_count {
+            match ready_rx.recv() {
+                Ok(Ok(_)) => {}
+                Ok(Err(msg)) => failures.push(msg),
+                Err(_) => failures.push("worker exited before reporting readiness".to_string()),
+            }
+        }
+        if !failures.is_empty() {
+            warn!(
+                "DuckDB query engine: {}/{} workers failed to start",
+                failures.len(),
+                worker_count
+            );
+            return Err(anyhow!(
+                "DuckDB query engine failed to start {} of {} workers: {}",
+                failures.len(),
+                worker_count,
+                failures.join("; ")
+            ));
         }
 
         // Keep a dummy connection for the _shared_connection field (for compatibility)

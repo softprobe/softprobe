@@ -960,17 +960,69 @@ fn not_found() -> ApiError {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })))
 }
 
+/// Map a storage-layer failure to a response the caller can act on.
+///
+/// This used to flatten every error into a bare 503 with `{"error": "query
+/// unavailable"}`, keeping the real cause server-side only. That made an
+/// operational fault (a dead query worker) indistinguishable from a malformed
+/// SQL bug from the client's side, and cost a long debugging session to trace
+/// back by elimination. Classify instead, and pass the detail through.
 fn storage_error(error: anyhow::Error) -> ApiError {
-    warn!("llm query failed: {}", error);
+    let detail = error.to_string();
+    warn!("llm query failed: {}", detail);
+
+    // Worker/connection faults are transient and worth retrying; a SQL or
+    // binder error is a defect and will fail identically on retry.
+    let transient = detail.contains("worker channel closed")
+        || detail.contains("worker dropped response")
+        || detail.contains("failed to start")
+        || detail.contains("Connection Error")
+        || detail.contains("IO Error");
+
+    let status = if transient {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
     (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": "query unavailable" })),
+        status,
+        Json(json!({
+            "error": if transient { "query unavailable" } else { "query failed" },
+            "detail": detail,
+            "retryable": transient,
+        })),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_error_separates_transient_faults_from_defects() {
+        // A dead query worker is operational and retryable
+        let (status, body) = storage_error(anyhow::anyhow!("DuckDB worker channel closed"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["retryable"], serde_json::json!(true));
+
+        // A SQL defect will fail identically on retry -- 503 would tell the
+        // caller to keep hammering a request that can never succeed
+        let (status, body) = storage_error(anyhow::anyhow!("Binder Error: no such column"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["retryable"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn storage_error_passes_the_cause_through() {
+        // The bare {"error":"query unavailable"} kept the real cause server-side
+        // only, making an operational fault indistinguishable from a client bug.
+        let (_, body) = storage_error(anyhow::anyhow!("open_connection: too many clients"));
+        assert!(body.0["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("too many clients"));
+    }
     use crate::api::sql_support::decode_cursor;
 
     #[test]
