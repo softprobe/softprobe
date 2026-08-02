@@ -327,6 +327,278 @@ pub async fn get_session(
     }))
 }
 
+/// How a session list should be ordered.
+///
+/// Ordering happens in DuckDB over the whole time window. Doing it client-side
+/// only ever sorts whatever page happened to be loaded, which is the wrong
+/// answer to "show me the worst sessions today".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrderBy {
+    StartTime,
+    ErrorCount,
+    Duration,
+    TotalTokens,
+    TotalCost,
+}
+
+impl Default for SessionOrderBy {
+    fn default() -> Self {
+        Self::StartTime
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl Default for SortDirection {
+    fn default() -> Self {
+        Self::Desc
+    }
+}
+
+impl SortDirection {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionSearchRequest {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// Keep only sessions containing at least one ERROR span.
+    #[serde(default)]
+    pub has_errors: Option<bool>,
+    pub user_id: Option<String>,
+    pub model_name: Option<String>,
+    #[serde(default)]
+    pub order_by: SessionOrderBy,
+    #[serde(default)]
+    pub order: SortDirection,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub trace_count: i64,
+    pub observation_count: i64,
+    pub error_count: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub total_cost: Option<f64>,
+    pub agent_name: Option<String>,
+    pub user_ids: Vec<String>,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchResponse {
+    pub items: Vec<SessionSummary>,
+    pub next_cursor: Option<String>,
+    /// Cursor paging is only defined for `start_time` ordering; any other
+    /// ordering returns a single ranked page. Stated explicitly so a client
+    /// cannot mistake "no cursor" for "no more data".
+    pub cursor_supported: bool,
+}
+
+/// Session list, aggregated in the database.
+///
+/// Without this endpoint a client has to pull raw observations and group them
+/// in memory, which makes every aggregate a per-page partial sum, breaks
+/// paging (one session gets split across pages), and reduces "sessions with
+/// errors" to "sessions with errors among the rows already fetched".
+pub async fn search_sessions(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Json(request): Json<SessionSearchRequest>,
+) -> Result<Json<SessionSearchResponse>, ApiError> {
+    let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
+    let cursor_supported = request.order_by == SessionOrderBy::StartTime;
+    let sql = compile_session_search_sql(&request, limit).map_err(bad_request)?;
+    let result = state
+        .execute_tenant_scoped_sql(tenant.as_ref().map(|extension| &extension.0), &sql)
+        .await
+        .map_err(storage_error)?;
+
+    let mut items = result
+        .rows
+        .iter()
+        .filter_map(|row| map_session_summary(&result.columns, row))
+        .collect::<Vec<_>>();
+
+    let next_cursor = if cursor_supported {
+        next_cursor_from_sessions(&mut items, limit)
+    } else {
+        items.truncate(limit);
+        None
+    };
+
+    Ok(Json(SessionSearchResponse {
+        items,
+        next_cursor,
+        cursor_supported,
+    }))
+}
+
+pub fn compile_session_search_sql(
+    request: &SessionSearchRequest,
+    limit: usize,
+) -> Result<String, String> {
+    if request.from > request.to {
+        return Err("`from` must be <= `to`".to_string());
+    }
+
+    let mut predicates = vec![
+        format!("timestamp >= {}", timestamp_literal(&request.from)),
+        format!("timestamp <= {}", timestamp_literal(&request.to)),
+        // Spans without a session id cannot belong to a session row.
+        "session_id IS NOT NULL AND session_id <> ''".to_string(),
+    ];
+    if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
+        predicates.push(format!("{} = {}", expr_user_id(), sql_string_literal(user_id)));
+    }
+    if let Some(model) = request.model_name.as_deref().filter(|v| !v.trim().is_empty()) {
+        predicates.push(format!(
+            "{} = {}",
+            variant_varchar("attributes", "gen_ai.request.model"),
+            sql_string_literal(model)
+        ));
+    }
+
+    // Cursor paging is defined against (start_time, session_id), which only
+    // matches the start_time ordering. Rejecting it elsewhere beats silently
+    // returning a page that overlaps or skips rows.
+    if let Some(cursor) = request.cursor.as_deref().filter(|v| !v.is_empty()) {
+        if request.order_by != SessionOrderBy::StartTime {
+            return Err("`cursor` is only supported with order_by=start_time".to_string());
+        }
+        predicates.push(cursor_predicate(cursor, "start_time", "session_id")?);
+    }
+
+    let mut having = Vec::new();
+    if request.has_errors == Some(true) {
+        having.push("error_count > 0".to_string());
+    } else if request.has_errors == Some(false) {
+        having.push("error_count = 0".to_string());
+    }
+
+    let direction = request.order.as_sql();
+    let order_sql = match request.order_by {
+        SessionOrderBy::StartTime => format!("start_time {direction}, session_id {direction}"),
+        SessionOrderBy::ErrorCount => {
+            format!("error_count {direction}, start_time DESC, session_id DESC")
+        }
+        SessionOrderBy::Duration => format!("duration_ms {direction}, start_time DESC, session_id DESC"),
+        SessionOrderBy::TotalTokens => {
+            format!("total_tokens {direction} NULLS LAST, start_time DESC, session_id DESC")
+        }
+        SessionOrderBy::TotalCost => {
+            format!("total_cost {direction} NULLS LAST, start_time DESC, session_id DESC")
+        }
+    };
+
+    let observation_type = format!(
+        "COALESCE({}, 'span')",
+        variant_varchar("attributes", "sp.observation.type")
+    );
+
+    Ok(format!(
+        "SELECT * FROM ( \
+           SELECT \
+             session_id, \
+             MIN(timestamp) AS start_time, \
+             MAX(COALESCE(end_timestamp, timestamp)) AS end_time, \
+             date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS duration_ms, \
+             COUNT(DISTINCT trace_id)::BIGINT AS trace_count, \
+             COUNT(*)::BIGINT AS observation_count, \
+             SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
+             SUM({input_tokens})::BIGINT AS input_tokens, \
+             SUM({output_tokens})::BIGINT AS output_tokens, \
+             SUM({total_tokens})::BIGINT AS total_tokens, \
+             SUM({total_cost}) AS total_cost, \
+             arg_min(message_type, timestamp) FILTER (WHERE {obs_type} = 'agent') AS agent_name, \
+             list(DISTINCT {user_id}) AS user_ids, \
+             list(DISTINCT {model_name}) AS models \
+           FROM union_spans \
+           WHERE {where_sql} \
+           GROUP BY session_id \
+           {having_sql} \
+         ) \
+         ORDER BY {order_sql} \
+         LIMIT {fetch}",
+        input_tokens = expr_input_tokens(),
+        output_tokens = expr_output_tokens(),
+        total_tokens = expr_total_tokens(),
+        total_cost = expr_total_cost(),
+        obs_type = observation_type,
+        user_id = expr_user_id(),
+        model_name = variant_varchar("attributes", "gen_ai.request.model"),
+        where_sql = predicates.join(" AND "),
+        having_sql = if having.is_empty() {
+            String::new()
+        } else {
+            format!("HAVING {}", having.join(" AND "))
+        },
+        order_sql = order_sql,
+        // one extra row tells us whether another page exists
+        fetch = limit + 1,
+    ))
+}
+
+fn string_list(columns: &[String], row: &[Value], key: &str) -> Vec<String> {
+    match column_value(columns, row, key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn map_session_summary(columns: &[String], row: &[Value]) -> Option<SessionSummary> {
+    Some(SessionSummary {
+        session_id: required_string(columns, row, "session_id")?,
+        start_time: optional_timestamp(columns, row, "start_time")?,
+        end_time: optional_timestamp(columns, row, "end_time"),
+        trace_count: optional_i64(columns, row, "trace_count").unwrap_or(0),
+        observation_count: optional_i64(columns, row, "observation_count").unwrap_or(0),
+        error_count: optional_i64(columns, row, "error_count").unwrap_or(0),
+        input_tokens: optional_i64(columns, row, "input_tokens"),
+        output_tokens: optional_i64(columns, row, "output_tokens"),
+        total_tokens: optional_i64(columns, row, "total_tokens"),
+        total_cost: optional_f64(columns, row, "total_cost"),
+        agent_name: optional_string(columns, row, "agent_name"),
+        user_ids: string_list(columns, row, "user_ids"),
+        models: string_list(columns, row, "models"),
+    })
+}
+
+fn next_cursor_from_sessions(items: &mut Vec<SessionSummary>, limit: usize) -> Option<String> {
+    if items.len() <= limit {
+        return None;
+    }
+    items.truncate(limit);
+    items
+        .last()
+        .map(|item| encode_cursor(item.start_time, &item.session_id))
+}
+
 pub fn compile_observation_search_sql(
     request: &ObservationSearchRequest,
 ) -> Result<String, String> {
@@ -972,6 +1244,136 @@ fn storage_error(error: anyhow::Error) -> ApiError {
 mod tests {
     use super::*;
     use crate::api::sql_support::decode_cursor;
+
+    fn session_search_request() -> SessionSearchRequest {
+        SessionSearchRequest {
+            from: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-07-25T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            has_errors: None,
+            user_id: None,
+            model_name: None,
+            order_by: SessionOrderBy::StartTime,
+            order: SortDirection::Desc,
+            limit: Some(50),
+            cursor: None,
+        }
+    }
+
+    #[test]
+    fn session_search_aggregates_in_sql_and_bounds_time() {
+        let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
+        assert!(sql.contains("GROUP BY session_id"));
+        assert!(sql.contains("timestamp >="));
+        assert!(sql.contains("timestamp <="));
+        // spans with no session id must not become a session row
+        assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
+        // one extra row is what tells us another page exists
+        assert!(sql.contains("LIMIT 51"));
+    }
+
+    #[test]
+    fn session_search_filters_errors_in_having_not_in_memory() {
+        let mut request = session_search_request();
+        request.has_errors = Some(true);
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(sql.contains("HAVING error_count > 0"));
+
+        request.has_errors = Some(false);
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(sql.contains("HAVING error_count = 0"));
+
+        request.has_errors = None;
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(!sql.contains("HAVING"));
+    }
+
+    #[test]
+    fn session_search_orders_over_the_whole_window() {
+        let mut request = session_search_request();
+        request.order_by = SessionOrderBy::ErrorCount;
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(sql.contains("ORDER BY error_count DESC"));
+
+        request.order_by = SessionOrderBy::Duration;
+        request.order = SortDirection::Asc;
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(sql.contains("ORDER BY duration_ms ASC"));
+
+        // NULL cost must not outrank a real one
+        request.order_by = SessionOrderBy::TotalCost;
+        request.order = SortDirection::Desc;
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(sql.contains("total_cost DESC NULLS LAST"));
+    }
+
+    #[test]
+    fn session_search_rejects_cursor_with_incompatible_ordering() {
+        // The cursor encodes (start_time, session_id); reusing it under another
+        // ordering would silently skip or repeat rows.
+        let mut request = session_search_request();
+        request.order_by = SessionOrderBy::ErrorCount;
+        request.cursor = Some(encode_cursor(request.from, "sess-1"));
+        let err = compile_session_search_sql(&request, 50).expect_err("must reject");
+        assert!(err.contains("order_by=start_time"));
+
+        request.order_by = SessionOrderBy::StartTime;
+        assert!(compile_session_search_sql(&request, 50).is_ok());
+    }
+
+    #[test]
+    fn session_search_escapes_filter_literals() {
+        let mut request = session_search_request();
+        request.user_id = Some("u'; DROP TABLE traces; --".to_string());
+        request.model_name = Some("gpt-5.2'".to_string());
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        // The whole payload must land inside one literal with its quote doubled,
+        // so the `;` never terminates a statement.
+        assert!(sql.contains("'u''; DROP TABLE traces; --'"));
+        assert!(sql.contains("'gpt-5.2'''"));
+        // and the injected quote must never appear unescaped
+        assert!(!sql.contains("'u'; "));
+    }
+
+    #[test]
+    fn session_search_rejects_inverted_range() {
+        let mut request = session_search_request();
+        std::mem::swap(&mut request.from, &mut request.to);
+        assert!(compile_session_search_sql(&request, 50).is_err());
+    }
+
+    #[test]
+    fn session_cursor_only_emitted_when_a_page_was_actually_cut() {
+        let make = |id: &str| SessionSummary {
+            session_id: id.to_string(),
+            start_time: DateTime::parse_from_rfc3339("2026-07-20T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            end_time: None,
+            trace_count: 1,
+            observation_count: 1,
+            error_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            total_cost: None,
+            agent_name: None,
+            user_ids: vec![],
+            models: vec![],
+        };
+
+        let mut exact = vec![make("a"), make("b")];
+        assert!(next_cursor_from_sessions(&mut exact, 2).is_none());
+        assert_eq!(exact.len(), 2);
+
+        let mut overflowing = vec![make("a"), make("b"), make("c")];
+        let cursor = next_cursor_from_sessions(&mut overflowing, 2).expect("cursor");
+        assert_eq!(overflowing.len(), 2);
+        assert_eq!(decode_cursor(&cursor).expect("decode").id, "b");
+    }
 
     #[test]
     fn search_sql_requires_time_bounds_and_escapes_literals() {
