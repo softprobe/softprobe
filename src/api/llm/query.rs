@@ -478,15 +478,29 @@ pub fn compile_session_search_sql(
         ));
     }
 
-    // Cursor paging is defined against (start_time, session_id), which only
-    // matches the start_time ordering. Rejecting it elsewhere beats silently
-    // returning a page that overlaps or skips rows.
-    if let Some(cursor) = request.cursor.as_deref().filter(|v| !v.is_empty()) {
-        if request.order_by != SessionOrderBy::StartTime {
-            return Err("`cursor` is only supported with order_by=start_time".to_string());
+    // Cursor paging is defined against (start_time, session_id) descending.
+    //
+    // The predicate must sit on the OUTER query: start_time is an aggregate
+    // alias (MIN(timestamp)), so pushing it into the inner WHERE both fails to
+    // bind ("WHERE clause cannot contain aggregates") and would be wrong even
+    // if it bound -- trimming raw spans by timestamp makes every SUM/COUNT for
+    // that session cover only the post-cursor slice, so the aggregates would
+    // shift as the caller pages.
+    //
+    // `order=asc` is rejected too: cursor_predicate emits `<`, which under an
+    // ascending sort walks backwards and loops.
+    let cursor_sql = match request.cursor.as_deref().filter(|v| !v.is_empty()) {
+        Some(cursor) => {
+            if request.order_by != SessionOrderBy::StartTime {
+                return Err("`cursor` is only supported with order_by=start_time".to_string());
+            }
+            if request.order != SortDirection::Desc {
+                return Err("`cursor` is only supported with order=desc".to_string());
+            }
+            format!(" WHERE {}", cursor_predicate(cursor, "start_time", "session_id")?)
         }
-        predicates.push(cursor_predicate(cursor, "start_time", "session_id")?);
-    }
+        None => String::new(),
+    };
 
     let mut having = Vec::new();
     if request.has_errors == Some(true) {
@@ -536,9 +550,10 @@ pub fn compile_session_search_sql(
            WHERE {where_sql} \
            GROUP BY session_id \
            {having_sql} \
-         ) \
+         ){cursor_sql} \
          ORDER BY {order_sql} \
          LIMIT {fetch}",
+        cursor_sql = cursor_sql,
         input_tokens = expr_input_tokens(),
         output_tokens = expr_output_tokens(),
         total_tokens = expr_total_tokens(),
@@ -1239,19 +1254,40 @@ fn not_found() -> ApiError {
 /// operational fault (a dead query worker) indistinguishable from a malformed
 /// SQL bug from the client's side, and cost a long debugging session to trace
 /// back by elimination. Classify instead, and pass the detail through.
+/// Classify a storage-layer failure without handing internals to the caller.
+///
+/// Two separate concerns, both learned the hard way:
+///
+/// 1. **Never echo the raw error.** DuckDB surfaces the full ATTACH target on
+///    connection failure, and for a Postgres catalog that string is the DSN --
+///    including the plaintext password. GCS HMAC secrets reach it the same way
+///    via `CREATE SECRET` statement echo, and binder errors leak catalog names,
+///    tenant metadata schemas and column lists. A tenant bearer token is enough
+///    to trigger all of it. The caller gets a category; operators get the detail
+///    from the log line, correlated by `error_id`.
+///
+/// 2. **Classify on the error, not on a substring of it.** DuckDB echoes the
+///    offending statement, and that statement embeds caller-supplied literals
+///    (`user_id`, `model_name`), so a client could previously flip a permanent
+///    500 into a retryable 503 just by searching for a model named
+///    "IO Error". Matching now happens only against the prefix DuckDB puts at
+///    the very start of its message.
 fn storage_error(error: anyhow::Error) -> ApiError {
-    let detail = error.to_string();
-    warn!("llm query failed: {}", detail);
+    let raw = error.to_string();
 
-    // Worker/connection faults are transient and worth retrying; a SQL or
-    // binder error is a defect and will fail identically on retry.
-    let transient = detail.contains("worker channel closed")
-        || detail.contains("worker dropped response")
-        || detail.contains("failed to start")
-        || detail.contains("Connection Error")
-        || detail.contains("IO Error");
+    // Correlates the client-visible response with the full server-side detail.
+    // Deterministic hash, not a UUID: no new dependency, and identical failures
+    // collapse to the same id in the logs.
+    let error_id = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        raw.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
+    warn!("llm query failed [{}]: {}", error_id, raw);
 
-    let status = if transient {
+    let kind = classify_storage_error(&raw);
+    let status = if kind.retryable {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1260,16 +1296,119 @@ fn storage_error(error: anyhow::Error) -> ApiError {
     (
         status,
         Json(json!({
-            "error": if transient { "query unavailable" } else { "query failed" },
-            "detail": detail,
-            "retryable": transient,
+            "error": kind.code,
+            "retryable": kind.retryable,
+            "error_id": error_id,
         })),
     )
 }
 
+struct StorageErrorKind {
+    code: &'static str,
+    retryable: bool,
+}
+
+/// Match only on the leading marker DuckDB emits, so echoed SQL (which contains
+/// caller-controlled literals) cannot influence the classification.
+fn classify_storage_error(raw: &str) -> StorageErrorKind {
+    let head = raw.trim_start();
+
+    // Our own worker-pool failures: operational, worth retrying.
+    if head.starts_with("DuckDB worker")
+        || head.starts_with("DuckDB query engine failed to start")
+    {
+        return StorageErrorKind { code: "query_unavailable", retryable: true };
+    }
+
+    // Object-store and network faults, including S3/MinIO throttling and 5xx.
+    // "HTTP Error" was missing before, so every 429 and 502 from the object
+    // store was reported as a permanent 500 -- exactly the case worth retrying.
+    for marker in ["Connection Error", "IO Error", "HTTP Error", "Network Error"] {
+        if head.starts_with(marker) {
+            return StorageErrorKind { code: "query_unavailable", retryable: true };
+        }
+    }
+
+    // Binder/Catalog/Parser/Conversion errors are defects: identical on retry.
+    StorageErrorKind { code: "query_failed", retryable: false }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_error_never_echoes_the_underlying_message() {
+        // DuckDB puts the full ATTACH target in connection errors, and for a
+        // Postgres catalog that string carries the plaintext password.
+        let leaky = anyhow::anyhow!(
+            "IO Error: Failed to attach DuckLake at path \"postgres:host=h dbname=d \
+             user=u password=hunter2\": connection refused"
+        );
+        let (_, body) = storage_error(leaky);
+        let rendered = body.0.to_string();
+        assert!(!rendered.contains("hunter2"), "password leaked: {rendered}");
+        assert!(!rendered.contains("postgres:"), "DSN leaked: {rendered}");
+        assert!(rendered.contains("error_id"), "no correlation id: {rendered}");
+    }
+
+    #[test]
+    fn storage_error_ignores_client_controlled_text_in_echoed_sql() {
+        // DuckDB echoes the offending statement, and that statement embeds
+        // caller-supplied literals -- a model named "IO Error" must not be able
+        // to turn a permanent failure into a retryable one.
+        let (status, body) = storage_error(anyhow::anyhow!(
+            "Binder Error: no such column\nLINE 1: ... model_name = 'IO Error injected'"
+        ));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["retryable"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn storage_error_treats_object_store_faults_as_retryable() {
+        // S3/MinIO throttling and 5xx arrive with an "HTTP Error" prefix; these
+        // were previously reported as permanent 500s.
+        let (status, body) = storage_error(anyhow::anyhow!(
+            "HTTP Error: HTTP GET error reading 's3://w/x.parquet' (HTTP 503)"
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["retryable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn session_search_rejects_cursor_with_ascending_order() {
+        // cursor_predicate emits `<`; under ASC that pages backwards forever.
+        let mut request = session_search_request();
+        request.cursor = Some(encode_cursor(
+            DateTime::parse_from_rfc3339("2026-07-20T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            "s1",
+        ));
+        request.order = SortDirection::Asc;
+        assert!(compile_session_search_sql(&request, 50).is_err());
+    }
+
+    #[test]
+    fn session_search_puts_cursor_predicate_outside_the_aggregate() {
+        // start_time is MIN(timestamp): in the inner WHERE it neither binds
+        // ("WHERE clause cannot contain aggregates") nor would be correct.
+        let mut request = session_search_request();
+        request.cursor = Some(encode_cursor(
+            DateTime::parse_from_rfc3339("2026-07-20T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            "s1",
+        ));
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        let group_by = sql.find("GROUP BY session_id").expect("group by");
+        let cursor_at = sql.rfind("start_time <").expect("cursor predicate");
+        assert!(
+            cursor_at > group_by,
+            "cursor predicate must sit after the aggregation, got: {sql}"
+        );
+    }
 
     #[test]
     fn storage_error_separates_transient_faults_from_defects() {
@@ -1286,14 +1425,15 @@ mod tests {
     }
 
     #[test]
-    fn storage_error_passes_the_cause_through() {
-        // The bare {"error":"query unavailable"} kept the real cause server-side
-        // only, making an operational fault indistinguishable from a client bug.
+    fn storage_error_correlates_without_disclosing() {
+        // Replaces an earlier test that asserted the cause was passed through
+        // to the caller -- that behaviour is exactly what leaked the Postgres
+        // password. Operators correlate via error_id in the log line instead.
         let (_, body) = storage_error(anyhow::anyhow!("open_connection: too many clients"));
-        assert!(body.0["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("too many clients"));
+        let rendered = body.0.to_string();
+        assert!(!rendered.contains("too many clients"), "cause disclosed: {rendered}");
+        let id = body.0["error_id"].as_str().expect("error_id");
+        assert_eq!(id.len(), 16, "error_id should be a stable 16-hex digest");
     }
     use crate::api::sql_support::decode_cursor;
 
