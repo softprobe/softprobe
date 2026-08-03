@@ -22,26 +22,36 @@ ENV DUCKDB_DOWNLOAD_LIB=1
 # `cargo build` (after COPY) switches to rust-toolchain.toml → second full compile.
 COPY --from=planner /app/rust-toolchain.toml rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
-COPY --from=planner /app/Cargo.lock Cargo.lock
-# --locked on both: without it the resolver picks versions at build time, so the
-# engine inside the image is decided by *when* you build, not by the lockfile.
-# That silently defeats digest-pinned deploys (same tag, different engine) and
-# would have let a rebuild drift off the DuckDB floor that Cargo.toml sets --
-# 1.5.2 is the version that took production down on 2026-08-03.
+# --locked on both: Cargo.lock is committed and cargo honours it, so this is not
+# about drift on a normal build. What it buys is turning "someone raised the
+# DuckDB floor in Cargo.toml but did not regenerate the lock" from a silent
+# lock rewrite into a loud build failure. That floor exists because DuckDB
+# 1.5.2 crashes on empty-array VARIANT values and invalidates the whole
+# database -- it took production down on 2026-08-03.
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked --bin softprobe-runtime
-# Assert the shipped engine matches the lockfile. `find -print -quit` takes
-# whatever .so appears first with nothing tying it to the resolved crate, so a
-# stale download cache could ship a crashing engine under a "fixed" tag.
-# The duckdb crate encodes the engine version as 1.1<mm><pp>.<n>, e.g.
-# 1.10505.0 -> DuckDB v1.5.5.
-COPY --from=planner /app/scripts/assert-duckdb-version.sh /usr/local/bin/assert-duckdb-version
+# Take the library from the versioned download directory, and only from there.
+#
+# libduckdb-sys writes the library to BOTH target/<profile>/deps/ (no version in
+# the path) and target/duckdb-download/<triple>/<version>/. A `find` across the
+# whole tree returns whichever readdir yields first -- in practice the
+# versionless copy, since cargo creates target/release/ before the build script
+# creates duckdb-download/. Selecting from the versioned directory makes the
+# engine version structurally present in the path, so the assertion below can
+# actually compare something instead of silently skipping.
+#
+# Assert BEFORE the copy, on the source path: the destination has no version
+# segment, so asserting on it can only ever take the "cannot verify" branch.
+#
+# Both the script and Cargo.lock arrive with `COPY . .` above, so no separate
+# COPY is needed -- and the lock read here is the real one, not the version
+# cargo-chef mangles into the cook workdir.
 RUN mkdir -p /opt/duckdb-lib \
-    && DUCKDB_SO_PATH="$(find /app /root/.cargo -type f \( -name 'libduckdb.so' -o -name 'libduckdb.so.*' \) -print -quit)" \
+    && DUCKDB_SO_PATH="$(find /app/target/duckdb-download -type f -name 'libduckdb.so*' -print -quit)" \
     && test -n "$DUCKDB_SO_PATH" \
-    && cp "$DUCKDB_SO_PATH" /opt/duckdb-lib/libduckdb.so \
-    && sh /usr/local/bin/assert-duckdb-version Cargo.lock /opt/duckdb-lib/libduckdb.so
+    && sh scripts/assert-duckdb-version.sh Cargo.lock "$DUCKDB_SO_PATH" \
+    && cp "$DUCKDB_SO_PATH" /opt/duckdb-lib/libduckdb.so
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y \

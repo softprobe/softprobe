@@ -26,13 +26,16 @@ crate_version="$(
 )"
 [ -n "$crate_version" ] || { echo "FATAL: no duckdb crate entry in $LOCKFILE" >&2; exit 1; }
 
-minor="$(echo "$crate_version" | sed -n 's/^1\.1\([0-9][0-9]\)[0-9][0-9]\..*$/\1/p' | sed 's/^0//')"
-patch="$(echo "$crate_version" | sed -n 's/^1\.1[0-9][0-9]\([0-9][0-9]\)\..*$/\1/p' | sed 's/^0//')"
-[ -n "$minor" ] && [ -n "$patch" ] || {
+# 1.<major><mm><pp>.<n>; major is not hardcoded so a DuckDB 2.x crate
+# (1.20500.0 -> 2.5.0) derives correctly instead of failing the build.
+major="$(echo "$crate_version" | sed -n 's/^1\.\([0-9]\)[0-9][0-9][0-9][0-9]\..*$/\1/p')"
+minor="$(echo "$crate_version" | sed -n 's/^1\.[0-9]\([0-9][0-9]\)[0-9][0-9]\..*$/\1/p' | sed 's/^0//')"
+patch="$(echo "$crate_version" | sed -n 's/^1\.[0-9][0-9][0-9]\([0-9][0-9]\)\..*$/\1/p' | sed 's/^0//')"
+[ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || {
     echo "FATAL: cannot derive engine version from duckdb crate '$crate_version'" >&2
     exit 1
 }
-want="1.${minor}.${patch}"
+want="${major}.${minor}.${patch}"
 
 # .../duckdb-download/<triple>/<version>/libduckdb.so
 got="$(echo "$SOPATH" | sed -n 's#.*/duckdb-download/[^/][^/]*/\([0-9][0-9.]*\)/.*#\1#p')"
