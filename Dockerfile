@@ -22,13 +22,26 @@ ENV DUCKDB_DOWNLOAD_LIB=1
 # `cargo build` (after COPY) switches to rust-toolchain.toml → second full compile.
 COPY --from=planner /app/rust-toolchain.toml rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+COPY --from=planner /app/Cargo.lock Cargo.lock
+# --locked on both: without it the resolver picks versions at build time, so the
+# engine inside the image is decided by *when* you build, not by the lockfile.
+# That silently defeats digest-pinned deploys (same tag, different engine) and
+# would have let a rebuild drift off the DuckDB floor that Cargo.toml sets --
+# 1.5.2 is the version that took production down on 2026-08-03.
+RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
-RUN cargo build --release --bin softprobe-runtime
+RUN cargo build --release --locked --bin softprobe-runtime
+# Assert the shipped engine matches the lockfile. `find -print -quit` takes
+# whatever .so appears first with nothing tying it to the resolved crate, so a
+# stale download cache could ship a crashing engine under a "fixed" tag.
+# The duckdb crate encodes the engine version as 1.1<mm><pp>.<n>, e.g.
+# 1.10505.0 -> DuckDB v1.5.5.
+COPY --from=planner /app/scripts/assert-duckdb-version.sh /usr/local/bin/assert-duckdb-version
 RUN mkdir -p /opt/duckdb-lib \
     && DUCKDB_SO_PATH="$(find /app /root/.cargo -type f \( -name 'libduckdb.so' -o -name 'libduckdb.so.*' \) -print -quit)" \
     && test -n "$DUCKDB_SO_PATH" \
-    && cp "$DUCKDB_SO_PATH" /opt/duckdb-lib/libduckdb.so
+    && cp "$DUCKDB_SO_PATH" /opt/duckdb-lib/libduckdb.so \
+    && sh /usr/local/bin/assert-duckdb-version Cargo.lock /opt/duckdb-lib/libduckdb.so
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y \
