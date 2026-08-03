@@ -114,6 +114,117 @@ pub fn view_counters_snapshot() -> ViewCounterSnapshot {
     }
 }
 
+/// Self-heal bookkeeping for poisoned worker connections. Process-global on
+/// purpose (same idiom as VIEW_COUNTERS): /health must answer "is self-heal
+/// failing" across every tenant engine without holding a reference to each.
+///
+/// Because it is global, `consecutive_failures` is cleared by ANY successful
+/// query, not just by a successful rebuild. Otherwise a single tenant whose
+/// DuckLake scope is permanently unattachable (schema dropped, bucket deleted,
+/// per-scope credentials rotated) would drive the counter past the /health
+/// threshold and crashloop a pod that is serving every other tenant fine --
+/// and a restart cannot fix a broken tenant scope, so it would never stop.
+/// Reaching the threshold now requires that nothing anywhere is succeeding,
+/// which is the process-level state a restart can actually resolve.
+#[derive(Default)]
+struct SelfHealCounters {
+    rebuilds: AtomicU64,
+    consecutive_failures: AtomicU64,
+}
+
+static SELF_HEAL: Lazy<SelfHealCounters> = Lazy::new(SelfHealCounters::default);
+
+#[derive(Debug, Clone)]
+pub struct SelfHealSnapshot {
+    pub rebuilds: u64,
+    pub consecutive_failures: u64,
+}
+
+pub fn self_heal_snapshot() -> SelfHealSnapshot {
+    SelfHealSnapshot {
+        rebuilds: SELF_HEAL.rebuilds.load(Ordering::Relaxed),
+        consecutive_failures: SELF_HEAL.consecutive_failures.load(Ordering::Relaxed),
+    }
+}
+
+/// Test-only: the counters are global, so the /health unhealthy branch is
+/// otherwise unreachable from tests (mirrors [`reset_view_counters`]).
+pub fn set_self_heal_failures_for_test(value: u64) {
+    SELF_HEAL
+        .consecutive_failures
+        .store(value, Ordering::Relaxed);
+}
+
+/// How a query error relates to DuckDB's "database has been invalidated" state.
+///
+/// After an internal assertion failure (e.g. the ducklake extension's inlined
+/// data reader crashing with "Attempted to access index 0 within vector of
+/// size 0"), DuckDB invalidates the whole database object. Each worker owns an
+/// independent in-memory database, so one bad query kills that worker's
+/// connection permanently -- and round-robin dispatch keeps feeding requests
+/// to the corpse. Under concurrent load every worker gets poisoned within
+/// seconds and each query returns 503 until a human restarts the process.
+/// That is the 2026-08-03 production outage; this classification is what lets
+/// workers rebuild instead of staying dead.
+///
+/// Classification is anchored to the leading marker of the FIRST line, for the
+/// same reason [`crate::api::llm::query::classify_storage_error`] is: DuckDB
+/// echoes the offending statement (`LINE 1: ...`) into the message, and that
+/// statement embeds caller-supplied literals. A `contains` check here would let
+/// a filter value like `model_name = "database has been invalidated"` force two
+/// full connection rebuilds -- each one a fresh in-memory database plus a
+/// DuckLake ATTACH round-trip to Postgres, synchronously on the worker thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Poison {
+    /// Not a poison-related failure.
+    None,
+    /// This query tripped the fatal error itself. Deterministic -- retrying
+    /// would just poison the fresh connection too, so only rebuild.
+    Triggered,
+    /// This query landed on a connection an earlier query had poisoned.
+    /// Innocent -- retry it once on the rebuilt connection.
+    Collateral,
+}
+
+fn poison_kind(message: &str) -> Poison {
+    // Only the first line: everything after it may contain echoed SQL.
+    let head = message.trim_start().lines().next().unwrap_or("");
+    // Order matters. The collateral message quotes the original internal error
+    // in a trailing `Original error: "..."`, but that lives on a later line, so
+    // first-line anchoring already separates the two. Checked first anyway to
+    // keep the intent explicit.
+    if head.starts_with("FATAL Error") {
+        return Poison::Collateral;
+    }
+    if head.starts_with("INTERNAL Error") {
+        return Poison::Triggered;
+    }
+    Poison::None
+}
+
+fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionState> {
+    match core
+        .open_connection()
+        .and_then(|conn| core.init_connection_state_with(conn))
+    {
+        Ok(state) => {
+            SELF_HEAL.rebuilds.fetch_add(1, Ordering::Relaxed);
+            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+            info!("DuckDB query worker {index} rebuilt its connection after a fatal engine error");
+            Some(state)
+        }
+        Err(err) => {
+            // Counted so /health can turn "self-heal keeps failing" into an
+            // unhealthy signal; nothing recovers from this state on its own.
+            SELF_HEAL
+                .consecutive_failures
+                .fetch_add(1, Ordering::Relaxed);
+            warn!("DuckDB query worker {index} failed to rebuild its poisoned connection: {err}");
+            None
+        }
+    }
+}
+
 struct WorkerHandle {
     sender: Option<mpsc::Sender<QueryRequest>>,
     join: Option<std::thread::JoinHandle<()>>,
@@ -194,7 +305,40 @@ impl DuckDBQueryEngine {
                     }
                     drop(ready_tx);
                     while let Some(request) = rx.blocking_recv() {
-                        let result = core.execute_query_on_state(&mut state, &request.sql);
+                        let mut result = core.execute_query_on_state(&mut state, &request.sql);
+                        if let Err(err) = &result {
+                            let kind = poison_kind(&err.to_string());
+                            if kind != Poison::None {
+                                // This worker's in-memory database is dead; every
+                                // future statement would fail with the same FATAL
+                                // error. Rebuild before touching the next request.
+                                if let Some(fresh) = rebuild_worker_state(&core, index) {
+                                    state = fresh;
+                                    if kind == Poison::Collateral {
+                                        result =
+                                            core.execute_query_on_state(&mut state, &request.sql);
+                                        if let Err(retry_err) = &result {
+                                            if poison_kind(&retry_err.to_string()) != Poison::None {
+                                                // The retry poisoned the fresh connection
+                                                // too; rebuild again so the next request
+                                                // does not inherit a dead one.
+                                                if let Some(fresh) =
+                                                    rebuild_worker_state(&core, index)
+                                                {
+                                                    state = fresh;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if result.is_ok() {
+                            // Any success anywhere clears the global streak --
+                            // see SelfHealCounters for why this must not be
+                            // limited to successful rebuilds.
+                            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+                        }
                         let _ = request.respond_to.send(result);
                     }
                 })
@@ -830,5 +974,71 @@ mod tests {
     fn duck_value_keeps_plain_text() {
         let value = duck_value_to_json(DuckValue::Text("plain".to_string()));
         assert_eq!(value, Value::String("plain".to_string()));
+    }
+
+    #[test]
+    fn poison_kind_matches_production_outage_messages() {
+        // Verbatim from the 2026-08-03 incident logs.
+        assert_eq!(
+            poison_kind(
+                "FATAL Error: Failed: database has been invalidated because of a previous \
+                 fatal error. The database must be restarted prior to being used again.\n\
+                 Original error: \"Attempted to access index 0 within vector of size 0\""
+            ),
+            Poison::Collateral
+        );
+        assert_eq!(
+            poison_kind("INTERNAL Error: Attempted to access index 0 within vector of size 0"),
+            Poison::Triggered
+        );
+    }
+
+    #[test]
+    fn poison_kind_ignores_ordinary_failures() {
+        assert_eq!(
+            poison_kind("Catalog Error: Table with name logs does not exist!"),
+            Poison::None
+        );
+        assert_eq!(
+            poison_kind("Connection Error: could not reach object store"),
+            Poison::None
+        );
+        assert_eq!(
+            poison_kind("Binder Error: column x not found"),
+            Poison::None
+        );
+    }
+
+    #[test]
+    fn poison_kind_ignores_markers_in_echoed_sql() {
+        // DuckDB echoes the offending statement, and that statement embeds
+        // caller-supplied filter values. A `contains` check here let a filter
+        // like model_name = "database has been invalidated" force two full
+        // connection rebuilds (fresh database + DuckLake ATTACH) per request.
+        assert_eq!(
+            poison_kind(
+                "Catalog Error: Table with name traces does not exist!\n\
+                 LINE 1: ... WHERE model_name = 'database has been invalidated'"
+            ),
+            Poison::None
+        );
+        assert_eq!(
+            poison_kind(
+                "Binder Error: no such column\n\
+                 LINE 1: ... WHERE user_id = 'INTERNAL Error'"
+            ),
+            Poison::None
+        );
+        // The collateral message quotes the internal error on a later line;
+        // first-line anchoring must still classify it as collateral, not as
+        // the triggering query.
+        assert_eq!(
+            poison_kind(
+                "FATAL Error: Failed: database has been invalidated because of a previous \
+                 fatal error.\nOriginal error: \"Attempted to access index 0 within vector \
+                 of size 0\""
+            ),
+            Poison::Collateral
+        );
     }
 }

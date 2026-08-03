@@ -931,3 +931,316 @@ async fn llm_sessions_search_pages_without_dropping_rows() {
         "pagination dropped sessions: saw {seen:?}"
     );
 }
+
+/// Guards the DuckDB floor set in Cargo.toml.
+///
+/// DuckDB 1.5.2 crashes with "INTERNAL Error: Attempted to access index 0
+/// within vector of size 0" when the ducklake reader hits an empty-array
+/// VARIANT value, and then invalidates the whole database so every later
+/// query on that connection fails until the process restarts. Production ran
+/// 1.5.2 with 84% of the `events` column equal to `[]`; on 2026-08-03 one
+/// detail request took the entire query layer down for hours.
+///
+/// Spans without events serialize to exactly that shape, so this reads one
+/// back end-to-end. It passes on 1.5.5 and fails on 1.5.2 -- which is the
+/// point: it is the executable form of the version floor.
+#[tokio::test]
+async fn spans_without_events_are_readable() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-empty-events";
+    let span_hex = hex::encode([0x91u8; 8]);
+
+    // llm_generation_request leaves `events` empty -> `[]` once stored.
+    let mut buf = Vec::new();
+    llm_generation_request(session_id, [0x90; 16], [0x91; 8])
+        .encode(&mut buf)
+        .expect("encode");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(buf))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("ingest");
+    assert_eq!(resp.status(), StatusCode::OK);
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    // The detail endpoint projects events; on 1.5.2 this is where it died.
+    let req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("observation detail");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "reading a span whose events are an empty array must not fail"
+    );
+    let obs = response_json(resp).await;
+    assert_eq!(obs["span_id"], span_hex);
+    assert!(
+        obs["events"].as_array().is_none_or(|e| e.is_empty()),
+        "expected no events, got: {}",
+        obs["events"]
+    );
+
+    // And again through search, which projects a different column set.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "session_id": session_id,
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("search");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let found = response_json(resp).await;
+    assert_eq!(
+        found["items"].as_array().expect("items").len(),
+        1,
+        "{found}"
+    );
+}
+
+/// Pins DuckLake data-inlining behavior across a maintenance pass -- the
+/// 2026-08-03 production outage shape. Collector-sized batches are meant to
+/// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),
+/// and reads of inlined rows go through the ducklake extension's inlined-data
+/// reader; in production (postgres catalog) that reader crashed with
+/// "INTERNAL Error: Attempted to access index 0 within vector of size 0" and
+/// DuckDB invalidated the whole database. Until this test existed no CI path
+/// ever read inlined data back, let alone after maintenance ran over it.
+///
+/// Two facts are pinned, discovered while writing this test:
+/// - Tables with a VARIANT column (traces/logs/metrics since the VARIANT
+///   attribute migration) are NOT inlined at all -- tiny span batches write
+///   Parquet despite the config. If a ducklake upgrade starts inlining
+///   VARIANT tables, the first assertion fails and forces a conscious look.
+/// - Tables without VARIANT (scores: MAP metadata) DO inline, so scores are
+///   the live inlined read/write path this test exercises across maintenance.
+#[tokio::test]
+async fn inlined_data_stays_readable_across_maintenance() {
+    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
+
+    fn parquet_count(dir: &std::path::Path) -> usize {
+        let mut n = 0;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    n += parquet_count(&path);
+                } else if path.extension().is_some_and(|e| e == "parquet") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut config = file_backed_test_config(&temp);
+    // Explicit, not inherited from Config::default(): the inlined path is the
+    // point, and this test must keep covering it even if the default flips
+    // to 0 (the post-outage production setting).
+    config.ducklake.data_inlining_row_limit = Some(10_000);
+    // file_backed_test_config turns maintenance OFF for quiet tests. Without
+    // these two the maintenance step below is a no-op loop that reports
+    // Skipped for every table, and the "across a maintenance pass" claim in
+    // this test's name would be theatre.
+    config.maintenance.enabled = true;
+    config.maintenance.metadata_enabled = true;
+    let config = Arc::new(config);
+    let app = AppPipeline::new(config.as_ref())
+        .await
+        .expect("app pipeline");
+    let (router, state) = softprobe_runtime::api::create_router(
+        config.clone(),
+        app.storage,
+        app.query_engine,
+        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
+        None,
+        None,
+    )
+    .await
+    .expect("router");
+
+    let session_id = "sess-inline-maintenance";
+    let trace_hex = hex::encode([0x51u8; 16]);
+    let span_hex = hex::encode([0x61u8; 8]);
+    let data_dir = temp.path().join("ducklake").join("data");
+
+    // 1. One collector-sized span batch. VARIANT attribute columns opt the
+    //    traces table out of inlining entirely, so this must land as Parquet.
+    let mut buf = Vec::new();
+    llm_generation_request(session_id, [0x51; 16], [0x61; 8])
+        .encode(&mut buf)
+        .expect("encode");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(buf))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("ingest");
+    assert_eq!(resp.status(), StatusCode::OK);
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+    assert!(
+        parquet_count(&data_dir.join("main").join("traces")) >= 1,
+        "traces (VARIANT attributes) were inlined -- ducklake behavior changed, \
+         re-evaluate inlining coverage and the inlined-reader risk for spans"
+    );
+
+    // 2. One score -> the scores table has no VARIANT column, so this row
+    //    must be inlined into the catalog, not written as Parquet.
+    let score_body = json!({
+        "score_id": "score-inline-1",
+        "timestamp": "2024-07-19T00:02:00Z",
+        "trace_id": trace_hex,
+        "span_id": span_hex,
+        "session_id": session_id,
+        "name": "correctness",
+        "data_type": "numeric",
+        "numeric_value": 0.91,
+        "source": "evaluator",
+        "metadata": { "suite": "inline" }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(score_body.to_string()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("score");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    // `parquet_count` returns 0 for a missing directory, so "scores has no
+    // Parquet" alone would also pass if the layout assumption
+    // (<data_path>/<metadata_schema>/<table>/) ever broke. Anchor on the
+    // traces directory existing to tell the two apart.
+    let scores_dir = data_dir.join("main").join("scores");
+    assert!(
+        data_dir.join("main").join("traces").is_dir(),
+        "expected <data_path>/main/<table>/ layout; found: {:?}",
+        std::fs::read_dir(&data_dir).map(|e| e.flatten().map(|x| x.path()).collect::<Vec<_>>())
+    );
+    assert_eq!(
+        parquet_count(&scores_dir),
+        0,
+        "score batch wrote Parquet -- inlining is not active, this test no \
+         longer covers the inlined read path"
+    );
+
+    // 3. Inlined read #1: observation detail joins scores through the query
+    //    engine's ducklake attachment.
+    let req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("observation");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let obs = response_json(resp).await;
+    assert_eq!(obs["scores"].as_array().expect("scores").len(), 1, "{obs}");
+    assert_eq!(obs["scores"][0]["score_id"], "score-inline-1");
+
+    // 4. A maintenance pass over the same catalog (production runs this
+    //    hourly; the outage query came 23 minutes after one).
+    //    run_once_ducklake funnels every failure into warn! + Skipped, so
+    //    `.expect()` can never fire -- assert on the summary instead, or a
+    //    pass that did nothing at all would look like success.
+    let maintenance = MaintenanceExecutor::new(config.as_ref(), None, None)
+        .await
+        .expect("maintenance executor");
+    let summary = maintenance.run_once().await.expect("maintenance run");
+    // `table` is `<metadata_schema>.<table>` (executor.rs builds `table_ident`).
+    let scores_result = summary
+        .tables
+        .iter()
+        .find(|t| t.table.ends_with(".scores"))
+        .unwrap_or_else(|| panic!("no scores entry in maintenance summary: {summary:?}"));
+    assert!(
+        !scores_result.metadata.skipped,
+        "maintenance skipped metadata for scores -- the pass did nothing, so \
+         the assertions below prove nothing: {summary:?}"
+    );
+
+    // 5. Inlined read #2, after maintenance -- the production crash site.
+    let req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("observation after maintenance");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let obs = response_json(resp).await;
+    assert_eq!(
+        obs["scores"].as_array().expect("scores").len(),
+        1,
+        "inlined score disappeared after maintenance: {obs}"
+    );
+
+    // 6. Inlined write + read after maintenance.
+    let score_body = json!({
+        "score_id": "score-inline-2",
+        "timestamp": "2024-07-19T00:03:00Z",
+        "trace_id": trace_hex,
+        "span_id": span_hex,
+        "session_id": session_id,
+        "name": "helpfulness",
+        "data_type": "numeric",
+        "numeric_value": 0.8,
+        "source": "evaluator",
+        "metadata": { "suite": "inline" }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(score_body.to_string()))
+        .unwrap();
+    let resp = router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("score after maintenance");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("final observation");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let obs = response_json(resp).await;
+    assert_eq!(
+        obs["scores"].as_array().expect("scores").len(),
+        2,
+        "post-maintenance inlined write not visible: {obs}"
+    );
+}
