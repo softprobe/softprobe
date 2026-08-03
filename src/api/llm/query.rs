@@ -1320,6 +1320,14 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
         return StorageErrorKind { code: "query_unavailable", retryable: true };
     }
 
+    // A FATAL (invalidated database) error that escapes worker self-heal
+    // means the rebuild failed mid-request; the next attempt gets a fresh
+    // connection, so it is retryable. INTERNAL errors are NOT listed here:
+    // the query that trips the assertion fails deterministically.
+    if head.starts_with("FATAL Error") {
+        return StorageErrorKind { code: "query_unavailable", retryable: true };
+    }
+
     // Object-store and network faults, including S3/MinIO throttling and 5xx.
     // "HTTP Error" was missing before, so every 429 and 502 from the object
     // store was reported as a permanent 500 -- exactly the case worth retrying.
@@ -1360,6 +1368,27 @@ mod tests {
         // to turn a permanent failure into a retryable one.
         let (status, body) = storage_error(anyhow::anyhow!(
             "Binder Error: no such column\nLINE 1: ... model_name = 'IO Error injected'"
+        ));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["retryable"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn storage_error_marks_invalidated_database_as_retryable() {
+        // A FATAL that escapes worker self-heal means the rebuild failed
+        // mid-request; the next attempt gets a fresh connection. The INTERNAL
+        // error that *triggered* the invalidation stays non-retryable: that
+        // query fails deterministically (2026-08-03 outage, ducklake inlined
+        // data reader).
+        let (status, body) = storage_error(anyhow::anyhow!(
+            "FATAL Error: Failed: database has been invalidated because of a previous \
+             fatal error. The database must be restarted prior to being used again."
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["retryable"], serde_json::json!(true));
+
+        let (status, body) = storage_error(anyhow::anyhow!(
+            "INTERNAL Error: Attempted to access index 0 within vector of size 0"
         ));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["retryable"], serde_json::json!(false));
