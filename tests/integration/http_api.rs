@@ -835,6 +835,103 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
     assert_eq!(rows[1][1], "explicit.logger");
 }
 
+/// Full keyset pagination of `/v1/llm/sessions/search`, asserting every session
+/// is seen exactly once.
+///
+/// The existing coverage for this endpoint asserts on generated SQL strings,
+/// which cannot catch the failure this pins: cursor literals were rendered at
+/// millisecond precision while `start_time` is a microsecond `MIN(timestamp)`,
+/// so the predicate came out below the true value and silently dropped every
+/// session sharing that millisecond. The last page returned zero rows with a
+/// null `next_cursor` and no error -- data loss that looks exactly like
+/// "reached the end". Sessions here deliberately sit at sub-millisecond
+/// offsets, including two in the same millisecond to exercise the session_id
+/// tiebreak.
+#[tokio::test]
+async fn llm_sessions_search_pages_without_dropping_rows() {
+    let (router, state, _t) = build_router_and_state().await;
+
+    // Microsecond offsets within a single millisecond window.
+    let offsets_us: [u64; 6] = [0, 400, 456, 1_000, 1_000, 1_500];
+    let base_ns: u64 = 1_721_349_720_000_000_000;
+    for (i, off) in offsets_us.iter().enumerate() {
+        let mut request = llm_generation_request(
+            &format!("sess-page-{i}"),
+            [0x70 + i as u8; 16],
+            [0x80 + i as u8; 8],
+        );
+        let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
+        span.start_time_unix_nano = base_ns + off * 1_000;
+        span.end_time_unix_nano = span.start_time_unix_nano + 1_000_000;
+        let mut buf = Vec::new();
+        request.encode(&mut buf).expect("encode");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(header::CONTENT_TYPE, "application/x-protobuf")
+            .body(Body::from(buf))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("ingest");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // Bounded so a cursor that fails to advance fails the test instead of
+    // looping forever.
+    for page in 0..10 {
+        let mut body = json!({
+            "from": "2024-07-18T00:00:00Z",
+            "to": "2024-07-20T00:00:00Z",
+            "order_by": "start_time",
+            "order": "desc",
+            "limit": 2
+        });
+        if let Some(c) = &cursor {
+            body["cursor"] = json!(c);
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/llm/sessions/search")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("search");
+        assert_eq!(resp.status(), StatusCode::OK, "page {page}");
+        let v = response_json(resp).await;
+
+        for item in v["items"].as_array().expect("items") {
+            seen.push(item["session_id"].as_str().expect("session_id").to_string());
+        }
+        match v["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => break,
+        }
+    }
+
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "pagination returned duplicates: {seen:?}"
+    );
+    assert_eq!(
+        unique.len(),
+        offsets_us.len(),
+        "pagination dropped sessions: saw {seen:?}"
+    );
+}
+
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
 /// 2026-08-03 production outage shape. Collector-sized batches are meant to
 /// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),

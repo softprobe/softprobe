@@ -426,7 +426,13 @@ pub async fn search_sessions(
     Json(request): Json<SessionSearchRequest>,
 ) -> Result<Json<SessionSearchResponse>, ApiError> {
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
-    let cursor_supported = request.order_by == SessionOrderBy::StartTime;
+    // Must mirror what compile_session_search_sql actually accepts, `order`
+    // included. Advertising cursor support for order=asc handed the client a
+    // next_cursor that its own follow-up request would reject with 400 -- the
+    // same "page 1 works, page 2 always fails" shape this endpoint was meant
+    // to fix, just with a different status code.
+    let cursor_supported =
+        request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
     let sql = compile_session_search_sql(&request, limit).map_err(bad_request)?;
     let result = state
         .execute_tenant_scoped_sql(tenant.as_ref().map(|extension| &extension.0), &sql)
@@ -468,9 +474,17 @@ pub fn compile_session_search_sql(
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
     ];
     if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
-        predicates.push(format!("{} = {}", expr_user_id(), sql_string_literal(user_id)));
+        predicates.push(format!(
+            "{} = {}",
+            expr_user_id(),
+            sql_string_literal(user_id)
+        ));
     }
-    if let Some(model) = request.model_name.as_deref().filter(|v| !v.trim().is_empty()) {
+    if let Some(model) = request
+        .model_name
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
         predicates.push(format!(
             "{} = {}",
             variant_varchar("attributes", "gen_ai.request.model"),
@@ -497,7 +511,10 @@ pub fn compile_session_search_sql(
             if request.order != SortDirection::Desc {
                 return Err("`cursor` is only supported with order=desc".to_string());
             }
-            format!(" WHERE {}", cursor_predicate(cursor, "start_time", "session_id")?)
+            format!(
+                " WHERE {}",
+                cursor_predicate(cursor, "start_time", "session_id")?
+            )
         }
         None => String::new(),
     };
@@ -515,7 +532,9 @@ pub fn compile_session_search_sql(
         SessionOrderBy::ErrorCount => {
             format!("error_count {direction}, start_time DESC, session_id DESC")
         }
-        SessionOrderBy::Duration => format!("duration_ms {direction}, start_time DESC, session_id DESC"),
+        SessionOrderBy::Duration => {
+            format!("duration_ms {direction}, start_time DESC, session_id DESC")
+        }
         SessionOrderBy::TotalTokens => {
             format!("total_tokens {direction} NULLS LAST, start_time DESC, session_id DESC")
         }
@@ -1313,11 +1332,25 @@ struct StorageErrorKind {
 fn classify_storage_error(raw: &str) -> StorageErrorKind {
     let head = raw.trim_start();
 
-    // Our own worker-pool failures: operational, worth retrying.
-    if head.starts_with("DuckDB worker")
-        || head.starts_with("DuckDB query engine failed to start")
-    {
-        return StorageErrorKind { code: "query_unavailable", retryable: true };
+    // Our own engine-construction and worker-pool failures: operational, worth
+    // retrying. The connect/attach prefixes matter most -- they wrap the
+    // underlying "IO Error: could not connect to Postgres", so anchoring on the
+    // leading marker (correct, since DuckDB's echoed SQL must not reach it)
+    // would otherwise report the single most likely production fault, a
+    // Postgres blip, as a permanent defect telling the caller not to retry.
+    for marker in [
+        "DuckDB worker",
+        "DuckDB query engine failed to start",
+        "DuckDB open failed",
+        "DuckDB ATTACH failed",
+        "DuckLake attach failed",
+    ] {
+        if head.starts_with(marker) {
+            return StorageErrorKind {
+                code: "query_unavailable",
+                retryable: true,
+            };
+        }
     }
 
     // A FATAL (invalidated database) error that escapes worker self-heal
@@ -1331,16 +1364,26 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
     // Object-store and network faults, including S3/MinIO throttling and 5xx.
     // "HTTP Error" was missing before, so every 429 and 502 from the object
     // store was reported as a permanent 500 -- exactly the case worth retrying.
-    for marker in ["Connection Error", "IO Error", "HTTP Error", "Network Error"] {
+    for marker in [
+        "Connection Error",
+        "IO Error",
+        "HTTP Error",
+        "Network Error",
+    ] {
         if head.starts_with(marker) {
-            return StorageErrorKind { code: "query_unavailable", retryable: true };
+            return StorageErrorKind {
+                code: "query_unavailable",
+                retryable: true,
+            };
         }
     }
 
     // Binder/Catalog/Parser/Conversion errors are defects: identical on retry.
-    StorageErrorKind { code: "query_failed", retryable: false }
+    StorageErrorKind {
+        code: "query_failed",
+        retryable: false,
+    }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1358,7 +1401,10 @@ mod tests {
         let rendered = body.0.to_string();
         assert!(!rendered.contains("hunter2"), "password leaked: {rendered}");
         assert!(!rendered.contains("postgres:"), "DSN leaked: {rendered}");
-        assert!(rendered.contains("error_id"), "no correlation id: {rendered}");
+        assert!(
+            rendered.contains("error_id"),
+            "no correlation id: {rendered}"
+        );
     }
 
     #[test]
@@ -1403,6 +1449,29 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0["retryable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn cursor_literal_keeps_microsecond_precision() {
+        // start_time is a microsecond-precision TIMESTAMPTZ and the cursor
+        // round-trips a real column value. Rendering it at millisecond
+        // precision truncated the literal below the true value, so the
+        // keyset predicate `start_time < cursor` silently dropped every row
+        // sharing that millisecond: the last page came back empty with a null
+        // next_cursor and no error. Verified on DuckDB 1.5.5 -- paging 8
+        // sessions at limit=2 lost the final two.
+        let mut request = session_search_request();
+        request.cursor = Some(encode_cursor(
+            DateTime::parse_from_rfc3339("2026-07-20T00:00:00.123456Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            "s1",
+        ));
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(
+            sql.contains("00.123456"),
+            "cursor literal truncated below the true value, pages will drop rows: {sql}"
+        );
     }
 
     #[test]
@@ -1460,7 +1529,10 @@ mod tests {
         // password. Operators correlate via error_id in the log line instead.
         let (_, body) = storage_error(anyhow::anyhow!("open_connection: too many clients"));
         let rendered = body.0.to_string();
-        assert!(!rendered.contains("too many clients"), "cause disclosed: {rendered}");
+        assert!(
+            !rendered.contains("too many clients"),
+            "cause disclosed: {rendered}"
+        );
         let id = body.0["error_id"].as_str().expect("error_id");
         assert_eq!(id.len(), 16, "error_id should be a stable 16-hex digest");
     }
@@ -1709,5 +1781,4 @@ mod tests {
         assert_eq!(summary.input_tokens, Some(10));
         assert_eq!(summary.model_name.as_deref(), Some("gpt-4o"));
     }
-
 }

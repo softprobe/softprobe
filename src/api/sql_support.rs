@@ -17,10 +17,17 @@ pub(crate) fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Microseconds, not milliseconds: DuckDB TIMESTAMPTZ is microsecond-precision
+/// and cursors carry a real column value round-trip. Rendering at millisecond
+/// precision truncates the literal *below* the true value, so a keyset
+/// predicate built from it (`start_time < cursor`) silently drops every row in
+/// the same millisecond -- the last page comes back empty with a null
+/// next_cursor and no error at all. Verified on DuckDB 1.5.5: paging 8 sessions
+/// at limit=2 lost the final two.
 pub(crate) fn timestamp_literal(value: &DateTime<Utc>) -> String {
     format!(
         "{}::TIMESTAMPTZ",
-        sql_string_literal(&value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        sql_string_literal(&value.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
     )
 }
 

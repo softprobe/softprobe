@@ -352,12 +352,37 @@ impl DuckDBQueryEngine {
 
         // Fail fast: one unusable worker means a fixed slice of every future
         // request would fail, which is far harder to diagnose than not starting.
+        //
+        // Bounded wait. This is a blocking recv on a Tokio worker thread, and
+        // `engine_for` holds the per-tenant build mutex across it, so an
+        // unbounded wait would park a runtime thread and the tenant lock
+        // forever whenever a worker wedges inside ATTACH -- a Postgres host
+        // that completes the TCP handshake and then goes silent (firewall
+        // blackhole, saturated pooler) does exactly that. On the startup path
+        // that hangs before `axum::serve` binds: no /health, never ready, and
+        // nothing in the logs. A timeout turns that into a clear failure.
+        const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let mut failures = Vec::new();
+        let mut wedged = false;
         for _ in 0..worker_count {
-            match ready_rx.recv() {
+            match ready_rx.recv_timeout(WORKER_READY_TIMEOUT) {
                 Ok(Ok(_)) => {}
                 Ok(Err(msg)) => failures.push(msg),
-                Err(_) => failures.push("worker exited before reporting readiness".to_string()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    failures.push(format!(
+                        "worker did not report readiness within {}s",
+                        WORKER_READY_TIMEOUT.as_secs()
+                    ));
+                    // Remaining workers cannot be waited on either: a wedged
+                    // worker holds the channel open, so every further recv
+                    // would burn another full timeout.
+                    wedged = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    failures.push("worker exited before reporting readiness".to_string());
+                    break;
+                }
             }
         }
         if !failures.is_empty() {
@@ -366,6 +391,39 @@ impl DuckDBQueryEngine {
                 failures.len(),
                 worker_count
             );
+            // `Drop for DuckDBQueryEngine` is the only place workers are
+            // joined, and it cannot run here because `Self` was never
+            // constructed -- so simply dropping `workers` detaches threads
+            // holding live DuckDB connections, which is what that Drop impl
+            // exists to prevent. Since `engine_for` does not cache failures,
+            // every client retry would leak another full pool.
+            //
+            // Only safe to join when no worker is wedged: a worker stuck
+            // inside ATTACH never reaches `blocking_recv`, so closing its
+            // channel does not release it and `join` would block forever --
+            // trading a leak for a hang. In that case leak deliberately and
+            // say so; the timeout above is what makes the failure visible.
+            for worker in &mut workers {
+                worker.sender.take();
+            }
+            if wedged {
+                warn!(
+                    "leaving {} DuckDB worker thread(s) detached: at least one is wedged in \
+                     startup and would never observe a closed channel",
+                    workers.len()
+                );
+            } else {
+                for worker in &mut workers {
+                    if let Some(join) = worker.join.take() {
+                        if let Err(err) = join.join() {
+                            warn!(
+                                "DuckDB query worker panicked during startup abort: {:?}",
+                                err
+                            );
+                        }
+                    }
+                }
+            }
             return Err(anyhow!(
                 "DuckDB query engine failed to start {} of {} workers: {}",
                 failures.len(),
