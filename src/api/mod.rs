@@ -146,6 +146,10 @@ pub async fn create_router(
         )
         .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
         .route(
+            "/v1/llm/sessions/search",
+            post(llm::query::search_sessions),
+        )
+        .route(
             "/v1/llm/sessions/{session_id}",
             get(llm::query::get_session),
         )

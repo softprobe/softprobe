@@ -157,9 +157,18 @@ impl DuckDBQueryEngine {
 
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
+        // Workers report startup outcome so a failed one cannot stay in the pool.
+        // Previously a worker that could not open its connection just logged a
+        // warning and returned; its channel closed, but round-robin dispatch kept
+        // handing queries to that dead slot. Every request landing there failed
+        // with "worker channel closed", which the API layer flattened into a bare
+        // 503 -- a fixed fraction of requests failing while looking like a random
+        // outage.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<usize, String>>();
+        for index in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
             let core = core.clone();
+            let ready_tx = ready_tx.clone();
             let join = std::thread::Builder::new()
                 .name("softprobe-duckdb-query-worker".to_string())
                 .spawn(move || {
@@ -167,17 +176,23 @@ impl DuckDBQueryEngine {
                     let connection = match core.open_connection() {
                         Ok(conn) => conn,
                         Err(err) => {
-                            warn!("DuckDB worker failed to open connection: {}", err);
+                            let _ = ready_tx
+                                .send(Err(format!("worker {index} open_connection: {err}")));
                             return;
                         }
                     };
                     let mut state = match core.init_connection_state_with(connection) {
                         Ok(state) => state,
                         Err(err) => {
-                            warn!("DuckDB worker failed to initialize: {}", err);
+                            let _ = ready_tx
+                                .send(Err(format!("worker {index} init_connection: {err}")));
                             return;
                         }
                     };
+                    if ready_tx.send(Ok(index)).is_err() {
+                        return; // engine construction already aborted
+                    }
+                    drop(ready_tx);
                     while let Some(request) = rx.blocking_recv() {
                         let result = core.execute_query_on_state(&mut state, &request.sql);
                         let _ = request.respond_to.send(result);
@@ -188,6 +203,89 @@ impl DuckDBQueryEngine {
                 sender: Some(tx),
                 join: Some(join),
             });
+        }
+        drop(ready_tx);
+
+        // Fail fast: one unusable worker means a fixed slice of every future
+        // request would fail, which is far harder to diagnose than not starting.
+        //
+        // Bounded wait. This is a blocking recv on a Tokio worker thread, and
+        // `engine_for` holds the per-tenant build mutex across it, so an
+        // unbounded wait would park a runtime thread and the tenant lock
+        // forever whenever a worker wedges inside ATTACH -- a Postgres host
+        // that completes the TCP handshake and then goes silent (firewall
+        // blackhole, saturated pooler) does exactly that. On the startup path
+        // that hangs before `axum::serve` binds: no /health, never ready, and
+        // nothing in the logs. A timeout turns that into a clear failure.
+        const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut failures = Vec::new();
+        let mut wedged = false;
+        for _ in 0..worker_count {
+            match ready_rx.recv_timeout(WORKER_READY_TIMEOUT) {
+                Ok(Ok(_)) => {}
+                Ok(Err(msg)) => failures.push(msg),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    failures.push(format!(
+                        "worker did not report readiness within {}s",
+                        WORKER_READY_TIMEOUT.as_secs()
+                    ));
+                    // Remaining workers cannot be waited on either: a wedged
+                    // worker holds the channel open, so every further recv
+                    // would burn another full timeout.
+                    wedged = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    failures.push("worker exited before reporting readiness".to_string());
+                    break;
+                }
+            }
+        }
+        if !failures.is_empty() {
+            warn!(
+                "DuckDB query engine: {}/{} workers failed to start",
+                failures.len(),
+                worker_count
+            );
+            // `Drop for DuckDBQueryEngine` is the only place workers are
+            // joined, and it cannot run here because `Self` was never
+            // constructed -- so simply dropping `workers` detaches threads
+            // holding live DuckDB connections, which is what that Drop impl
+            // exists to prevent. Since `engine_for` does not cache failures,
+            // every client retry would leak another full pool.
+            //
+            // Only safe to join when no worker is wedged: a worker stuck
+            // inside ATTACH never reaches `blocking_recv`, so closing its
+            // channel does not release it and `join` would block forever --
+            // trading a leak for a hang. In that case leak deliberately and
+            // say so; the timeout above is what makes the failure visible.
+            for worker in &mut workers {
+                worker.sender.take();
+            }
+            if wedged {
+                warn!(
+                    "leaving {} DuckDB worker thread(s) detached: at least one is wedged in \
+                     startup and would never observe a closed channel",
+                    workers.len()
+                );
+            } else {
+                for worker in &mut workers {
+                    if let Some(join) = worker.join.take() {
+                        if let Err(err) = join.join() {
+                            warn!(
+                                "DuckDB query worker panicked during startup abort: {:?}",
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+            return Err(anyhow!(
+                "DuckDB query engine failed to start {} of {} workers: {}",
+                failures.len(),
+                worker_count,
+                failures.join("; ")
+            ));
         }
 
         // Keep a dummy connection for the _shared_connection field (for compatibility)
@@ -675,14 +773,29 @@ mod tests {
     #[test]
     fn duck_value_map_keys_are_plain_strings() {
         let entries = vec![
-            (DuckValue::Text("logger_name".into()), DuckValue::Text("com.example".into())),
-            (DuckValue::Text("sp.source".into()), DuckValue::Text("backend".into())),
+            (
+                DuckValue::Text("logger_name".into()),
+                DuckValue::Text("com.example".into()),
+            ),
+            (
+                DuckValue::Text("sp.source".into()),
+                DuckValue::Text("backend".into()),
+            ),
         ];
         let json = duck_value_to_json(DuckValue::Map(entries.into()));
         let obj = json.as_object().expect("should be object");
-        assert!(obj.contains_key("logger_name"), "key should be plain string, got: {json}");
-        assert!(obj.contains_key("sp.source"), "key should be plain string, got: {json}");
-        assert!(!json.to_string().contains("Text("), "keys must not contain Debug wrapper");
+        assert!(
+            obj.contains_key("logger_name"),
+            "key should be plain string, got: {json}"
+        );
+        assert!(
+            obj.contains_key("sp.source"),
+            "key should be plain string, got: {json}"
+        );
+        assert!(
+            !json.to_string().contains("Text("),
+            "keys must not contain Debug wrapper"
+        );
     }
 
     #[test]
