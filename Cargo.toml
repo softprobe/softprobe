@@ -32,7 +32,14 @@ tonic = { version = "0.12", features = ["gzip"] }
 # DuckDB: keep dynamic linking.
 # Do NOT enable `bundled`/static linking here; this repo expects libduckdb artifacts
 # (e.g. Dockerfile copies `libduckdb.so`) and local builds use DUCKDB_DOWNLOAD_LIB=1.
-duckdb = { version = "1.10502.0" }
+#
+# Floor is 1.10505.0 (DuckDB 1.5.5), not a preference: DuckDB 1.5.2 crashes with
+# "INTERNAL Error: Attempted to access index 0 within vector of size 0" when the
+# ducklake reader hits an empty-array VARIANT value, then invalidates the whole
+# database so every subsequent query fails until the process restarts. Production
+# ran 1.5.2 and 84% of the `events` column is `[]`; that took the query layer down
+# on 2026-08-03. Verified: 1.5.5 reads the same shape cleanly.
+duckdb = { version = "1.10505.0" }
 
 # Configuration YAML
 serde_yaml = "0.9"

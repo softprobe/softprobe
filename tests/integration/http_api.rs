@@ -932,6 +932,94 @@ async fn llm_sessions_search_pages_without_dropping_rows() {
     );
 }
 
+/// Guards the DuckDB floor set in Cargo.toml.
+///
+/// DuckDB 1.5.2 crashes with "INTERNAL Error: Attempted to access index 0
+/// within vector of size 0" when the ducklake reader hits an empty-array
+/// VARIANT value, and then invalidates the whole database so every later
+/// query on that connection fails until the process restarts. Production ran
+/// 1.5.2 with 84% of the `events` column equal to `[]`; on 2026-08-03 one
+/// detail request took the entire query layer down for hours.
+///
+/// Spans without events serialize to exactly that shape, so this reads one
+/// back end-to-end. It passes on 1.5.5 and fails on 1.5.2 -- which is the
+/// point: it is the executable form of the version floor.
+#[tokio::test]
+async fn spans_without_events_are_readable() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-empty-events";
+    let span_hex = hex::encode([0x91u8; 8]);
+
+    // llm_generation_request leaves `events` empty -> `[]` once stored.
+    let mut buf = Vec::new();
+    llm_generation_request(session_id, [0x90; 16], [0x91; 8])
+        .encode(&mut buf)
+        .expect("encode");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(buf))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("ingest");
+    assert_eq!(resp.status(), StatusCode::OK);
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    // The detail endpoint projects events; on 1.5.2 this is where it died.
+    let req = Request::builder()
+        .uri(format!("/v1/llm/observations/{span_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("observation detail");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "reading a span whose events are an empty array must not fail"
+    );
+    let obs = response_json(resp).await;
+    assert_eq!(obs["span_id"], span_hex);
+    assert!(
+        obs["events"].as_array().is_none_or(|e| e.is_empty()),
+        "expected no events, got: {}",
+        obs["events"]
+    );
+
+    // And again through search, which projects a different column set.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "session_id": session_id,
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("search");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let found = response_json(resp).await;
+    assert_eq!(
+        found["items"].as_array().expect("items").len(),
+        1,
+        "{found}"
+    );
+}
+
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
 /// 2026-08-03 production outage shape. Collector-sized batches are meant to
 /// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),
