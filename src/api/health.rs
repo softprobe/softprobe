@@ -6,9 +6,14 @@ use serde_json::json;
 use crate::api::AppState;
 use crate::query::duckdb;
 
-/// Liveness gives up only when self-heal has failed this many times in a row.
-/// A one-off rebuild failure (Postgres blip mid-rebuild) must not get the pod
-/// killed; a rebuild that keeps failing never recovers without a restart.
+/// Liveness gives up only when self-heal has failed this many times in a row
+/// with nothing succeeding in between (the counter is cleared by any successful
+/// query -- see `SelfHealCounters`). A one-off rebuild failure, or one tenant
+/// whose scope is broken while others serve fine, must not get the pod killed.
+///
+/// The probe config that consumes this lives in the deployment-k8s repo
+/// (gcp/production/thelake), not here: `failureThreshold: 3`,
+/// `periodSeconds: 20` -- so ~60s from "nothing works at all" to restart.
 const MAX_CONSECUTIVE_REBUILD_FAILURES: u64 = 3;
 
 /// Liveness. Deliberately does not probe dependencies -- k8s must not restart
@@ -47,6 +52,13 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// and scanning cold DuckLake tables here would make readiness flap on slow
 /// storage rather than on actual brokenness.
 ///
+/// Known limit: dispatch is round-robin, so one call samples ONE worker. This
+/// cannot report "pool partially degraded" -- and because the probe heals the
+/// worker it lands on, it will rarely report unready for a healable pool. That
+/// is the intended division of labour: self-heal fixes poisoned workers, and
+/// readiness only sheds traffic when the engine cannot be built or reached at
+/// all (which fails on any worker).
+///
 /// The first probe also constructs the default tenant engine (extensions,
 /// catalog attach), which is legitimate readiness work and can take seconds.
 /// Two consequences: the probe runs in a spawned task so a dropped probe
@@ -55,9 +67,8 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// attempt -- and the in-handler budget is generous; the k8s probe's own
 /// `timeoutSeconds` bounds each attempt.
 pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let probe = tokio::spawn(async move {
-        state.execute_tenant_scoped_sql(None, "SELECT 1").await
-    });
+    let probe =
+        tokio::spawn(async move { state.execute_tenant_scoped_sql(None, "SELECT 1").await });
     let reason = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
         Ok(Ok(Ok(_))) => {
             return (
@@ -99,10 +110,34 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_shape() {
+        duckdb::set_self_heal_failures_for_test(0);
         let (status, j) = health_check().await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(j.0["status"], "ok");
         assert_eq!(j.0["specVersion"], "http-control-api@v1");
+    }
+
+    #[tokio::test]
+    async fn health_reports_unhealthy_once_self_heal_keeps_failing() {
+        // The whole point of the change: an engine that cannot rebuild its
+        // connections must stop reporting "ok". The 2026-08-03 outage served
+        // 503s for an hour and a half behind a hardcoded green liveness probe.
+        // The counters are process-global, so this test drives them directly
+        // and restores them before returning.
+        duckdb::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES - 1);
+        let (status, _) = health_check().await;
+        assert_eq!(status, StatusCode::OK, "below threshold must stay healthy");
+
+        duckdb::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES);
+        let (status, j) = health_check().await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(j.0["status"], "unhealthy");
+        assert_eq!(
+            j.0["consecutiveRebuildFailures"],
+            serde_json::json!(MAX_CONSECUTIVE_REBUILD_FAILURES)
+        );
+
+        duckdb::set_self_heal_failures_for_test(0);
     }
 
     // ready_check needs an AppState with a live engine; it is covered by the

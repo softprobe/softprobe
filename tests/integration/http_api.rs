@@ -876,6 +876,12 @@ async fn inlined_data_stays_readable_across_maintenance() {
     // point, and this test must keep covering it even if the default flips
     // to 0 (the post-outage production setting).
     config.ducklake.data_inlining_row_limit = Some(10_000);
+    // file_backed_test_config turns maintenance OFF for quiet tests. Without
+    // these two the maintenance step below is a no-op loop that reports
+    // Skipped for every table, and the "across a maintenance pass" claim in
+    // this test's name would be theatre.
+    config.maintenance.enabled = true;
+    config.maintenance.metadata_enabled = true;
     let config = Arc::new(config);
     let app = AppPipeline::new(config.as_ref())
         .await
@@ -946,8 +952,18 @@ async fn inlined_data_stays_readable_across_maintenance() {
         .unwrap();
     let resp = router.clone().oneshot(req).await.expect("score");
     assert_eq!(resp.status(), StatusCode::CREATED);
+    // `parquet_count` returns 0 for a missing directory, so "scores has no
+    // Parquet" alone would also pass if the layout assumption
+    // (<data_path>/<metadata_schema>/<table>/) ever broke. Anchor on the
+    // traces directory existing to tell the two apart.
+    let scores_dir = data_dir.join("main").join("scores");
+    assert!(
+        data_dir.join("main").join("traces").is_dir(),
+        "expected <data_path>/main/<table>/ layout; found: {:?}",
+        std::fs::read_dir(&data_dir).map(|e| e.flatten().map(|x| x.path()).collect::<Vec<_>>())
+    );
     assert_eq!(
-        parquet_count(&data_dir.join("main").join("scores")),
+        parquet_count(&scores_dir),
         0,
         "score batch wrote Parquet -- inlining is not active, this test no \
          longer covers the inlined read path"
@@ -967,10 +983,24 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     // 4. A maintenance pass over the same catalog (production runs this
     //    hourly; the outage query came 23 minutes after one).
+    //    run_once_ducklake funnels every failure into warn! + Skipped, so
+    //    `.expect()` can never fire -- assert on the summary instead, or a
+    //    pass that did nothing at all would look like success.
     let maintenance = MaintenanceExecutor::new(config.as_ref(), None, None)
         .await
         .expect("maintenance executor");
-    maintenance.run_once().await.expect("maintenance run");
+    let summary = maintenance.run_once().await.expect("maintenance run");
+    // `table` is `<metadata_schema>.<table>` (executor.rs builds `table_ident`).
+    let scores_result = summary
+        .tables
+        .iter()
+        .find(|t| t.table.ends_with(".scores"))
+        .unwrap_or_else(|| panic!("no scores entry in maintenance summary: {summary:?}"));
+    assert!(
+        !scores_result.metadata.skipped,
+        "maintenance skipped metadata for scores -- the pass did nothing, so \
+         the assertions below prove nothing: {summary:?}"
+    );
 
     // 5. Inlined read #2, after maintenance -- the production crash site.
     let req = Request::builder()

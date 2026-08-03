@@ -117,6 +117,15 @@ pub fn view_counters_snapshot() -> ViewCounterSnapshot {
 /// Self-heal bookkeeping for poisoned worker connections. Process-global on
 /// purpose (same idiom as VIEW_COUNTERS): /health must answer "is self-heal
 /// failing" across every tenant engine without holding a reference to each.
+///
+/// Because it is global, `consecutive_failures` is cleared by ANY successful
+/// query, not just by a successful rebuild. Otherwise a single tenant whose
+/// DuckLake scope is permanently unattachable (schema dropped, bucket deleted,
+/// per-scope credentials rotated) would drive the counter past the /health
+/// threshold and crashloop a pod that is serving every other tenant fine --
+/// and a restart cannot fix a broken tenant scope, so it would never stop.
+/// Reaching the threshold now requires that nothing anywhere is succeeding,
+/// which is the process-level state a restart can actually resolve.
 #[derive(Default)]
 struct SelfHealCounters {
     rebuilds: AtomicU64,
@@ -138,6 +147,14 @@ pub fn self_heal_snapshot() -> SelfHealSnapshot {
     }
 }
 
+/// Test-only: the counters are global, so the /health unhealthy branch is
+/// otherwise unreachable from tests (mirrors [`reset_view_counters`]).
+pub fn set_self_heal_failures_for_test(value: u64) {
+    SELF_HEAL
+        .consecutive_failures
+        .store(value, Ordering::Relaxed);
+}
+
 /// How a query error relates to DuckDB's "database has been invalidated" state.
 ///
 /// After an internal assertion failure (e.g. the ducklake extension's inlined
@@ -150,10 +167,13 @@ pub fn self_heal_snapshot() -> SelfHealSnapshot {
 /// That is the 2026-08-03 production outage; this classification is what lets
 /// workers rebuild instead of staying dead.
 ///
-/// Matching is on error text, so echoed SQL could in principle fake a marker.
-/// Both false positives are harmless by design: a spurious rebuild costs one
-/// reconnect, and the single retry re-runs a query that already failed --
-/// neither changes the response of a healthy query.
+/// Classification is anchored to the leading marker of the FIRST line, for the
+/// same reason [`crate::api::llm::query::classify_storage_error`] is: DuckDB
+/// echoes the offending statement (`LINE 1: ...`) into the message, and that
+/// statement embeds caller-supplied literals. A `contains` check here would let
+/// a filter value like `model_name = "database has been invalidated"` force two
+/// full connection rebuilds -- each one a fresh in-memory database plus a
+/// DuckLake ATTACH round-trip to Postgres, synchronously on the worker thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Poison {
     /// Not a poison-related failure.
@@ -167,10 +187,16 @@ enum Poison {
 }
 
 fn poison_kind(message: &str) -> Poison {
-    if message.contains("database has been invalidated") {
+    // Only the first line: everything after it may contain echoed SQL.
+    let head = message.trim_start().lines().next().unwrap_or("");
+    // Order matters. The collateral message quotes the original internal error
+    // in a trailing `Original error: "..."`, but that lives on a later line, so
+    // first-line anchoring already separates the two. Checked first anyway to
+    // keep the intent explicit.
+    if head.starts_with("FATAL Error") {
         return Poison::Collateral;
     }
-    if message.contains("INTERNAL Error") {
+    if head.starts_with("INTERNAL Error") {
         return Poison::Triggered;
     }
     Poison::None
@@ -190,7 +216,9 @@ fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionSta
         Err(err) => {
             // Counted so /health can turn "self-heal keeps failing" into an
             // unhealthy signal; nothing recovers from this state on its own.
-            SELF_HEAL.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+            SELF_HEAL
+                .consecutive_failures
+                .fetch_add(1, Ordering::Relaxed);
             warn!("DuckDB query worker {index} failed to rebuild its poisoned connection: {err}");
             None
         }
@@ -304,6 +332,12 @@ impl DuckDBQueryEngine {
                                     }
                                 }
                             }
+                        }
+                        if result.is_ok() {
+                            // Any success anywhere clears the global streak --
+                            // see SelfHealCounters for why this must not be
+                            // limited to successful rebuilds.
+                            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
                         }
                         let _ = request.respond_to.send(result);
                     }
@@ -825,14 +859,29 @@ mod tests {
     #[test]
     fn duck_value_map_keys_are_plain_strings() {
         let entries = vec![
-            (DuckValue::Text("logger_name".into()), DuckValue::Text("com.example".into())),
-            (DuckValue::Text("sp.source".into()), DuckValue::Text("backend".into())),
+            (
+                DuckValue::Text("logger_name".into()),
+                DuckValue::Text("com.example".into()),
+            ),
+            (
+                DuckValue::Text("sp.source".into()),
+                DuckValue::Text("backend".into()),
+            ),
         ];
         let json = duck_value_to_json(DuckValue::Map(entries.into()));
         let obj = json.as_object().expect("should be object");
-        assert!(obj.contains_key("logger_name"), "key should be plain string, got: {json}");
-        assert!(obj.contains_key("sp.source"), "key should be plain string, got: {json}");
-        assert!(!json.to_string().contains("Text("), "keys must not contain Debug wrapper");
+        assert!(
+            obj.contains_key("logger_name"),
+            "key should be plain string, got: {json}"
+        );
+        assert!(
+            obj.contains_key("sp.source"),
+            "key should be plain string, got: {json}"
+        );
+        assert!(
+            !json.to_string().contains("Text("),
+            "keys must not contain Debug wrapper"
+        );
     }
 
     #[test]
@@ -896,6 +945,42 @@ mod tests {
             poison_kind("Connection Error: could not reach object store"),
             Poison::None
         );
-        assert_eq!(poison_kind("Binder Error: column x not found"), Poison::None);
+        assert_eq!(
+            poison_kind("Binder Error: column x not found"),
+            Poison::None
+        );
+    }
+
+    #[test]
+    fn poison_kind_ignores_markers_in_echoed_sql() {
+        // DuckDB echoes the offending statement, and that statement embeds
+        // caller-supplied filter values. A `contains` check here let a filter
+        // like model_name = "database has been invalidated" force two full
+        // connection rebuilds (fresh database + DuckLake ATTACH) per request.
+        assert_eq!(
+            poison_kind(
+                "Catalog Error: Table with name traces does not exist!\n\
+                 LINE 1: ... WHERE model_name = 'database has been invalidated'"
+            ),
+            Poison::None
+        );
+        assert_eq!(
+            poison_kind(
+                "Binder Error: no such column\n\
+                 LINE 1: ... WHERE user_id = 'INTERNAL Error'"
+            ),
+            Poison::None
+        );
+        // The collateral message quotes the internal error on a later line;
+        // first-line anchoring must still classify it as collateral, not as
+        // the triggering query.
+        assert_eq!(
+            poison_kind(
+                "FATAL Error: Failed: database has been invalidated because of a previous \
+                 fatal error.\nOriginal error: \"Attempted to access index 0 within vector \
+                 of size 0\""
+            ),
+            Poison::Collateral
+        );
     }
 }
