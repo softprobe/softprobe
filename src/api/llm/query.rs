@@ -219,14 +219,10 @@ pub async fn get_trace(
         .collect::<Vec<_>>();
     let next_cursor = next_cursor_from_details(&mut observations, limit);
 
-    let span_ids = observations
-        .iter()
-        .map(|obs| obs.summary.span_id.clone())
-        .collect::<Vec<_>>();
     let scores = query_scores(
         &state,
         tenant_ref,
-        &compile_scores_for_trace_sql(&trace_id, &span_ids),
+        &compile_scores_for_trace_sql(&trace_id, params.from, params.to).map_err(bad_request)?,
     )
     .await?;
 
@@ -299,14 +295,11 @@ pub async fn get_session(
         .collect::<Vec<_>>();
     let next_cursor = next_cursor_from_traces(&mut traces, limit);
 
-    let trace_ids = traces
-        .iter()
-        .map(|trace| trace.trace_id.clone())
-        .collect::<Vec<_>>();
     let scores = query_scores(
         &state,
         tenant_ref,
-        &compile_scores_for_session_sql(&session_id, &trace_ids),
+        &compile_scores_for_session_sql(&session_id, params.from, params.to)
+            .map_err(bad_request)?,
     )
     .await?;
 
@@ -814,38 +807,48 @@ pub fn compile_scores_for_span_sql(span_id: &str) -> String {
     )
 }
 
-pub fn compile_scores_for_trace_sql(trace_id: &str, span_ids: &[String]) -> String {
-    let mut conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
-    if !span_ids.is_empty() {
-        let values = span_ids
-            .iter()
-            .map(|id| sql_string_literal(id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        conditions.push(format!("span_id IN ({values})"));
-    }
-    format!(
+pub fn compile_scores_for_trace_sql(
+    trace_id: &str,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<String, String> {
+    let mut span_conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
+    push_optional_time_bounds(&mut span_conditions, from, to)?;
+    Ok(format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = conditions.join(" OR ")
-    )
+        predicate = format!(
+            "trace_id = {trace} OR span_id IN (SELECT span_id FROM union_spans WHERE {span_where})",
+            trace = sql_string_literal(trace_id),
+            span_where = span_conditions.join(" AND ")
+        )
+    ))
 }
 
-pub fn compile_scores_for_session_sql(session_id: &str, trace_ids: &[String]) -> String {
-    let mut conditions = vec![format!("session_id = {}", sql_string_literal(session_id))];
-    if !trace_ids.is_empty() {
-        let values = trace_ids
-            .iter()
-            .map(|id| sql_string_literal(id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        conditions.push(format!("trace_id IN ({values})"));
+pub fn compile_scores_for_session_sql(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String, String> {
+    if from > to {
+        return Err("`from` must be <= `to`".to_string());
     }
-    format!(
+    let member_filter = format!(
+        "session_id = {session} AND timestamp >= {from_ts} AND timestamp <= {to_ts}",
+        session = sql_string_literal(session_id),
+        from_ts = timestamp_literal(&from),
+        to_ts = timestamp_literal(&to),
+    );
+    Ok(format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = conditions.join(" OR ")
-    )
+        predicate = format!(
+            "session_id = {session} \
+             OR trace_id IN (SELECT DISTINCT trace_id FROM union_spans WHERE {member_filter}) \
+             OR span_id IN (SELECT span_id FROM union_spans WHERE {member_filter})",
+            session = sql_string_literal(session_id),
+        )
+    ))
 }
 
 fn observation_projection(include_payload: bool) -> String {
@@ -1733,9 +1736,38 @@ mod tests {
 
     #[test]
     fn score_sql_handles_missing_member_ids() {
-        let sql = compile_scores_for_trace_sql("trace-1", &[]);
+        let sql = compile_scores_for_trace_sql("trace-1", None, None).expect("trace scores sql");
         assert!(sql.contains("trace_id = 'trace-1'"));
-        assert!(!sql.contains("span_id IN"));
+        assert!(sql.contains("span_id IN (SELECT"));
+        assert!(!sql.contains("timestamp >="));
+        assert!(!sql.contains("timestamp <="));
+
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sql = compile_scores_for_trace_sql("trace-1", Some(from), Some(to))
+            .expect("trace scores sql with bounds");
+        assert!(sql.contains("span_id IN (SELECT span_id FROM union_spans WHERE trace_id = 'trace-1' AND timestamp >="));
+        assert!(sql.contains("timestamp <="));
+    }
+
+    #[test]
+    fn session_score_sql_covers_all_attachment_points() {
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sql = compile_scores_for_session_sql("sess-1", from, to).expect("session scores sql");
+        assert!(sql.contains("session_id = 'sess-1'"));
+        assert!(sql.contains("trace_id IN (SELECT"));
+        assert!(sql.contains("span_id IN (SELECT"));
+
+        assert!(compile_scores_for_session_sql("sess-1", to, from).is_err());
     }
 
     #[test]
