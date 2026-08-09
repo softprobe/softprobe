@@ -4,7 +4,8 @@
 **Spec version:** `softprobe.promotion.v1`
 **Apply API:** authenticated `POST /v1/promotions/apply`
 **Last verified against:** `src/promotion.rs`, `src/runtime_api.rs`,
-`src/storage/ducklake/mod.rs`, and promotion integration tests on 2026-07-18
+`src/storage/ducklake/` (`writer.rs`, `promotion.rs`), and promotion
+integration tests on 2026-07-18
 
 This is the canonical contract for Softprobe business attributes and schema
 promotion. Other docs link here; do not duplicate the full contract elsewhere.

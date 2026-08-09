@@ -234,35 +234,15 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<()> {
         let attach_target = crate::storage::ducklake::ducklake_attach_target(ducklake);
-        self.prepare_local_ducklake_paths(ducklake, &attach_target)?;
+        crate::storage::ducklake::prepare_local_ducklake_paths(ducklake, &attach_target)?;
         let opts = crate::storage::ducklake::ducklake_attach_options(ducklake);
         let attach_sql = format!(
             "ATTACH 'ducklake:{}' AS {} ({});",
-            attach_target.replace('\'', "''"),
+            crate::storage::ducklake::escape_sql_literal(&attach_target),
             ducklake.catalog_alias,
             opts.join(", ")
         );
         conn.execute_batch(&attach_sql)?;
-        Ok(())
-    }
-
-    fn prepare_local_ducklake_paths(
-        &self,
-        ducklake: &crate::config::DuckLakeConfig,
-        attach_target: &str,
-    ) -> Result<()> {
-        if ducklake.catalog_type == "sqlite" {
-            let raw = attach_target
-                .strip_prefix("sqlite:")
-                .unwrap_or(attach_target);
-            let metadata_path = std::path::PathBuf::from(raw);
-            if let Some(parent) = metadata_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            if !ducklake.data_path.contains("://") {
-                std::fs::create_dir_all(&ducklake.data_path)?;
-            }
-        }
         Ok(())
     }
 
@@ -275,7 +255,9 @@ impl MaintenanceExecutor {
         // Match qualified name used for tables (see ducklake_qualified_table_name).
         let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
         let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-        let target_file_size = size_literal(self.config.maintenance.target_file_size_bytes);
+        let target_file_size = crate::storage::ducklake::size_literal(
+            self.config.maintenance.target_file_size_bytes,
+        );
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', {});",
             ducklake.catalog_alias, target_file_size, scope
@@ -419,19 +401,4 @@ fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {
         count += 1;
     }
     Ok(count)
-}
-
-fn size_literal(bytes: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
-    const GB: usize = 1024 * MB;
-    if bytes >= GB && bytes.is_multiple_of(GB) {
-        format!("{}GB", bytes / GB)
-    } else if bytes >= MB && bytes.is_multiple_of(MB) {
-        format!("{}MB", bytes / MB)
-    } else if bytes >= KB && bytes.is_multiple_of(KB) {
-        format!("{}KB", bytes / KB)
-    } else {
-        format!("{}B", bytes)
-    }
 }

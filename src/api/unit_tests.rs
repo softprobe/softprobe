@@ -305,12 +305,6 @@ async fn unit_openapi_and_swagger_endpoints_are_served() {
         openapi["paths"]["/v1/llm/observations/search"]["post"]["operationId"],
         "searchObservations"
     );
-    assert!(
-        openapi["components"]["schemas"]["ObservationSearchRequest"]["properties"]
-            .get("without_score_name")
-            .is_some(),
-        "ObservationSearchRequest must document without_score_name"
-    );
     assert_eq!(
         openapi["paths"]["/v1/llm/score-configs"]["get"]["operationId"],
         "listScoreConfigs"

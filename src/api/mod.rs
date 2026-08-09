@@ -583,10 +583,6 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         "user_id": { "type": "string" },
                         "session_id": { "type": "string" },
                         "trace_id": { "type": "string" },
-                        "without_score_name": {
-                            "type": "string",
-                            "description": "Return only observations whose span_id has no score with this name"
-                        },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
                         "cursor": { "type": "string" }
                     }

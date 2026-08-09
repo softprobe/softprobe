@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
-use crate::storage::ducklake::ducklake_qualified_table_name;
+use crate::storage::ducklake::{ducklake_qualified_table_name, escape_sql_literal};
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
 use base64::Engine;
@@ -761,7 +761,7 @@ impl DuckDBCore {
         let sql = {
             let ducklake = self.ducklake_config();
             let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
-            self.prepare_local_ducklake_paths(&ducklake, &attach_target)?;
+            crate::storage::ducklake::prepare_local_ducklake_paths(&ducklake, &attach_target)?;
             let options = crate::storage::ducklake::ducklake_attach_options(&ducklake);
             format!(
                 "ATTACH 'ducklake:{}' AS {} ({});",
@@ -782,6 +782,10 @@ impl DuckDBCore {
                     let ducklake = self.ducklake_config();
                     // Backward-compatible fallback for catalogs initialized without custom metadata schema.
                     let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
+                    crate::storage::ducklake::prepare_local_ducklake_paths(
+                        &ducklake,
+                        &attach_target,
+                    )?;
                     let mut fallback_options = vec![format!(
                         "DATA_PATH '{}'",
                         escape_sql_literal(&ducklake.data_path)
@@ -806,26 +810,6 @@ impl DuckDBCore {
                 }
             }
         }
-    }
-
-    fn prepare_local_ducklake_paths(
-        &self,
-        ducklake: &crate::config::DuckLakeConfig,
-        attach_target: &str,
-    ) -> Result<()> {
-        if ducklake.catalog_type == "sqlite" {
-            let raw = attach_target
-                .strip_prefix("sqlite:")
-                .unwrap_or(attach_target);
-            let metadata_path = std::path::PathBuf::from(raw);
-            if let Some(parent) = metadata_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            if !ducklake.data_path.contains("://") {
-                std::fs::create_dir_all(&ducklake.data_path)?;
-            }
-        }
-        Ok(())
     }
 
     fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
@@ -896,10 +880,6 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         // duckdb::types::Value is #[non_exhaustive]; keep forward-compatible.
         other => Value::String(format!("{other:?}")),
     }
-}
-
-fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 #[cfg(test)]

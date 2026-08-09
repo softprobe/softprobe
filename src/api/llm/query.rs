@@ -32,8 +32,6 @@ pub struct ObservationSearchRequest {
     pub user_id: Option<String>,
     pub session_id: Option<String>,
     pub trace_id: Option<String>,
-    /// When set, only return observations whose span_id has no score with this name.
-    pub without_score_name: Option<String>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
 }
@@ -683,15 +681,6 @@ pub fn compile_observation_search_sql(
     }
     if let Some(cursor) = &request.cursor {
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
-    }
-    if let Some(score_name) = &request.without_score_name {
-        if score_name.trim().is_empty() {
-            return Err("`without_score_name` cannot be empty".to_string());
-        }
-        conditions.push(format!(
-            "NOT EXISTS (SELECT 1 FROM scores s WHERE s.span_id = union_spans.span_id AND s.name = {})",
-            sql_string_literal(score_name)
-        ));
     }
 
     let where_sql = conditions.join(" AND ");
@@ -1693,7 +1682,6 @@ mod tests {
             user_id: Some("user-1".to_string()),
             session_id: Some("sess-1".to_string()),
             trace_id: None,
-            without_score_name: None,
             limit: Some(999),
             cursor: None,
         };
@@ -1706,29 +1694,6 @@ mod tests {
             variant_varchar("attributes", "sp.observation.type")
         )));
         assert!(sql.contains("ORDER BY timestamp DESC, span_id DESC"));
-    }
-
-    #[test]
-    fn search_sql_includes_without_score_name_anti_join() {
-        let request = ObservationSearchRequest {
-            from: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            to: DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            observation_types: vec!["agent".to_string()],
-            model_name: None,
-            user_id: None,
-            session_id: None,
-            trace_id: None,
-            without_score_name: Some("correctness".to_string()),
-            limit: Some(50),
-            cursor: None,
-        };
-        let sql = compile_observation_search_sql(&request).expect("sql");
-        assert!(sql.contains("NOT EXISTS"));
-        assert!(sql.contains("s.name = 'correctness'"));
     }
 
     #[test]
@@ -1745,7 +1710,6 @@ mod tests {
             user_id: None,
             session_id: None,
             trace_id: None,
-            without_score_name: None,
             limit: None,
             cursor: None,
         };
