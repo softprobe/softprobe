@@ -24,6 +24,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep curl clang mold
+
       - name: Doctor
         run: make doctor-ci
 

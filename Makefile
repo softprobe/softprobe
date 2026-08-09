@@ -44,28 +44,6 @@ RELEASE_GOAL_SECS ?= 1500
 
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
-# ---- timing helpers ----
-# Usage: $(call phase,name,command...)
-define phase
-	@start=$$(date +%s); \
-	echo "PHASE=$(1) start"; \
-	$(2); \
-	end=$$(date +%s); \
-	elapsed=$$((end - start)); \
-	echo "PHASE=$(1) elapsed=$${elapsed}s"
-endef
-
-define enforce_slo
-	@total=$(1); goal=$(2); label=$(3); \
-	echo "TOTAL=$${total}s goal=$${goal}s ($${label})"; \
-	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
-		if [ "$${total}" -gt "$${goal}" ]; then \
-			echo "❌ $${label} wall clock $${total}s exceeds $${goal}s goal"; \
-			exit 1; \
-		fi; \
-	fi
-endef
-
 help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
 	@echo ""
@@ -116,8 +94,8 @@ ensure-dist:
 	fi
 
 package-image: ensure-dist
-	@echo "🐳 Packaging image from dist/ (no cargo in Docker)..."
-	docker build -t softprobe/splake:local .
+	@echo "🐳 Packaging image from dist/ (no cargo in Docker; linux/amd64)..."
+	docker build --platform linux/amd64 -t softprobe/splake:local .
 
 # Official images: GitHub Release → release.yml → make release / publish-docker.
 publish-docker: ensure-dist
@@ -275,15 +253,7 @@ test-perf: check-local-e2e
 	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
 	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
-	t1=$$(date +%s); \
-	total=$$((t1 - t0)); \
-	echo "TOTAL=$${total}s goal=$(PERF_GOAL_SECS)s (test-perf)"; \
-	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
-		if [ "$${total}" -gt "$(PERF_GOAL_SECS)" ]; then \
-			echo "❌ test-perf wall clock $${total}s exceeds $(PERF_GOAL_SECS)s goal"; \
-			exit 1; \
-		fi; \
-	fi; \
+	./scripts/slo.sh total test-perf $$(($$(date +%s) - t0)) $(PERF_GOAL_SECS); \
 	echo "✅ Performance tests completed!"
 
 test-all: test-quick test-local
@@ -298,18 +268,11 @@ dev-check: check-fmt lint test-quick
 ci-full:
 	@set -e; \
 	t0=$$(date +%s); \
-	echo "PHASE=check-fmt start"; s=$$(date +%s); $(MAKE) check-fmt; echo "PHASE=check-fmt elapsed=$$(($$(date +%s)-s))s"; \
-	echo "PHASE=lint start"; s=$$(date +%s); $(MAKE) lint; echo "PHASE=lint elapsed=$$(($$(date +%s)-s))s"; \
-	echo "PHASE=build-release start"; s=$$(date +%s); $(MAKE) build-release; echo "PHASE=build-release elapsed=$$(($$(date +%s)-s))s"; \
-	echo "PHASE=test-ci start"; s=$$(date +%s); $(MAKE) test-ci; echo "PHASE=test-ci elapsed=$$(($$(date +%s)-s))s"; \
-	total=$$(($$(date +%s) - t0)); \
-	echo "TOTAL=$${total}s goal=$(CI_GOAL_SECS)s (ci-full)"; \
-	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
-		if [ "$${total}" -gt "$(CI_GOAL_SECS)" ]; then \
-			echo "❌ ci-full wall clock $${total}s exceeds $(CI_GOAL_SECS)s goal"; \
-			exit 1; \
-		fi; \
-	fi; \
+	./scripts/slo.sh phase check-fmt -- $(MAKE) check-fmt; \
+	./scripts/slo.sh phase lint -- $(MAKE) lint; \
+	./scripts/slo.sh phase build-release -- $(MAKE) build-release; \
+	./scripts/slo.sh phase test-ci -- $(MAKE) test-ci; \
+	./scripts/slo.sh total ci-full $$(($$(date +%s) - t0)) $(CI_GOAL_SECS); \
 	echo "✅ CI checks completed!"
 
 # Release gate: same Make targets as CI + perf + publish (one job, no second compile).
@@ -317,19 +280,10 @@ ci-full:
 release:
 	@set -e; \
 	t0=$$(date +%s); \
-	$(MAKE) ci-full; \
-	echo "PHASE=test-perf start"; s=$$(date +%s); $(MAKE) test-perf; echo "PHASE=test-perf elapsed=$$(($$(date +%s)-s))s"; \
-	echo "PHASE=publish-docker start"; s=$$(date +%s); \
-	$(MAKE) publish-docker TAG="$(or $(TAG),latest)" TAG_LATEST="$(or $(TAG_LATEST),1)"; \
-	echo "PHASE=publish-docker elapsed=$$(($$(date +%s)-s))s"; \
-	total=$$(($$(date +%s) - t0)); \
-	echo "TOTAL=$${total}s goal=$(RELEASE_GOAL_SECS)s (release)"; \
-	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
-		if [ "$${total}" -gt "$(RELEASE_GOAL_SECS)" ]; then \
-			echo "❌ release wall clock $${total}s exceeds $(RELEASE_GOAL_SECS)s goal"; \
-			exit 1; \
-		fi; \
-	fi; \
+	./scripts/slo.sh phase ci-full -- $(MAKE) ci-full; \
+	./scripts/slo.sh phase test-perf -- $(MAKE) test-perf; \
+	./scripts/slo.sh phase publish-docker -- $(MAKE) publish-docker TAG="$(or $(TAG),latest)" TAG_LATEST="$(or $(TAG_LATEST),1)"; \
+	./scripts/slo.sh total release $$(($$(date +%s) - t0)) $(RELEASE_GOAL_SECS); \
 	echo "✅ release completed!"
 
 generate-telemetry:
