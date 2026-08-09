@@ -271,5 +271,9 @@ make lint
 make check-fmt
 ```
 
+CI on GitHub runs the same Make entry points (`make ci-full` after
+`make setup-local`; see `.github/workflows/ci.yml`). Performance suites are
+manual (`make test-perf` / `.github/workflows/performance.yml`).
+
 `make test` covers unit tests plus isolated MinIO/PostgreSQL integration
 tests. `make duckdb-shell` is the supported manual ATTACH smoke.

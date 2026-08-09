@@ -15,7 +15,10 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables publish-docker test-publish-tags
+.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-perf test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables publish-docker test-publish-tags ci-full
+
+# Prefer `docker compose` (Compose V2 plugin) when `docker-compose` is absent (GHA runners).
+COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
 # Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
 # tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
@@ -27,6 +30,9 @@ INTEGRATION_PERF_TESTS = \
 	performance::perf_union_read_concurrency \
 	performance::perf_union_read_latency \
 	performance::perf_view_recreate_stability
+
+# Optional filter for `make test-perf`: all | latency | concurrency | stability
+PERF_SUITE ?= all
 
 # Some DuckDB-heavy integration::ingest_commit_query tests can trigger process-level instability
 # when executed together in one test binary process. Run every ingest_commit_query test in an
@@ -49,6 +55,8 @@ help:
 	@echo "  make test-gcs        - Integration tests with GCS DuckLake data_path (+ integration-e2e)"
 	@echo "  make test-ci         - CI: MinIO+Postgres present → test-quick + integration-e2e; else test-quick only"
 	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no Docker)"
+	@echo "  make test-perf       - Performance suite only (PERF_SUITE=all|latency|concurrency|stability)"
+	@echo "  make ci-full         - check-fmt + lint + build + test-ci (GitHub Actions CI entry point)"
 	@echo ""
 	@echo "Deployment Testing:"
 	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
@@ -60,7 +68,7 @@ help:
 	@echo ""
 	@echo "Infrastructure:"
 	@echo "  make setup-local     - Start MinIO + DuckLake Postgres (required for make test)"
-	@echo "  make teardown-local  - Stop docker-compose stack in this directory"
+	@echo "  make teardown-local  - Stop Compose stack in this directory"
 	@echo "  make check-local          - Verify MinIO (required for integration tests)"
 	@echo "  make check-local-postgres - Verify DuckLake Postgres (required for make test / test-local)"
 	@echo "  make check-local-e2e      - Verify MinIO + Postgres"
@@ -95,11 +103,14 @@ build-release:
 # Official images: GitHub Release vX.Y.Z → .github/workflows/release.yml → this target.
 # Local/emergency: make publish-docker [TAG=vX.Y.Z] [TAG_LATEST=0]
 # TAG_LATEST=0 skips moving :latest (used for GitHub prereleases).
+# build.sh also read/writes Artifact Registry BuildKit cache tag :buildcache
+# (cargo-chef cook layers) so CI releases reuse dependency compile.
 publish-docker:
 	@echo "🔨 Publishing Docker image TAG=$(or $(TAG),latest) TAG_LATEST=$(or $(TAG_LATEST),1)..."
 	TAG_LATEST=$(or $(TAG_LATEST),1) ./build.sh $(or $(TAG),latest)
 
 # Guard: prerelease / TAG_LATEST=0 must not plan :latest (production pulls :latest).
+# Also assert BuildKit registry-cache argv (PRINT_BUILDX_ARGS; no docker).
 test-publish-tags:
 	@set -euo pipefail; \
 	out=$$(PRINT_TAGS=1 TAG_LATEST=0 ./build.sh v1.2.3-rc.1); \
@@ -111,6 +122,13 @@ test-publish-tags:
 	out=$$(PRINT_TAGS=1 ./build.sh latest); \
 	echo "$$out" | grep -qx '.*:latest'; \
 	test "$$(echo "$$out" | wc -l | tr -d ' ')" = "1"; \
+	args=$$(PRINT_BUILDX_ARGS=1 ./build.sh v1.2.3); \
+	echo "$$args" | grep -Fxq -- '--builder'; \
+	echo "$$args" | grep -Fxq -- 'thelake-builder'; \
+	echo "$$args" | grep -Fxq -- '--cache-from'; \
+	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache'; \
+	echo "$$args" | grep -Fxq -- '--cache-to'; \
+	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache,mode=max'; \
 	echo "✅ publish tag plan ok"
 
 # Code quality targets
@@ -135,7 +153,7 @@ clean:
 setup-local:
 	@echo "🚀 Starting local test infrastructure..."
 	@echo "📦 Starting MinIO and DuckLake Postgres..."
-	@docker-compose up -d minio ducklake-postgres
+	@$(COMPOSE) up -d minio ducklake-postgres
 	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
 	@echo "✅ Checking MinIO health..."
@@ -157,12 +175,12 @@ setup-local:
 
 teardown-local:
 	@echo "🛑 Stopping local test infrastructure..."
-	@docker-compose down
+	@$(COMPOSE) down
 	@echo "✅ Local infrastructure stopped"
 
 setup-minio:
 	@echo "🚀 Starting MinIO for DuckLake stress testing..."
-	@docker-compose up -d minio
+	@$(COMPOSE) up -d minio
 	@echo "⏳ Waiting for MinIO health..."
 	@sleep 3
 	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
@@ -175,8 +193,8 @@ setup-minio:
 
 teardown-minio:
 	@echo "🛑 Stopping MinIO stress-test infrastructure..."
-	@docker-compose stop minio > /dev/null 2>&1 || true
-	@docker-compose rm -f minio > /dev/null 2>&1 || true
+	@$(COMPOSE) stop minio > /dev/null 2>&1 || true
+	@$(COMPOSE) rm -f minio > /dev/null 2>&1 || true
 	@echo "✅ MinIO infrastructure stopped"
 
 check-minio:
@@ -287,6 +305,28 @@ test-ci:
 		echo "   (pre-merge bar is make test with both services — run make setup-local)"; \
 		$(MAKE) test-quick; \
 	fi
+
+# Performance-only suite (manual CI / local). Requires MinIO + DuckLake Postgres.
+# PERF_SUITE=all|latency|concurrency|stability
+test-perf: check-local-e2e
+	@echo "🧪 Running performance tests (PERF_SUITE=$(PERF_SUITE))..."
+	@echo "📝 Configuration: tests/config/test.yaml"
+	@set -e; \
+	case "$(PERF_SUITE)" in \
+		all) tests="$(INTEGRATION_PERF_TESTS)" ;; \
+		latency) tests="performance::perf_union_read_latency" ;; \
+		concurrency) tests="performance::perf_union_read_concurrency" ;; \
+		stability) tests="performance::perf_view_recreate_stability" ;; \
+		*) echo "❌ Unknown PERF_SUITE=$(PERF_SUITE) (use all|latency|concurrency|stability)"; exit 1 ;; \
+	esac; \
+	export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
+	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
+	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
+	for test_name in $$tests; do \
+		echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
+		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
+	done; \
+	echo "✅ Performance tests completed!"
 
 test-all: test-quick test-local
 	@echo "✅ All tests completed!"

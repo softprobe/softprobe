@@ -1,0 +1,59 @@
+name: Performance Tests
+
+# Manual only — not part of the PR/main CI gate.
+# Local equivalent: make setup-local && make test-perf [PERF_SUITE=…]
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Performance suite filter (PERF_SUITE)"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - latency
+          - concurrency
+          - stability
+
+jobs:
+  performance:
+    name: Performance (${{ inputs.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-perf-
+            ${{ runner.os }}-cargo-
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep curl
+
+      - name: Start local test infra
+        run: make setup-local
+
+      - name: Run performance suite
+        run: make test-perf PERF_SUITE=${{ inputs.suite }}
+
+      - name: Teardown local infra
+        if: always()
+        run: make teardown-local

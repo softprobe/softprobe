@@ -71,6 +71,14 @@ make teardown-local
 `make test` is the pre-merge test target. It runs unit tests and isolated
 integration tests against MinIO and PostgreSQL.
 
+GitHub Actions:
+
+- `.github/workflows/ci.yml` — on push/PR: `make setup-local` then `make ci-full`
+  (`check-fmt`, `lint`, `build`, `test-ci`)
+- `.github/workflows/performance.yml` — **manual** only: `make test-perf`
+  (`PERF_SUITE=all|latency|concurrency|stability`)
+- `.github/workflows/release.yml` — on GitHub Release: `make publish-docker`
+
 ## Run
 
 ```bash
@@ -198,6 +206,25 @@ scope:
 - prune optional dropdown-catalog values.
 
 Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
+
+## Publish Docker image
+
+Official images are built on GitHub Release publish via
+`.github/workflows/release.yml` → `make publish-docker` → `./build.sh`.
+
+Local/emergency publishes use the same entry point (`make publish-docker
+TAG=vX.Y.Z`). The script:
+
+- pushes product tags to Artifact Registry (`…/softprobe/splake:TAG`, and
+  `:latest` unless `TAG_LATEST=0`);
+- reads/writes BuildKit registry cache at `…/softprobe/splake:buildcache`
+  (`mode=max`, so cargo-chef cook layers survive ephemeral CI runners);
+- creates/uses a `docker-container` Buildx builder named `thelake-builder`
+  (required for registry cache export; the default `docker` driver cannot).
+
+`:buildcache` is a cache artifact only — do not deploy it as a runtime image.
+A failed cache push fails the whole publish (same GCP auth as the product
+image push).
 
 ## License
 
