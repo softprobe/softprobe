@@ -69,15 +69,16 @@ make teardown-local
 ```
 
 `make test` is the pre-merge test target. It runs unit tests and isolated
-integration tests against MinIO and PostgreSQL.
+integration tests against MinIO and PostgreSQL (performance is separate).
 
-GitHub Actions:
+GitHub Actions (self-hosted Linux; Make-only):
 
 - `.github/workflows/ci.yml` — on push/PR: `make setup-local` then `make ci-full`
-  (`check-fmt`, `lint`, `build`, `test-ci`)
+  (`check-fmt`, `lint`, `build-release` → `dist/`, `test-ci`). Warm SLO ≤ 15m.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
-  (`PERF_SUITE=all|latency|concurrency|stability`)
-- `.github/workflows/release.yml` — on GitHub Release: `make publish-docker`
+  (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
+- `.github/workflows/release.yml` — on GitHub Release: `make release`
+  (`ci-full` + `test-perf` + `publish-docker`). Warm SLO ≤ 25m.
 
 ## Run
 
@@ -209,23 +210,18 @@ Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
 
 ## Publish Docker image
 
-Official images are built on GitHub Release publish via
-`.github/workflows/release.yml` → `make publish-docker` → `./build.sh`.
+Product bits are built **once on the host** (`make build-release` → cargo-chef +
+`cargo build --release --locked` → `dist/`). The Dockerfile is packaging-only
+(`COPY dist/…`); it never runs cargo.
 
-Local/emergency publishes use the same entry point (`make publish-docker
-TAG=vX.Y.Z`). The script:
+Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
+(same `ci-full` + `test-perf` + `publish-docker` as local).
 
-- pushes product tags to Artifact Registry (`…/softprobe/splake:TAG`, and
-  `:latest` unless `TAG_LATEST=0`);
-- reads/writes BuildKit registry cache at `…/softprobe/splake:buildcache`
-  (`mode=max`, so cargo-chef cook layers survive ephemeral CI runners);
-- creates/uses a `docker-container` Buildx builder when the current one cannot
-  export registry cache (local Docker default driver). CI reuses the
-  `docker-container` builder from `setup-buildx-action`.
-
-`:buildcache` is a cache artifact only — do not deploy it as a runtime image.
-A failed cache push fails the whole publish (same GCP auth as the product
-image push).
+Local/emergency image push: `make build-release && make publish-docker TAG=vX.Y.Z`
+(on Mac, `build-release` uses a linux/amd64 builder container running the same
+script). `build.sh` only tags/pushes; it refuses to run without a complete
+`dist/`. Optional BuildKit registry cache (`…/splake:buildcache`) speeds base
+layers only — do not deploy `:buildcache` as a runtime image.
 
 ## License
 

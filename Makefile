@@ -1,116 +1,129 @@
 # SoftProbe OTLP Backend - Test & Development Makefile
 #
-# This Makefile provides convenient targets for running tests across different environments:
-# - Local development with MinIO
-# - Cloudflare R2 cloud testing
-# - CI/CD environments
+# Canonical product bits: make build-release → dist/ (cargo-chef + --release --locked).
+# Docker/image packaging never compiles Rust — it COPY's dist/ only.
+#
+# Timing SLOs (warm self-hosted Linux):
+#   ci-full  ≤ 15m (900s)   workflow timeout 20m
+#   test-perf ≤ 8m (480s)   workflow timeout 15m
+#   release  ≤ 25m (1500s)  workflow timeout 35m
 #
 # Usage:
-#   make test           - Unit tests + full local integration (MinIO + Postgres; integration-e2e)
-#   make test-smoke     - Alias of test-quick (library + lightweight tests/tests.rs)
-#   make test-local     - Full integration only (MinIO + Postgres + integration-e2e)
-#   make test-r2        - Integration tests with Cloudflare R2
-#   make test-ci        - CI: MinIO+Postgres → lib + integration-e2e; else lib only
-#   make setup-local    - Start MinIO + DuckLake Postgres (required for make test)
-#   make teardown-local - Stop local test infrastructure
-#   make clean          - Clean build artifacts
+#   make setup-local && make ci-full
+#   make test-perf
+#   make build-release && make package-image
+#   make release   # ci-full + test-perf + publish-docker
 
-.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-perf test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables publish-docker test-publish-tags ci-full
+.PHONY: help test test-all test-local test-smoke test-quick test-r2 test-gcs test-ci test-perf \
+	test-gcp test-gcp-stress test-deployment-local test-deployment-stress \
+	stress-test stress-test-r2-ducklake stress-test-gcs-ducklake \
+	setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres check-local-e2e \
+	clean build build-release package-image publish-docker test-publish-tags \
+	lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables \
+	ci-full release doctor-ci help-scripts ensure-python-requests
 
-# Prefer `docker compose` (Compose V2 plugin) when `docker-compose` is absent (GHA runners).
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
-# Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
-# tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
-# setup/teardown in a single test binary.
 INTEGRATION_E2E_FEATURE = --features integration-e2e
 INTEGRATION_E2E_TESTS = --test tests
-INTEGRATION_E2E_FLAGS = $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS)
 INTEGRATION_PERF_TESTS = \
 	performance::perf_union_read_concurrency \
 	performance::perf_union_read_latency \
 	performance::perf_view_recreate_stability
 
-# Optional filter for `make test-perf`: all | latency | concurrency | stability
 PERF_SUITE ?= all
+# Performance quality bar (do not raise to hide regressions).
+export PERF_TARGET_MS ?= 1000
+export PERF_CONCURRENCY ?= 8
+export PERF_EVENTS_PER_SESSION ?= 1000
 
-# Some DuckDB-heavy integration::ingest_commit_query tests can trigger process-level instability
-# when executed together in one test binary process. Run every ingest_commit_query test in an
-# isolated cargo invocation.
-INTEGRATION_ISOLATED_TEST_PREFIX = integration::ingest_commit_query::
+# Wall-clock SLO goals (seconds). Enforced when CI=true or ENFORCE_SLO=1.
+CI_GOAL_SECS ?= 900
+PERF_GOAL_SECS ?= 480
+RELEASE_GOAL_SECS ?= 1500
 
-# Ensure libduckdb is fetched when not present on host.
-# Can be overridden by callers: `DUCKDB_DOWNLOAD_LIB=0 make build`
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
-# Default target
+# ---- timing helpers ----
+# Usage: $(call phase,name,command...)
+define phase
+	@start=$$(date +%s); \
+	echo "PHASE=$(1) start"; \
+	$(2); \
+	end=$$(date +%s); \
+	elapsed=$$((end - start)); \
+	echo "PHASE=$(1) elapsed=$${elapsed}s"
+endef
+
+define enforce_slo
+	@total=$(1); goal=$(2); label=$(3); \
+	echo "TOTAL=$${total}s goal=$${goal}s ($${label})"; \
+	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
+		if [ "$${total}" -gt "$${goal}" ]; then \
+			echo "❌ $${label} wall clock $${total}s exceeds $${goal}s goal"; \
+			exit 1; \
+		fi; \
+	fi
+endef
+
 help:
 	@echo "SoftProbe OTLP Backend - Testing & Development"
 	@echo ""
+	@echo "Build (host-first; image never runs cargo):"
+	@echo "  make build            - Debug build (day-to-day)"
+	@echo "  make build-release    - cargo-chef + release --locked → dist/"
+	@echo "  make package-image    - docker build from dist/ (local load)"
+	@echo "  make publish-docker   - build-release if needed + push (TAG= TAG_LATEST=)"
+	@echo "  make release          - ci-full + test-perf + publish-docker"
+	@echo ""
 	@echo "Test Targets:"
-	@echo "  make test            - Unit tests + full local integration (MinIO + Postgres + integration-e2e)"
-	@echo "  make test-all        - Same as make test"
-	@echo "  make test-local      - Full integration only (MinIO + Postgres + integration-e2e)"
-	@echo "  make test-r2         - Integration tests with Cloudflare R2 (+ integration-e2e)"
-	@echo "  make test-gcs        - Integration tests with GCS DuckLake data_path (+ integration-e2e)"
-	@echo "  make test-ci         - CI: MinIO+Postgres present → test-quick + integration-e2e; else test-quick only"
-	@echo "  make test-quick      - Library unit tests + tests/tests.rs (no integration-e2e; no Docker)"
-	@echo "  make test-perf       - Performance suite only (PERF_SUITE=all|latency|concurrency|stability)"
-	@echo "  make ci-full         - check-fmt + lint + build + test-ci (GitHub Actions CI entry point)"
+	@echo "  make test / test-all  - test-quick + test-local (no perf)"
+	@echo "  make test-smoke       - Alias of test-quick"
+	@echo "  make test-local       - Isolated integration-e2e (MinIO + Postgres)"
+	@echo "  make test-perf        - Performance suite only (PERF_SUITE=all|latency|concurrency|stability)"
+	@echo "  make test-ci          - CI tests (fails if infra missing when CI=true)"
+	@echo "  make ci-full          - fmt + lint + build-release + test-ci (≤15m warm SLO)"
 	@echo ""
-	@echo "Deployment Testing:"
-	@echo "  make test-gcp              - Test GCP deployment (https://i.softprobe.ai)"
-	@echo "  make test-gcp-stress       - Stress test GCP with 10K+ spans"
-	@echo "  make stress-test-gcs-ducklake - Local DuckLake stress against GCS bucket"
-	@echo "  make stress-test-r2-ducklake - Stress test DuckLake on Cloudflare R2"
-	@echo "  make test-deployment-local - Test local deployment via Python script"
-	@echo "  make test-deployment-stress - Stress test local with large dataset"
+	@echo "Infrastructure: setup-local / teardown-local / doctor-ci"
+	@echo "Stress: make stress-test BACKEND=local|r2|gcs  (aliases: stress-test-r2-ducklake, …)"
 	@echo ""
-	@echo "Infrastructure:"
-	@echo "  make setup-local     - Start MinIO + DuckLake Postgres (required for make test)"
-	@echo "  make teardown-local  - Stop Compose stack in this directory"
-	@echo "  make check-local          - Verify MinIO (required for integration tests)"
-	@echo "  make check-local-postgres - Verify DuckLake Postgres (required for make test / test-local)"
-	@echo "  make check-local-e2e      - Verify MinIO + Postgres"
-	@echo ""
-	@echo "Data & Verification:"
-	@echo "  make generate-telemetry - Generate demo OTLP data"
-	@echo "  make test-all / test-local - Automated ingest + DuckLake coverage (see repo e2e README)"
-	@echo "  make demo-session    - Run session query demo"
-	@echo "  make duckdb-shell    - Launch DuckDB against local DuckLake (attach smoke runs first)"
-	@echo "  make drop-tables     - Drop DuckLake telemetry tables (traces/logs/metrics)"
-	@echo ""
-	@echo "Development:"
-	@echo "  make build           - Build the project"
-	@echo "  make lint            - Run clippy lints"
-	@echo "  make fmt             - Format code"
-	@echo "  make check-fmt       - Check code formatting"
-	@echo "  make clean           - Clean build artifacts"
-	@echo ""
-	@echo "Script Helpers:"
-	@echo "  make help-scripts    - List script-backed targets"
-	@echo ""
+
+doctor-ci:
+	@set -e; \
+	missing=0; \
+	for c in cargo rustc docker curl rg clang; do \
+		if ! command -v $$c >/dev/null 2>&1; then echo "❌ missing: $$c"; missing=1; fi; \
+	done; \
+	if ! command -v mold >/dev/null 2>&1; then echo "⚠️  mold not found (linux rustflags may fail)"; fi; \
+	if ! docker info >/dev/null 2>&1; then echo "❌ docker not usable"; missing=1; fi; \
+	if [ "$$missing" -ne 0 ]; then exit 1; fi; \
+	echo "✅ doctor-ci ok"
 
 # Build targets
 build:
-	@echo "🔨 Building project..."
-	cargo build
+	@echo "🔨 Building debug..."
+	cargo build --locked
 
 build-release:
-	@echo "🔨 Building release..."
-	cargo build --release
+	@echo "🔨 Building release → dist/ (cargo-chef + --locked)..."
+	./scripts/build-release.sh
 
-# Official images: GitHub Release vX.Y.Z → .github/workflows/release.yml → this target.
-# Local/emergency: make publish-docker [TAG=vX.Y.Z] [TAG_LATEST=0]
-# TAG_LATEST=0 skips moving :latest (used for GitHub prereleases).
-# build.sh also read/writes Artifact Registry BuildKit cache tag :buildcache
-# (cargo-chef cook layers) so CI releases reuse dependency compile.
-publish-docker:
+ensure-dist:
+	@test -x dist/softprobe-runtime -a -f dist/config.yaml || $(MAKE) build-release
+	@if [ ! -f dist/libduckdb.so ]; then \
+		echo "📦 dist/ lacks libduckdb.so — rebuilding for linux/amd64 (image packaging)..."; \
+		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
+	fi
+
+package-image: ensure-dist
+	@echo "🐳 Packaging image from dist/ (no cargo in Docker)..."
+	docker build -t softprobe/splake:local .
+
+# Official images: GitHub Release → release.yml → make release / publish-docker.
+publish-docker: ensure-dist
 	@echo "🔨 Publishing Docker image TAG=$(or $(TAG),latest) TAG_LATEST=$(or $(TAG_LATEST),1)..."
 	TAG_LATEST=$(or $(TAG_LATEST),1) ./build.sh $(or $(TAG),latest)
 
-# Guard: prerelease / TAG_LATEST=0 must not plan :latest (production pulls :latest).
-# Also assert BuildKit registry-cache argv (PRINT_BUILDX_ARGS; no docker).
 test-publish-tags:
 	@set -euo pipefail; \
 	out=$$(PRINT_TAGS=1 TAG_LATEST=0 ./build.sh v1.2.3-rc.1); \
@@ -131,114 +144,79 @@ test-publish-tags:
 	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache,mode=max'; \
 	echo "✅ publish tag plan ok"
 
-# Code quality targets
 lint:
 	@echo "🔍 Running clippy..."
-	# Product surfaces only — tooling bins like perf_stress stay out of the -D warnings gate.
 	cargo clippy --lib --bin softprobe-runtime -- -D warnings
 
 fmt:
-	@echo "✨ Formatting code..."
 	cargo fmt
 
 check-fmt:
-	@echo "🔍 Checking code formatting..."
 	cargo fmt -- --check
 
 clean:
-	@echo "🧹 Cleaning build artifacts..."
 	cargo clean
-	rm -rf target/
+	rm -rf target/ dist/ recipe.json .cargo-linux/
 
-# Local infrastructure management
+# Local infrastructure
 setup-local:
-	@echo "🚀 Starting local test infrastructure..."
-	@echo "📦 Starting MinIO and DuckLake Postgres..."
+	@echo "🚀 Starting MinIO + DuckLake Postgres..."
 	@$(COMPOSE) up -d minio ducklake-postgres
-	@echo "⏳ Waiting for services to be healthy..."
 	@sleep 5
-	@echo "✅ Checking MinIO health..."
 	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
-	@echo "🪣 Creating MinIO bucket 'warehouse'..."
-	@docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin > /dev/null 2>&1 || true
-	@docker exec minio mc mb local/warehouse > /dev/null 2>&1 || \
-		(docker exec minio mc ls local/warehouse > /dev/null 2>&1 && echo "✅ Bucket 'warehouse' already exists") || \
-		(echo "❌ Failed to create or verify bucket 'warehouse'" && exit 1)
-	@echo "✅ Bucket 'warehouse' is ready"
-	@echo "🦆 Checking DuckLake Postgres health..."
+	@$(MAKE) --no-print-directory _minio-bucket
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "❌ DuckLake Postgres not ready" && exit 1)
-	@echo "✅ Local test infrastructure is ready!"
-	@echo ""
-	@echo "Services available:"
-	@echo "  - MinIO Console: http://localhost:9001 (minioadmin/minioadmin)"
-	@echo "  - MinIO API: http://localhost:9000"
-	@echo "  - DuckLake catalog DB: postgres://ducklake@localhost:5432/ducklake"
+	@echo "✅ Local test infrastructure is ready"
 
 teardown-local:
-	@echo "🛑 Stopping local test infrastructure..."
 	@$(COMPOSE) down
 	@echo "✅ Local infrastructure stopped"
 
-setup-minio:
-	@echo "🚀 Starting MinIO for DuckLake stress testing..."
-	@$(COMPOSE) up -d minio
-	@echo "⏳ Waiting for MinIO health..."
-	@sleep 3
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
-	@echo "🪣 Creating MinIO bucket 'warehouse'..."
+_minio-bucket:
 	@docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin > /dev/null 2>&1 || true
 	@docker exec minio mc mb local/warehouse > /dev/null 2>&1 || \
 		(docker exec minio mc ls local/warehouse > /dev/null 2>&1 && echo "✅ Bucket 'warehouse' already exists") || \
 		(echo "❌ Failed to create or verify bucket 'warehouse'" && exit 1)
-	@echo "✅ MinIO is ready for stress testing"
+
+setup-minio:
+	@$(COMPOSE) up -d minio
+	@sleep 3
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "❌ MinIO not ready" && exit 1)
+	@$(MAKE) --no-print-directory _minio-bucket
+	@echo "✅ MinIO is ready"
 
 teardown-minio:
-	@echo "🛑 Stopping MinIO stress-test infrastructure..."
 	@$(COMPOSE) stop minio > /dev/null 2>&1 || true
 	@$(COMPOSE) rm -f minio > /dev/null 2>&1 || true
-	@echo "✅ MinIO infrastructure stopped"
 
 check-minio:
-	@echo "🔍 Checking MinIO..."
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-minio')" && exit 1)
+	@curl -sf http://localhost:9000/minio/health/live > /dev/null && echo "✅ MinIO is running" || (echo "❌ MinIO is not running (run 'make setup-local')" && exit 1)
 
 check-local: check-minio
-	@echo "✅ MinIO prerequisites satisfied"
 
 check-local-postgres:
-	@echo "🔍 Checking DuckLake Postgres..."
 	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 && echo "✅ DuckLake Postgres is running" || (echo "❌ DuckLake Postgres is not running (run 'make setup-local')" && exit 1)
 
 check-local-e2e: check-local check-local-postgres
 	@echo "✅ Local e2e prerequisites satisfied (MinIO + DuckLake Postgres)"
 
-# Test targets
-# Single cargo run: #[cfg(test)] in src/ plus the default integration crate tests/tests.rs
-# (modules gated behind integration-e2e are skipped unless that feature is enabled).
+# ---- tests ----
 test-quick:
-	@echo "🧪 Running library + lightweight integration tests (no integration-e2e)..."
+	@echo "🧪 Library + lightweight tests (no integration-e2e)..."
 	cargo test --lib --test tests -- --test-threads=1
 
+test-smoke: test-quick
+
 test-local: check-local-e2e
-	@echo "🧪 Running full integration tests with MinIO + DuckLake Postgres (integration-e2e)..."
-	@echo "📝 Configuration: tests/config/test.yaml"
-	@echo "🗄️  Backend: MinIO :9000 + Postgres catalog (ducklake-postgres)"
-	@echo ""
+	@echo "🧪 Isolated integration-e2e (no perf — use make test-perf)..."
 	@export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
 	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
-	for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
-		echo "🧪 Running integration $$test_name in an isolated process..."; \
-		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-	done; \
-	for test_name in $(INTEGRATION_PERF_TESTS); do \
-		echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-	done
+	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
+	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-gcs: check-local-e2e
-	@echo "🧪 Running integration tests with GCS object store..."
-	@echo "📝 Configuration: tests/config/test-gcs.yaml"
+	@echo "🧪 Isolated integration-e2e on GCS..."
 	@set -e; \
 		: "$${GCS_HMAC_ACCESS_KEY_ID:?Set GCS_HMAC_ACCESS_KEY_ID}"; \
 		: "$${GCS_HMAC_SECRET:?Set GCS_HMAC_SECRET}"; \
@@ -249,103 +227,111 @@ test-gcs: check-local-e2e
 		export GCS_BUCKET GCS_HMAC_ACCESS_KEY_ID GCS_HMAC_SECRET GCS_E2E_PREFIX; \
 		export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
 		export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
-		export PERF_TARGET_MS=$${PERF_TARGET_MS:-3000}; \
+		export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs; \
 		trap 'echo "🧹 Cleaning GCS prefix $$GCS_E2E_PREFIX"; gcloud storage rm -r "$$GCS_E2E_PREFIX"** >/dev/null 2>&1 || gcloud storage rm -r "$$GCS_E2E_PREFIX" >/dev/null 2>&1 || true' EXIT; \
-		for test_name in $$(SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) -- --list 2>/dev/null | rg "^integration::" | awk '{name=$$1; sub(/:$$/, "", name); print name}'); do \
-			echo "🧪 Running integration $$test_name in an isolated process..."; \
-			SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-		done; \
-		for test_name in $(INTEGRATION_PERF_TESTS); do \
-			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-			SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-		done
+		./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-r2:
-	@echo "🧪 Running integration tests with Cloudflare R2..."
-	@echo "📝 Configuration: tests/config/test-r2.yaml"
-	@echo "☁️  Backend: Cloudflare R2 (S3-compatible DuckLake data_path)"
-	@echo "⚠️  Note: Requires AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and a real R2 endpoint/bucket"
-	@echo ""
-	@if [ -z "$$E2E_DISABLE_TLS_VALIDATION" ]; then \
-		echo "🔒 Detecting environment..."; \
-		if curl -sf https://www.google.com > /dev/null 2>&1; then \
-			echo "✅ Direct internet access available"; \
-			E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
-			for test_name in $(INTEGRATION_PERF_TESTS); do \
-				echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-				E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-			done; \
-		else \
-			echo "⚠️  Detected restricted/sandboxed environment"; \
-			echo "⚠️  Enabling TLS validation bypass for testing"; \
-			E2E_DISABLE_TLS_VALIDATION=1 E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
-			for test_name in $(INTEGRATION_PERF_TESTS); do \
-				echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-				E2E_DISABLE_TLS_VALIDATION=1 E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-			done; \
-		fi \
-	else \
-		echo "🔓 TLS validation bypass already enabled"; \
-		E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FLAGS) -- --test-threads=1 --nocapture && \
-		for test_name in $(INTEGRATION_PERF_TESTS); do \
-			echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-			E2E_BACKEND=r2 cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-		done; \
-	fi
+	@echo "🧪 Isolated integration-e2e on R2..."
+	@set -e; \
+	export E2E_BACKEND=r2; \
+	if [ -z "$${E2E_DISABLE_TLS_VALIDATION:-}" ]; then \
+		if ! curl -sf https://www.google.com > /dev/null 2>&1; then \
+			export E2E_DISABLE_TLS_VALIDATION=1; \
+			echo "⚠️  Enabling TLS validation bypass"; \
+		fi; \
+	fi; \
+	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-ci:
-	@echo "🧪 Running tests in CI environment..."
-	@echo "🔍 Auto-detecting environment and requirements..."
+	@echo "🧪 Running tests (CI=$${CI:-false})..."
 	@if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 \
 		&& docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1; then \
 		echo "✅ MinIO + DuckLake Postgres detected"; \
 		$(MAKE) test-quick; \
 		$(MAKE) test-local; \
 	else \
-		echo "⚠️  MinIO and/or DuckLake Postgres missing; running test-quick only"; \
-		echo "   (pre-merge bar is make test with both services — run make setup-local)"; \
+		if [ "$${CI:-}" = "true" ]; then \
+			echo "❌ MinIO and/or DuckLake Postgres missing in CI — run make setup-local first"; \
+			exit 1; \
+		fi; \
+		echo "⚠️  Infra missing; running test-quick only (local). Pre-merge bar: make setup-local && make test"; \
 		$(MAKE) test-quick; \
 	fi
 
-# Performance-only suite (manual CI / local). Requires MinIO + DuckLake Postgres.
-# PERF_SUITE=all|latency|concurrency|stability
 test-perf: check-local-e2e
-	@echo "🧪 Running performance tests (PERF_SUITE=$(PERF_SUITE))..."
-	@echo "📝 Configuration: tests/config/test.yaml"
+	@echo "🧪 Performance suite PERF_SUITE=$(PERF_SUITE) PERF_TARGET_MS=$${PERF_TARGET_MS}..."
 	@set -e; \
+	t0=$$(date +%s); \
 	case "$(PERF_SUITE)" in \
 		all) tests="$(INTEGRATION_PERF_TESTS)" ;; \
 		latency) tests="performance::perf_union_read_latency" ;; \
 		concurrency) tests="performance::perf_union_read_concurrency" ;; \
 		stability) tests="performance::perf_view_recreate_stability" ;; \
-		*) echo "❌ Unknown PERF_SUITE=$(PERF_SUITE) (use all|latency|concurrency|stability)"; exit 1 ;; \
+		*) echo "❌ Unknown PERF_SUITE=$(PERF_SUITE)"; exit 1 ;; \
 	esac; \
 	export AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin}; \
 	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
-	for test_name in $$tests; do \
-		echo "🧪 Running integration_perf $$test_name in an isolated process..."; \
-		SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local cargo test $(INTEGRATION_E2E_FEATURE) --test integration_perf $$test_name -- --test-threads=1 --nocapture || exit $$?; \
-	done; \
+	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
+	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
+	t1=$$(date +%s); \
+	total=$$((t1 - t0)); \
+	echo "TOTAL=$${total}s goal=$(PERF_GOAL_SECS)s (test-perf)"; \
+	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
+		if [ "$${total}" -gt "$(PERF_GOAL_SECS)" ]; then \
+			echo "❌ test-perf wall clock $${total}s exceeds $(PERF_GOAL_SECS)s goal"; \
+			exit 1; \
+		fi; \
+	fi; \
 	echo "✅ Performance tests completed!"
 
 test-all: test-quick test-local
 	@echo "✅ All tests completed!"
 
-# Default pre-merge check: lib + full integration (requires MinIO + DuckLake Postgres).
 test: test-all
 
-.PHONY: check-local-e2e
-
-# Development workflow
 dev-check: check-fmt lint test-quick
 	@echo "✅ Development checks passed!"
 
-# Continuous Integration full check
-ci-full: check-fmt lint build test-ci
-	@echo "✅ CI checks completed!"
+# Continuous Integration: release bits + tests (no perf).
+ci-full:
+	@set -e; \
+	t0=$$(date +%s); \
+	echo "PHASE=check-fmt start"; s=$$(date +%s); $(MAKE) check-fmt; echo "PHASE=check-fmt elapsed=$$(($$(date +%s)-s))s"; \
+	echo "PHASE=lint start"; s=$$(date +%s); $(MAKE) lint; echo "PHASE=lint elapsed=$$(($$(date +%s)-s))s"; \
+	echo "PHASE=build-release start"; s=$$(date +%s); $(MAKE) build-release; echo "PHASE=build-release elapsed=$$(($$(date +%s)-s))s"; \
+	echo "PHASE=test-ci start"; s=$$(date +%s); $(MAKE) test-ci; echo "PHASE=test-ci elapsed=$$(($$(date +%s)-s))s"; \
+	total=$$(($$(date +%s) - t0)); \
+	echo "TOTAL=$${total}s goal=$(CI_GOAL_SECS)s (ci-full)"; \
+	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
+		if [ "$${total}" -gt "$(CI_GOAL_SECS)" ]; then \
+			echo "❌ ci-full wall clock $${total}s exceeds $(CI_GOAL_SECS)s goal"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "✅ CI checks completed!"
 
-# Data & verification helpers
+# Release gate: same Make targets as CI + perf + publish (one job, no second compile).
+# Pass TAG= / TAG_LATEST= through to publish-docker.
+release:
+	@set -e; \
+	t0=$$(date +%s); \
+	$(MAKE) ci-full; \
+	echo "PHASE=test-perf start"; s=$$(date +%s); $(MAKE) test-perf; echo "PHASE=test-perf elapsed=$$(($$(date +%s)-s))s"; \
+	echo "PHASE=publish-docker start"; s=$$(date +%s); \
+	$(MAKE) publish-docker TAG="$(or $(TAG),latest)" TAG_LATEST="$(or $(TAG_LATEST),1)"; \
+	echo "PHASE=publish-docker elapsed=$$(($$(date +%s)-s))s"; \
+	total=$$(($$(date +%s) - t0)); \
+	echo "TOTAL=$${total}s goal=$(RELEASE_GOAL_SECS)s (release)"; \
+	if [ "$${CI:-}" = "true" ] || [ "$${ENFORCE_SLO:-0}" = "1" ]; then \
+		if [ "$${total}" -gt "$(RELEASE_GOAL_SECS)" ]; then \
+			echo "❌ release wall clock $${total}s exceeds $(RELEASE_GOAL_SECS)s goal"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "✅ release completed!"
+
 generate-telemetry:
 	@python3 scripts/generate_telemetry.py
 
@@ -359,208 +345,30 @@ drop-tables:
 	@./scripts/drop_all_tables.sh
 
 help-scripts:
-	@echo "Script-backed targets:"
-	@echo "  make generate-telemetry"
-	@echo "  make demo-session"
-	@echo "  make duckdb-shell"
-	@echo "  make drop-tables"
+	@echo "Script-backed: generate-telemetry demo-session duckdb-shell drop-tables stress-test build-release"
 
-# GCP Deployment Testing
-test-gcp:
-	@echo "🌐 Testing GCP deployment at https://i.softprobe.ai..."
-	@echo "⚠️  This tests the production deployment"
-	@echo ""
-	@if ! command -v python3 >/dev/null 2>&1; then \
-		echo "❌ Python 3 is required. Please install python3."; \
-		exit 1; \
-	fi
-	@if ! python3 -c "import requests" 2>/dev/null; then \
-		echo "📦 Installing requests library..."; \
-		uv pip install --user requests || uv pip install requests; \
-	fi
-	@python test_deployment.py --env gcp
+ensure-python-requests:
+	@command -v python3 >/dev/null 2>&1 || (echo "❌ Python 3 required" && exit 1)
+	@python3 -c "import requests" 2>/dev/null || pip3 install --user requests || pip3 install requests
 
-test-gcp-stress:
-	@echo "🌐 Stress testing GCP deployment with 10K+ spans..."
-	@echo "⚠️  This will trigger buffer flush on production"
-	@echo ""
-	@if ! command -v python3 >/dev/null 2>&1; then \
-		echo "❌ Python 3 is required. Please install python3."; \
-		exit 1; \
-	fi
-	@if ! python3 -c "import requests" 2>/dev/null; then \
-		echo "📦 Installing requests library..."; \
-		pip3 install --user requests || pip3 install requests; \
-	fi
+test-gcp: ensure-python-requests
+	@python3 test_deployment.py --env gcp
+
+test-gcp-stress: ensure-python-requests
 	@python3 test_deployment.py --env gcp --span-count 10000 --session-count 100
 
-test-deployment-local: check-local
-	@echo "🧪 Testing local deployment via Python script..."
-	@if ! command -v python3 >/dev/null 2>&1; then \
-		echo "❌ Python 3 is required. Please install python3."; \
-		exit 1; \
-	fi
-	@if ! python3 -c "import requests" 2>/dev/null; then \
-		echo "📦 Installing requests library..."; \
-		pip3 install --user requests || pip3 install requests; \
-	fi
+test-deployment-local: check-local ensure-python-requests
 	@python3 test_deployment.py --env local
 
-test-deployment-stress: check-local
-	@echo "🧪 Stress testing local deployment with large dataset..."
-	@if ! command -v python3 >/dev/null 2>&1; then \
-		echo "❌ Python 3 is required. Please install python3."; \
-		exit 1; \
-	fi
-	@if ! python3 -c "import requests" 2>/dev/null; then \
-		echo "📦 Installing requests library..."; \
-		pip3 install --user requests || pip3 install requests; \
-	fi
+test-deployment-stress: check-local ensure-python-requests
 	@python3 test_deployment.py --env local --span-count 20000
 
-stress-test: setup-minio
-	@echo "🧪 Stress testing local deployment via perf_stress..."
-	@set -e; \
-		PORT=38090; \
-		TMP_CONFIG=/tmp/splake-stress.yaml; \
-		sed "s/port: 8090/port: $$PORT/" config.yaml > $$TMP_CONFIG; \
-		echo "🚀 Starting splake on port $$PORT..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin softprobe-runtime > /tmp/splake-stress.log 2>&1 & \
-		SPLAKE_PID=$$!; \
-		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; $(MAKE) teardown-minio >/dev/null 2>&1 || true' EXIT; \
-		for i in 1 2 3 4 5 6 7 8 9 10; do \
-			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-stress.log; exit 1); \
-		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
-		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
-		trap - EXIT
-	@$(MAKE) teardown-minio
+# Unified stress (BACKEND=local|r2|gcs). Legacy aliases keep old Make target names.
+stress-test:
+	BACKEND=$(or $(BACKEND),local) ./scripts/stress-test.sh
 
 stress-test-r2-ducklake:
-	@echo "☁️  Stress testing DuckLake with Cloudflare R2 object storage..."
-	@set -e; \
-		R2_CONFIG=$${R2_CONFIG:-tests/config/test-r2.yaml}; \
-		PORT=$${PORT:-38091}; \
-		if [ ! -f "$$R2_CONFIG" ]; then \
-			echo "❌ R2 config file not found: $$R2_CONFIG"; \
-			exit 1; \
-		fi; \
-		if ! rg -n "^ducklake:\\s*$$" "$$R2_CONFIG" >/dev/null; then \
-			echo "❌ $$R2_CONFIG is missing required ducklake: block."; \
-			exit 1; \
-		fi; \
-		R2_BUCKET=$${R2_BUCKET:-$$(rg "^\\s*data_path:\\s*" "$$R2_CONFIG" -m 1 | sed -E 's|.*s3://([^/]+)/.*|\1|' | xargs)}; \
-		if [ -z "$$R2_BUCKET" ] || [ "$$R2_BUCKET" = "YOUR-R2-BUCKET" ] || [ "$$R2_BUCKET" = "your-bucket-name" ]; then \
-			echo "❌ Could not resolve a real R2 bucket from $$R2_CONFIG."; \
-			echo "   Set ducklake.data_path to s3://<bucket>/ducklake/ or pass R2_BUCKET=<real-bucket>."; \
-			exit 1; \
-		fi; \
-		TMP_CONFIG=/tmp/splake-r2-ducklake-stress.yaml; \
-		cp $$R2_CONFIG $$TMP_CONFIG; \
-		sed -i.bak "s/port: 8090/port: $$PORT/" $$TMP_CONFIG && rm -f $$TMP_CONFIG.bak; \
-		sed -i.bak "s|data_path: .*|data_path: \"s3://$$R2_BUCKET/ducklake/\"|" $$TMP_CONFIG && rm -f $$TMP_CONFIG.bak; \
-		echo "🚀 Starting splake with $$R2_CONFIG on port $$PORT (bucket $$R2_BUCKET)..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE=$$TMP_CONFIG cargo run --bin softprobe-runtime > /tmp/splake-r2-ducklake-stress.log 2>&1 & \
-		SPLAKE_PID=$$!; \
-		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f $$TMP_CONFIG' EXIT; \
-		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
-			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-r2-ducklake-stress.log; exit 1); \
-		echo "🧪 Running 10s smoke check before full stress..."; \
-		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
-			> /tmp/perf-r2-ducklake-smoke.log 2>&1; \
-		if rg -n "errors:\\s*[1-9]|Total query errors:\\s*[1-9]|Steady-state query errors:\\s*[1-9]" /tmp/perf-r2-ducklake-smoke.log >/dev/null; then \
-			echo "❌ R2 smoke check failed (non-zero errors)."; \
-			echo "---- perf smoke output ----"; \
-			cat /tmp/perf-r2-ducklake-smoke.log; \
-			echo "---- splake error lines ----"; \
-			rg -n "ERROR|Error|failed|Failed" /tmp/splake-r2-ducklake-stress.log || true; \
-			exit 1; \
-		fi; \
-		echo "✅ Smoke check passed; starting full stress run..."; \
-		CONFIG_FILE=$$TMP_CONFIG cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
-		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
-		trap - EXIT; \
-		rm -f $$TMP_CONFIG
+	BACKEND=r2 ./scripts/stress-test.sh
 
 stress-test-gcs-ducklake:
-	@echo "☁️  Stress testing local DuckLake against GCS bucket..."
-	@set -e; \
-		GCP_CONFIG=$${GCP_CONFIG:-tests/config/test-gcp.yaml}; \
-		PORT=$${PORT:-38092}; \
-		CACHE_ROOT=$${CACHE_ROOT:-/tmp/splake-gcs-ducklake}; \
-		if [ ! -f "$$GCP_CONFIG" ]; then \
-			echo "❌ GCP config file not found: $$GCP_CONFIG"; \
-			exit 1; \
-		fi; \
-		if ! rg -n "^ducklake:\\s*$$" "$$GCP_CONFIG" >/dev/null; then \
-			echo "❌ $$GCP_CONFIG is missing required ducklake: block."; \
-			exit 1; \
-		fi; \
-		GCS_BUCKET=$${GCS_BUCKET:-$$(rg "^\\s*data_path:\\s*" "$$GCP_CONFIG" -m 1 | sed -E 's|.*(gs|s3)://([^/]+)/.*|\2|' | xargs)}; \
-		if [ -z "$$GCS_BUCKET" ] || [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET" ] || [ "$$GCS_BUCKET" = "YOUR-GCS-BUCKET-NAME" ] || [ "$$GCS_BUCKET" = "your-bucket-name" ]; then \
-			echo "❌ Could not resolve a real GCS bucket from $$GCP_CONFIG."; \
-			echo "   Set ducklake.data_path to gs://<bucket>/ducklake/ or pass GCS_BUCKET=<real-bucket>."; \
-			exit 1; \
-		fi; \
-		if [ -z "$$GCS_HMAC_ACCESS_KEY_ID" ] || [ -z "$$GCS_HMAC_SECRET" ]; then \
-			echo "❌ GCS_HMAC_ACCESS_KEY_ID and GCS_HMAC_SECRET are required for gs:// DuckLake I/O."; \
-			exit 1; \
-		fi; \
-		TMP_CONFIG=/tmp/splake-gcs-ducklake-stress.yaml; \
-		cp "$$GCP_CONFIG" "$$TMP_CONFIG"; \
-		sed -i.bak "s/port: 8090/port: $$PORT/" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		rm -rf "$$CACHE_ROOT"; \
-		mkdir -p "$$CACHE_ROOT/cache"; \
-		sed -i.bak "s|cache_dir: .*|cache_dir: \"$$CACHE_ROOT/cache\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		sed -i.bak "s|data_path: .*|data_path: \"gs://$$GCS_BUCKET/ducklake/\"|" "$$TMP_CONFIG" && rm -f "$$TMP_CONFIG.bak"; \
-		echo "🚀 Starting local splake on port $$PORT using GCS bucket $$GCS_BUCKET..."; \
-		SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="$$TMP_CONFIG" cargo run --bin softprobe-runtime > /tmp/splake-gcs-ducklake-stress.log 2>&1 & \
-		SPLAKE_PID=$$!; \
-		trap 'kill $$SPLAKE_PID >/dev/null 2>&1 || true; rm -f "$$TMP_CONFIG"' EXIT; \
-		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
-			if curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1; then \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		curl -sf "http://127.0.0.1:$$PORT/health" >/dev/null 2>&1 || (echo "❌ splake failed to start"; cat /tmp/splake-gcs-ducklake-stress.log; exit 1); \
-		echo "♨️  Warmup: ingest-only pass to create committed DuckLake tables..."; \
-		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 12 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 0 --query-interval-ms 1000 \
-			> /tmp/perf-gcs-ducklake-warmup.log 2>&1; \
-		echo "🧪 Running 10s smoke check before full stress..."; \
-		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
-			> /tmp/perf-gcs-ducklake-smoke.log 2>&1; \
-		if rg -n "errors:\\s*[1-9]|Total query errors:\\s*[1-9]|Steady-state query errors:\\s*[1-9]" /tmp/perf-gcs-ducklake-smoke.log >/dev/null; then \
-			echo "❌ GCS smoke check failed (non-zero errors)."; \
-			echo "---- perf smoke output ----"; \
-			cat /tmp/perf-gcs-ducklake-smoke.log; \
-			echo "---- splake error lines ----"; \
-			rg -n "ERROR|Error|failed|Failed" /tmp/splake-gcs-ducklake-stress.log || true; \
-			exit 1; \
-		fi; \
-		echo "✅ Smoke check passed; starting full stress run..."; \
-		CONFIG_FILE="$$TMP_CONFIG" cargo run --bin perf_stress -- \
-			--service-url "http://127.0.0.1:$$PORT" \
-			--duration 60 --span-qps 50 --log-qps 70 --metric-qps 70 --query-concurrency 4 --query-interval-ms 500; \
-		kill $$SPLAKE_PID >/dev/null 2>&1 || true; \
-		trap - EXIT; \
-		rm -f "$$TMP_CONFIG"
+	BACKEND=gcs ./scripts/stress-test.sh

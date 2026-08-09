@@ -1,6 +1,8 @@
 name: Performance Tests
 
 # Manual only — not part of the PR/main CI gate.
+# Warm self-hosted SLO: make test-perf ≤ 8m (hard timeout 15m).
+# Quality bar: PERF_TARGET_MS=1000 (warm union_logs p95 < 1s).
 # Local equivalent: make setup-local && make test-perf [PERF_SUITE=…]
 on:
   workflow_dispatch:
@@ -19,34 +21,19 @@ on:
 jobs:
   performance:
     name: Performance (${{ inputs.suite }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      ENFORCE_SLO: "1"
+      PERF_TARGET_MS: "1000"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-perf-
-            ${{ runner.os }}-cargo-
-
-      - name: Install host tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep curl clang mold
+      - name: Doctor
+        run: make doctor-ci
 
       - name: Start local test infra
         run: make setup-local
