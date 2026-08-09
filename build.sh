@@ -16,10 +16,9 @@ set -euo pipefail
 # cargo-chef cook are stored at ${AR_IMAGE}:buildcache (not a runtime image —
 # do not deploy this tag). Ephemeral GHA runners have no local layer cache;
 # without registry cache every release cold-compiles dependencies (~7m).
-# --cache-from miss is fine (BuildKit continues). --cache-to write failure
+# --cache-from miss is fine (ignore-error=true). --cache-to write failure
 # fails the whole publish (fail-fast: release needs push rights on :buildcache).
-# Registry cache export requires a non-default Buildx driver; this script
-# ensures docker-container builder `thelake-builder`.
+# Registry cache export requires docker-container (or equivalent) Buildx driver.
 
 cd "$(dirname "$0")"
 
@@ -28,7 +27,11 @@ TAG_LATEST="${TAG_LATEST:-1}"
 AR_IMAGE="us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake"
 # Separate mutable tag: must not collide with product :latest / release tags.
 CACHE_REF="${AR_IMAGE}:buildcache"
-BUILDER_NAME="thelake-builder"
+# Fallback name when the current builder cannot export registry cache (typical
+# local Docker Desktop default driver). CI usually already has a
+# docker-container builder from setup-buildx-action — reuse that instead of
+# creating a second one (create can exit 255 on GHA).
+FALLBACK_BUILDER_NAME="thelake-builder"
 
 image_tags=("${AR_IMAGE}:${TAG}")
 case "${TAG_LATEST}" in
@@ -50,10 +53,46 @@ for t in "${image_tags[@]}"; do
   docker_tags+=(-t "${t}")
 done
 
+# Resolve builder before assembling argv so --builder matches what we select.
+ensure_cache_builder() {
+  local name driver
+  name="$(docker buildx inspect -f '{{.Name}}' 2>/dev/null || true)"
+  driver="$(docker buildx inspect -f '{{.Driver}}' 2>/dev/null || true)"
+  if [[ "${driver}" == "docker-container" || "${driver}" == "kubernetes" || "${driver}" == "remote" ]]; then
+    BUILDER_NAME="${name}"
+    echo "Using current Buildx builder ${BUILDER_NAME} (driver=${driver})"
+    return 0
+  fi
+
+  if ! docker buildx inspect "${FALLBACK_BUILDER_NAME}" >/dev/null 2>&1; then
+    echo "Creating Buildx builder ${FALLBACK_BUILDER_NAME} (docker-container; required for registry cache)..."
+    docker buildx create --name "${FALLBACK_BUILDER_NAME}" --driver docker-container --use
+  else
+    echo "Reusing Buildx builder ${FALLBACK_BUILDER_NAME}"
+    docker buildx use "${FALLBACK_BUILDER_NAME}"
+  fi
+  docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+  name="$(docker buildx inspect -f '{{.Name}}')"
+  driver="$(docker buildx inspect -f '{{.Driver}}')"
+  BUILDER_NAME="${name}"
+  echo "Builder ${BUILDER_NAME} driver=${driver}"
+  if [[ "${driver}" != "docker-container" ]]; then
+    echo "error: builder ${BUILDER_NAME} uses driver '${driver}'; need docker-container for --cache-to type=registry" >&2
+    docker buildx ls >&2 || true
+    exit 1
+  fi
+}
+
+BUILDER_NAME="${FALLBACK_BUILDER_NAME}"
+if [[ "${PRINT_BUILDX_ARGS:-0}" != "1" ]]; then
+  ensure_cache_builder
+fi
+
 buildx_args=(
   --builder "${BUILDER_NAME}"
   --platform linux/amd64
-  # ignore-error: first publish (or deleted :buildcache) must not fail the build.
+  # ignore-error: missing :buildcache must not fail the publish (BuildKit
+  # otherwise marks the whole build failed after a successful image+cache push).
   --cache-from "type=registry,ref=${CACHE_REF},ignore-error=true"
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
   --push
@@ -65,32 +104,6 @@ if [[ "${PRINT_BUILDX_ARGS:-0}" == "1" ]]; then
   printf '%s\n' "${buildx_args[@]}"
   exit 0
 fi
-
-ensure_cache_builder() {
-  if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-    echo "Creating Buildx builder ${BUILDER_NAME} (docker-container; required for registry cache)..."
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container
-  else
-    # CI may have already created this name via setup-buildx-action.
-    echo "Reusing Buildx builder ${BUILDER_NAME}"
-  fi
-  # Bootstrap is best-effort: a builder already started by setup-buildx-action
-  # can return a non-zero bootstrap status even when inspect/build work.
-  if ! docker buildx inspect --bootstrap "${BUILDER_NAME}" >/dev/null 2>&1; then
-    echo "warning: bootstrap of ${BUILDER_NAME} returned non-zero; continuing if inspect works"
-    docker buildx inspect "${BUILDER_NAME}" >/dev/null
-  fi
-  local driver
-  driver="$(docker buildx inspect "${BUILDER_NAME}" | awk '/^Driver:/{print $2; exit}')"
-  echo "Builder ${BUILDER_NAME} driver=${driver:-<empty>}"
-  if [[ "${driver}" != "docker-container" ]]; then
-    echo "error: builder ${BUILDER_NAME} uses driver '${driver}'; need docker-container for --cache-to type=registry" >&2
-    docker buildx ls >&2 || true
-    exit 1
-  fi
-}
-
-ensure_cache_builder
 
 echo "Building ${AR_IMAGE}:${TAG} (linux/amd64)${image_tags[1]:+ + :latest}"
 echo "BuildKit cache: ${CACHE_REF} (builder ${BUILDER_NAME})"

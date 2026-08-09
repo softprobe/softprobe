@@ -219,8 +219,9 @@ TAG=vX.Y.Z`). The script:
   `:latest` unless `TAG_LATEST=0`);
 - reads/writes BuildKit registry cache at `…/softprobe/splake:buildcache`
   (`mode=max`, so cargo-chef cook layers survive ephemeral CI runners);
-- creates/uses a `docker-container` Buildx builder named `thelake-builder`
-  (required for registry cache export; the default `docker` driver cannot).
+- creates/uses a `docker-container` Buildx builder when the current one cannot
+  export registry cache (local Docker default driver). CI reuses the
+  `docker-container` builder from `setup-buildx-action`.
 
 `:buildcache` is a cache artifact only — do not deploy it as a runtime image.
 A failed cache push fails the whole publish (same GCP auth as the product
