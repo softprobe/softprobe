@@ -55,22 +55,26 @@ done
 
 # Resolve builder before assembling argv so --builder matches what we select.
 ensure_cache_builder() {
-  local name driver
-  # buildx inspect has no --format on all CLI versions; parse the text form.
+  local name="" driver=""
+  echo "Resolving Buildx builder for registry cache (CI=${CI:-false})..."
+  # pipefail + a failed `buildx inspect` would abort before any message; probe softly.
+  set +e
   name="$(docker buildx inspect 2>/dev/null | awk '/^Name:/{print $2; exit}' | tr -d '\r')"
   driver="$(docker buildx inspect 2>/dev/null | awk '/^Driver:/{print $2; exit}' | tr -d '\r')"
+  set -e
+  echo "Current builder name=${name:-<none>} driver=${driver:-<none>}"
+
   if [[ "${driver}" == "docker-container" || "${driver}" == "kubernetes" || "${driver}" == "remote" ]]; then
     BUILDER_NAME="${name}"
     echo "Using current Buildx builder ${BUILDER_NAME} (driver=${driver})"
     return 0
   fi
 
-  # Current builder may be the default docker driver even when setup-buildx
-  # created a docker-container instance (selection can differ across shells).
+  # Prefer an existing docker-container builder (setup-buildx on GHA, or prior local).
+  set +e
   if docker buildx inspect "${FALLBACK_BUILDER_NAME}" >/dev/null 2>&1; then
     name="${FALLBACK_BUILDER_NAME}"
   else
-    # Parent rows look like: "builder-uuid    docker-container"
     name="$(
       docker buildx ls 2>/dev/null | awk '
         /docker-container/ && $0 !~ /\\_/ {
@@ -78,21 +82,24 @@ ensure_cache_builder() {
         }' | tr -d '\r'
     )"
   fi
+  set -e
+
   if [[ -n "${name}" ]]; then
     BUILDER_NAME="${name}"
-    echo "Using existing docker-container builder ${BUILDER_NAME} (current was driver=${driver:-none})"
+    echo "Using existing docker-container builder ${BUILDER_NAME}"
     docker buildx use "${BUILDER_NAME}"
-    docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+    docker buildx inspect --bootstrap "${BUILDER_NAME}" >/dev/null 2>&1 || true
     return 0
   fi
 
-  if ! docker buildx inspect "${FALLBACK_BUILDER_NAME}" >/dev/null 2>&1; then
-    echo "Creating Buildx builder ${FALLBACK_BUILDER_NAME} (docker-container; required for registry cache)..."
-    docker buildx create --name "${FALLBACK_BUILDER_NAME}" --driver docker-container --use
-  else
-    echo "Reusing Buildx builder ${FALLBACK_BUILDER_NAME}"
-    docker buildx use "${FALLBACK_BUILDER_NAME}"
+  if [[ "${CI:-}" == "true" ]]; then
+    echo "error: no docker-container Buildx builder available in CI; setup-buildx-action must run first" >&2
+    docker buildx ls >&2 || true
+    exit 1
   fi
+
+  echo "Creating Buildx builder ${FALLBACK_BUILDER_NAME} (docker-container; required for registry cache)..."
+  docker buildx create --name "${FALLBACK_BUILDER_NAME}" --driver docker-container --use
   docker buildx inspect --bootstrap >/dev/null 2>&1 || true
   name="$(docker buildx inspect | awk '/^Name:/{print $2; exit}' | tr -d '\r')"
   driver="$(docker buildx inspect | awk '/^Driver:/{print $2; exit}' | tr -d '\r')"
