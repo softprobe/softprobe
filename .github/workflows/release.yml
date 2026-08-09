@@ -1,7 +1,8 @@
 name: Build and Push TheLake Docker Image
 
 # Softprobe convention (match otel/backend/sp-agent-java):
-# Create a GitHub Release with tag vX.Y.Z → this workflow builds and pushes the image.
+# Create a GitHub Release with tag vX.Y.Z → this workflow runs `make publish-docker`
+# (same entry point as local/emergency publishes).
 on:
   release:
     types: [published]
@@ -10,7 +11,6 @@ env:
   IMAGE_TAG: ${{ github.event.release.tag_name }}
   # Production Deployment pulls Artifact Registry (see deployment-k8s gcp/production/sp-llm).
   AR_REGISTRY: us-central1-docker.pkg.dev
-  AR_IMAGE: us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake
 
 jobs:
   build:
@@ -35,13 +35,9 @@ jobs:
         run: |
           set -euo pipefail
           gcloud auth configure-docker "${AR_REGISTRY}" --quiet
-
-          echo "Building ${AR_IMAGE}:${IMAGE_TAG} (linux/amd64)"
-          docker buildx build \
-            --platform linux/amd64 \
-            --push \
-            -t "${AR_IMAGE}:${IMAGE_TAG}" \
-            -t "${AR_IMAGE}:latest" \
-            .
-
-          echo "Pushed ${AR_IMAGE}:${IMAGE_TAG} and ${AR_IMAGE}:latest"
+          # Prereleases must not move the mutable :latest tag.
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            make publish-docker TAG="${IMAGE_TAG}" TAG_LATEST=0
+          else
+            make publish-docker TAG="${IMAGE_TAG}"
+          fi

@@ -50,6 +50,9 @@ dependency-tree.txt
 
 .env
 
+# Google GitHub Actions auth credential files (also listed in .dockerignore).
+gha-creds-*.json
+
 **/node_modules/
 **/.venv/
 

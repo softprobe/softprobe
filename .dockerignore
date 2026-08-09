@@ -4,3 +4,5 @@ target
 tmp
 .DS_Store
 *.log
+# Google GitHub Actions auth may write this into the workspace; never ship it in the image.
+gha-creds-*.json
