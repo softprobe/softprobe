@@ -1,7 +1,7 @@
 name: Build and Push TheLake Docker Image
 
 # Softprobe convention: GitHub Release vX.Y.Z → make release
-# (ci + test-perf + build-release + publish; all --release, one Cargo profile).
+# (test-perf + build-release + publish; all --release. PR make ci already gated.)
 # Warm self-hosted SLO: ≤ 25m (hard timeout 35m).
 # Cache: ~/.cache/thelake via Make — no actions/cache for target/.
 on:
@@ -53,7 +53,7 @@ jobs:
       - name: Start local test infra
         run: make setup
 
-      - name: Release gate (ci + test-perf + build-release + publish)
+      - name: Release gate (test-perf + build-release + publish)
         run: |
           set -euo pipefail
           gcloud auth configure-docker "${AR_REGISTRY}" --quiet

@@ -4,8 +4,9 @@
 # Cache: $(HOME)/.cache/thelake/{cargo,target} via ensure-cache (local + CI).
 #
 # One Cargo profile per gate (never mix debug + release in the same run):
-#   make ci / test / test-perf  → default (dev)
-#   make release                → CARGO_PROFILE_FLAG=--release for lint+tests+build
+#   make ci / test / test-perf  → default (dev) — PR gate
+#   make release                → --release for test-perf + build-release + publish
+#                                 (does not re-run make ci; PR already gated that)
 #   make build-release          → --release only (packaging)
 #
 # Warm SLOs (self-hosted): ci ≤15m | test-perf ≤8m | release ≤25m
@@ -337,15 +338,15 @@ ci: ensure-cache
 	$(call enforce-slo,$$total,$(CI_GOAL_SECS),ci); \
 	echo "ci ok"
 
-# Release gate: one --release profile for lint + tests + binary (no debug then release).
+# Release gate: PR already ran make ci (dev). Here one --release profile for
+# perf + binary + push — do not nest make ci (release compile blew the 900s ci SLO).
 release:
 	@$(MAKE) CARGO_PROFILE_FLAG=--release _release TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"
 
 _release:
 	@set -e; \
 	t0=$$(date +%s); \
-	echo "PHASE=ci start (profile=$(or $(CARGO_PROFILE_FLAG),dev))"; s=$$(date +%s); $(MAKE) ci; echo "PHASE=ci elapsed=$$(($$(date +%s) - $$s))s"; \
-	echo "PHASE=test-perf start"; s=$$(date +%s); $(MAKE) test-perf; echo "PHASE=test-perf elapsed=$$(($$(date +%s) - $$s))s"; \
+	echo "PHASE=test-perf start (profile=$(or $(CARGO_PROFILE_FLAG),dev))"; s=$$(date +%s); $(MAKE) test-perf; echo "PHASE=test-perf elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=build-release start"; s=$$(date +%s); $(MAKE) build-release; echo "PHASE=build-release elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=publish start"; s=$$(date +%s); \
 	$(MAKE) publish TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"; \

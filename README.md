@@ -77,7 +77,7 @@ GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
-  (`ci` + `test-perf` + `build-release` + `publish`). Warm SLO ≤ 25m.
+  (`test-perf` + `build-release` + `publish`, `--release`; PR already ran `ci`). Warm SLO ≤ 25m.
 
 ## Run
 
@@ -214,8 +214,8 @@ Product bits are built **once on the host** (`make build-release` →
 (`COPY dist/…`); it never runs cargo. Cache lives at `~/.cache/thelake`.
 
 Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
-(`ci` + `test-perf` + unconditional `build-release` + `publish`).
-PR CI does not build `dist/`.
+(`test-perf` + unconditional `build-release` + `publish` under `--release`).
+PR CI (`make ci`, dev profile) does not build `dist/`.
 
 Local/emergency image push: `make build-release && make publish TAG=vX.Y.Z`
 (on Mac, `TARGET_PLATFORM=linux/amd64 make build-release` re-enters the same
