@@ -1,7 +1,7 @@
 name: Build and Push TheLake Docker Image
 
 # Softprobe convention: GitHub Release vX.Y.Z → make release
-# (ci + test-perf + build-release + publish; Docker never compiles).
+# (ci + test-perf + build-release + publish; all --release, one Cargo profile).
 # Warm self-hosted SLO: ≤ 25m (hard timeout 35m).
 # Cache: ~/.cache/thelake via Make — no actions/cache for target/.
 on:

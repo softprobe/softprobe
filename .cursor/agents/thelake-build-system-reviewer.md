@@ -36,6 +36,8 @@ You are the **thelake build-system reviewer**. Your only job is to find violatio
 - [ ] PR `ci` is fmt + lint + `test` + `test-e2e` only (no `build-release`); `make release` always runs `build-release` before `publish`
 - [ ] All jobs use `runs-on: [self-hosted, Linux]`
 - [ ] Cache is `THELAKE_CACHE_ROOT` (`~/.cache/thelake`); `CI=true` ⇒ `CARGO_INCREMENTAL=0`
+- [ ] One Cargo profile per gate: PR `ci` is **dev**; `make release` uses `--release` for lint+tests+`build-release` (never debug then release in one run)
+
 - [ ] E2E backends via `E2E_BACKEND=` on `test-e2e` — no separate `test-gcs` / `test-r2` public targets
 - [ ] `test-e2e` does **not** embed `INTEGRATION_PERF_TESTS`
 - [ ] `test-perf` is the sole owner of the integration perf suite

@@ -3,6 +3,11 @@
 # Host-first: cargo builds on the host → dist/; Docker only COPYs dist/.
 # Cache: $(HOME)/.cache/thelake/{cargo,target} via ensure-cache (local + CI).
 #
+# One Cargo profile per gate (never mix debug + release in the same run):
+#   make ci / test / test-perf  → default (dev)
+#   make release                → CARGO_PROFILE_FLAG=--release for lint+tests+build
+#   make build-release          → --release only (packaging)
+#
 # Warm SLOs (self-hosted): ci ≤15m | test-perf ≤8m | release ≤25m
 #
 #   make setup && make ci
@@ -15,7 +20,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra \
 	clean clean-cache build build-release package publish test-publish-tags \
 	lint fmt check-fmt \
-	test test-e2e test-perf ci release \
+	test test-e2e test-perf ci release _release \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen
 
@@ -31,11 +36,12 @@ export CARGO_TARGET_DIR ?= $(THELAKE_CACHE_ROOT)/target
 export PATH := $(CARGO_HOME)/bin:$(HOME)/.cargo/bin:$(PATH)
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
+# Override only via `make release` (or explicit CARGO_PROFILE_FLAG=--release).
+# Do not auto-flip on CI=true — that forced a second compile after debug clippy.
+CARGO_PROFILE_FLAG ?=
+
 ifeq ($(CI),true)
 export CARGO_INCREMENTAL ?= 0
-CARGO_PROFILE_FLAG = --release
-else
-CARGO_PROFILE_FLAG =
 endif
 
 # Shared wall-clock SLO check (CI=true or ENFORCE_SLO=1). Usage after TOTAL=…s:
@@ -211,7 +217,7 @@ test-publish-tags:
 	echo "publish tag plan ok"
 
 lint: ensure-cache
-	cargo clippy --lib --bin softprobe-runtime -- -D warnings
+	cargo clippy $(CARGO_PROFILE_FLAG) --lib --bin softprobe-runtime -- -D warnings
 
 fmt:
 	cargo fmt
@@ -331,10 +337,14 @@ ci: ensure-cache
 	$(call enforce-slo,$$total,$(CI_GOAL_SECS),ci); \
 	echo "ci ok"
 
+# Release gate: one --release profile for lint + tests + binary (no debug then release).
 release:
+	@$(MAKE) CARGO_PROFILE_FLAG=--release _release TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"
+
+_release:
 	@set -e; \
 	t0=$$(date +%s); \
-	echo "PHASE=ci start"; s=$$(date +%s); $(MAKE) ci; echo "PHASE=ci elapsed=$$(($$(date +%s) - $$s))s"; \
+	echo "PHASE=ci start (profile=$(or $(CARGO_PROFILE_FLAG),dev))"; s=$$(date +%s); $(MAKE) ci; echo "PHASE=ci elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=test-perf start"; s=$$(date +%s); $(MAKE) test-perf; echo "PHASE=test-perf elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=build-release start"; s=$$(date +%s); $(MAKE) build-release; echo "PHASE=build-release elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=publish start"; s=$$(date +%s); \
