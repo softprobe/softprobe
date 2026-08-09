@@ -107,9 +107,6 @@ mod tests {
         let got = TraceService::export(&svc, req).await;
         let err = got.expect_err("gRPC export needs control-plane auth wiring");
         assert_eq!(err.code(), tonic::Code::Internal);
-        assert!(
-            err.message().contains("control-plane"),
-            "{err}"
-        );
+        assert!(err.message().contains("control-plane"), "{err}");
     }
 }

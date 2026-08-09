@@ -49,10 +49,9 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
     config.ducklake.data_inlining_row_limit = Some(0);
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
+    let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
+        .await
+        .expect("query engine");
 
     let now = Utc::now();
     let session_id = format!("variant-sess-{}", uuid::Uuid::new_v4());
@@ -72,7 +71,10 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
             "gen_ai.usage.input_tokens".to_string(),
             ((i + 1) * 10).to_string(),
         );
-        attributes.insert("sp.cost.total".to_string(), format!("{:.2}", (i as f64) * 0.1));
+        attributes.insert(
+            "sp.cost.total".to_string(),
+            format!("{:.2}", (i as f64) * 0.1),
+        );
         attributes.insert("sp.user.id".to_string(), format!("user-{i}"));
         spans.push(SpanData {
             session_id: session_id.clone(),
@@ -223,9 +225,7 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
         .expect("detail");
     let attrs = attributes_object(&detail.rows[0][0]);
     assert_eq!(
-        attrs
-            .get("sp.observation.type")
-            .and_then(|v| v.as_str()),
+        attrs.get("sp.observation.type").and_then(|v| v.as_str()),
         Some("generation")
     );
 
@@ -255,9 +255,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::api::llm::query::{
         compile_observation_search_sql, ObservationSearchRequest,
     };
-    use softprobe_runtime::api::telemetry::{
-        compile_details_sql, TelemetryDetailsTarget,
-    };
+    use softprobe_runtime::api::telemetry::{compile_details_sql, TelemetryDetailsTarget};
     use softprobe_runtime::storage::schema::variant::variant_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -265,10 +263,9 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     config.ducklake.data_inlining_row_limit = Some(0);
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
+    let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
+        .await
+        .expect("query engine");
 
     let now = Utc::now();
     let session_id = format!("vk-sess-{}", uuid::Uuid::new_v4());
@@ -486,10 +483,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     let obs_idx = cols.iter().position(|c| c == "observation_type").unwrap();
     let model_idx = cols.iter().position(|c| c == "model_name").unwrap();
     let tokens_idx = cols.iter().position(|c| c == "total_tokens").unwrap();
-    assert_eq!(
-        search_result.rows[0][obs_idx].as_str(),
-        Some("generation")
-    );
+    assert_eq!(search_result.rows[0][obs_idx].as_str(), Some("generation"));
     assert_eq!(
         search_result.rows[0][model_idx].as_str(),
         Some("gpt-4o-mini")
@@ -607,10 +601,8 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
     // leaves it alone; ensure_variant_column_types must then fail fast.
     {
         let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
-        conn.execute_batch(
-            "CREATE TABLE softprobe.traces AS SELECT MAP {'a':'1'} AS attributes;",
-        )
-        .expect("create legacy map table");
+        conn.execute_batch("CREATE TABLE softprobe.traces AS SELECT MAP {'a':'1'} AS attributes;")
+            .expect("create legacy map table");
         let dtype: String = conn
             .query_row(
                 "SELECT column_type FROM (DESCRIBE softprobe.traces) WHERE column_name = 'attributes';",

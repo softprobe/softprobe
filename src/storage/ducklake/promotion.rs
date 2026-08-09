@@ -174,7 +174,6 @@ VALUES (?, 'softprobe.promotion.v1', ?, ?, ?, ?, 'active')"
     }
 }
 
-
 impl DuckLakeWriter {
     pub(super) fn map_spec_load(err: PromotionSpecLoadError) -> anyhow::Error {
         match err {
@@ -186,11 +185,12 @@ impl DuckLakeWriter {
         }
     }
 
-    pub(super) fn load_active_telemetry_manifests_local(&self) -> Result<Vec<TelemetryColumnsManifest>> {
+    pub(super) fn load_active_telemetry_manifests_local(
+        &self,
+    ) -> Result<Vec<TelemetryColumnsManifest>> {
         let dk = &self.ducklake;
         self.with_attached_conn(dk, |conn| {
-            load_active_telemetry_manifests(conn, &dk.catalog_alias)
-                .map_err(Self::map_spec_load)
+            load_active_telemetry_manifests(conn, &dk.catalog_alias).map_err(Self::map_spec_load)
         })
     }
 
@@ -297,12 +297,8 @@ impl DuckLakeWriter {
                 spec,
                 || async {
                     self.with_attached_conn(&dk, |conn| {
-                        load_active_business_manifest(
-                            conn,
-                            &dk.catalog_alias,
-                            &spec.target.table,
-                        )
-                        .map_err(Self::map_spec_load)
+                        load_active_business_manifest(conn, &dk.catalog_alias, &spec.target.table)
+                            .map_err(Self::map_spec_load)
                     })
                 },
                 || async {

@@ -1,8 +1,8 @@
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
-use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;

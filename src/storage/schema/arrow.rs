@@ -225,10 +225,8 @@ pub fn score_configs_to_record_batch(
             .map(|c| c.author_id.as_deref())
             .collect::<Vec<_>>(),
     ));
-    let metadata = build_string_metadata_array(
-        configs.iter().map(|c| &c.metadata),
-        &metadata_field,
-    )?;
+    let metadata =
+        build_string_metadata_array(configs.iter().map(|c| &c.metadata), &metadata_field)?;
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let record_dates: ArrayRef = Arc::new(Date32Array::from(
         configs

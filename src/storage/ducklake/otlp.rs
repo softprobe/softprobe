@@ -37,7 +37,10 @@ impl DuckLakeWriter {
             .collect()
     }
 
-    pub(super) fn apply_span_promotions(spans: &mut [Span], columns: &[PromotionColumn]) -> Result<()> {
+    pub(super) fn apply_span_promotions(
+        spans: &mut [Span],
+        columns: &[PromotionColumn],
+    ) -> Result<()> {
         for span in spans {
             let events = span
                 .events
@@ -66,7 +69,10 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub(super) fn apply_log_promotions(logs: &mut [Log], columns: &[PromotionColumn]) -> Result<()> {
+    pub(super) fn apply_log_promotions(
+        logs: &mut [Log],
+        columns: &[PromotionColumn],
+    ) -> Result<()> {
         for log in logs {
             let row = TelemetryPromotionRow {
                 resource_attributes: &log.resource_attributes,
@@ -87,7 +93,10 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub(super) fn apply_metric_promotions(metrics: &mut [Metric], columns: &[PromotionColumn]) -> Result<()> {
+    pub(super) fn apply_metric_promotions(
+        metrics: &mut [Metric],
+        columns: &[PromotionColumn],
+    ) -> Result<()> {
         for metric in metrics {
             let row = TelemetryPromotionRow {
                 resource_attributes: &metric.resource_attributes,
@@ -185,7 +194,6 @@ impl DuckLakeWriter {
                 .await
         }
     }
-
 
     pub(super) async fn write_tenant_log_batches(
         &self,
@@ -372,5 +380,4 @@ impl DuckLakeWriter {
         self.write_record_batches_internal("metrics", record_batches)
             .await
     }
-
 }

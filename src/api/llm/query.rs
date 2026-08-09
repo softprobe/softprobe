@@ -1358,7 +1358,10 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
     // connection, so it is retryable. INTERNAL errors are NOT listed here:
     // the query that trips the assertion fails deterministically.
     if head.starts_with("FATAL Error") {
-        return StorageErrorKind { code: "query_unavailable", retryable: true };
+        return StorageErrorKind {
+            code: "query_unavailable",
+            retryable: true,
+        };
     }
 
     // Object-store and network faults, including S3/MinIO throttling and 5xx.
