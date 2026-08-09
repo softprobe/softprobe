@@ -56,11 +56,33 @@ done
 # Resolve builder before assembling argv so --builder matches what we select.
 ensure_cache_builder() {
   local name driver
-  name="$(docker buildx inspect -f '{{.Name}}' 2>/dev/null || true)"
-  driver="$(docker buildx inspect -f '{{.Driver}}' 2>/dev/null || true)"
+  # buildx inspect has no --format on all CLI versions; parse the text form.
+  name="$(docker buildx inspect 2>/dev/null | awk '/^Name:/{print $2; exit}' | tr -d '\r')"
+  driver="$(docker buildx inspect 2>/dev/null | awk '/^Driver:/{print $2; exit}' | tr -d '\r')"
   if [[ "${driver}" == "docker-container" || "${driver}" == "kubernetes" || "${driver}" == "remote" ]]; then
     BUILDER_NAME="${name}"
     echo "Using current Buildx builder ${BUILDER_NAME} (driver=${driver})"
+    return 0
+  fi
+
+  # Current builder may be the default docker driver even when setup-buildx
+  # created a docker-container instance (selection can differ across shells).
+  if docker buildx inspect "${FALLBACK_BUILDER_NAME}" >/dev/null 2>&1; then
+    name="${FALLBACK_BUILDER_NAME}"
+  else
+    # Parent rows look like: "builder-uuid    docker-container"
+    name="$(
+      docker buildx ls 2>/dev/null | awk '
+        /docker-container/ && $0 !~ /\\_/ {
+          n=$1; gsub(/\*$/, "", n); print n; exit
+        }' | tr -d '\r'
+    )"
+  fi
+  if [[ -n "${name}" ]]; then
+    BUILDER_NAME="${name}"
+    echo "Using existing docker-container builder ${BUILDER_NAME} (current was driver=${driver:-none})"
+    docker buildx use "${BUILDER_NAME}"
+    docker buildx inspect --bootstrap >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -72,8 +94,8 @@ ensure_cache_builder() {
     docker buildx use "${FALLBACK_BUILDER_NAME}"
   fi
   docker buildx inspect --bootstrap >/dev/null 2>&1 || true
-  name="$(docker buildx inspect -f '{{.Name}}')"
-  driver="$(docker buildx inspect -f '{{.Driver}}')"
+  name="$(docker buildx inspect | awk '/^Name:/{print $2; exit}' | tr -d '\r')"
+  driver="$(docker buildx inspect | awk '/^Driver:/{print $2; exit}' | tr -d '\r')"
   BUILDER_NAME="${name}"
   echo "Builder ${BUILDER_NAME} driver=${driver}"
   if [[ "${driver}" != "docker-container" ]]; then
