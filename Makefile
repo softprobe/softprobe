@@ -23,10 +23,12 @@ COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-comp
 
 # ---- cache (same path on Mac and arc-runner; no sudo) ----
 # Durable across `make clean` — use `make clean-cache` to wipe intentionally.
+# CARGO_HOME here is only the registry/git cache; rustup's cargo/rustc stay in
+# ~/.cargo/bin (must remain on PATH — do not replace the toolchain install).
 THELAKE_CACHE_ROOT ?= $(HOME)/.cache/thelake
 export CARGO_HOME ?= $(THELAKE_CACHE_ROOT)/cargo
 export CARGO_TARGET_DIR ?= $(THELAKE_CACHE_ROOT)/target
-export PATH := $(CARGO_HOME)/bin:$(PATH)
+export PATH := $(CARGO_HOME)/bin:$(HOME)/.cargo/bin:$(PATH)
 export DUCKDB_DOWNLOAD_LIB ?= 1
 
 ifeq ($(CI),true)
