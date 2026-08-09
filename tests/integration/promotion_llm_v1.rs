@@ -109,13 +109,10 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
     let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
 
-    let (router, state) = softprobe_runtime::api::create_router(
-        Arc::new(config),
-        post(ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) =
+        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
+            .await
+            .expect("router");
     let router = router
         .merge(runtime_control_routes().with_state(state))
         .layer(from_fn(inject_tenant));

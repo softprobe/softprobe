@@ -4,13 +4,13 @@ use softprobe_runtime::config::Config;
 use tempfile::TempDir;
 
 /// Minimal file-backed DuckLake config under `temp`, maintenance/compaction off for quiet tests.
-/// Single-connection pools keep HTTP/integration fixtures from spawning production-sized workers.
+/// Twin of `softprobe_runtime::test_support::file_backed_test_config` (lib `cfg(test)` cannot
+/// be imported from the integration crate); pool limits fold into [`Config::shrink_pools_for_tests`].
 pub fn file_backed_test_config(temp: &TempDir) -> Config {
     let mut config = Config::default();
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
-    config.query.max_connections = 1;
-    config.ducklake.writer_pool_size = 1;
+    config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into_owned());
 
     let duck_dir = temp.path().join("ducklake");

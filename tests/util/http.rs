@@ -11,9 +11,7 @@ pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
     config.object_store.endpoint = Some("http://localhost:9000".to_string());
     config.object_store.region = "us-east-1".to_string();
-    // Match file_backed_test_config: avoid production-sized DuckDB pools in e2e smoke.
-    config.query.max_connections = 1;
-    config.ducklake.writer_pool_size = 1;
+    config.shrink_pools_for_tests();
 
     std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");

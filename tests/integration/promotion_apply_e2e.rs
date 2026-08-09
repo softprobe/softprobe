@@ -86,13 +86,9 @@ async fn setup() -> PostgresBackend {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
     };
     let metadata_path = config.ducklake.metadata_path.clone();
-    let (router, state) = create_router(
-        Arc::new(config),
-        post(ingest_traces),
-        Some(control),
-    )
-    .await
-    .expect("router");
+    let (router, state) = create_router(Arc::new(config), post(ingest_traces), Some(control))
+        .await
+        .expect("router");
     let router = router
         .merge(runtime_control_routes().with_state(state.clone()))
         .layer(from_fn_with_state(state, runtime_auth_middleware));

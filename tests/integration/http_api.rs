@@ -367,6 +367,19 @@ async fn logs_json_invalid_returns_400() {
 }
 
 #[tokio::test]
+async fn metrics_json_invalid_returns_400() {
+    let (router, _t) = build_router().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{"))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn metrics_json_empty_batch() {
     let (router, _t) = build_router().await;
     let body = json!({ "resourceMetrics": [] }).to_string();

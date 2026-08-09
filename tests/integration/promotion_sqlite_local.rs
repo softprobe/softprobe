@@ -26,13 +26,10 @@ struct SqliteBackend {
 }
 
 async fn build_router(config: Config) -> Router {
-    let (router, state) = softprobe_runtime::api::create_router(
-        Arc::new(config),
-        post(ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) =
+        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
+            .await
+            .expect("router");
     router
         .merge(runtime_control_routes().with_state(state))
         .layer(from_fn(inject_tenant))
