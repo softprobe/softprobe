@@ -144,6 +144,32 @@ impl ScoreTable {
     }
 }
 
+/// Append-only score schemas for annotation and evaluators.
+pub struct ScoreConfigTable;
+
+impl ScoreConfigTable {
+    pub fn table_name() -> &'static str {
+        "score_configs"
+    }
+
+    pub fn schema() -> Schema {
+        Schema::new(vec![
+            req("config_id", utf8()),
+            req("timestamp", ts_utc()),
+            req("name", utf8()),
+            req("data_type", utf8()),
+            opt("description", utf8()),
+            opt("min_value", DataType::Float64),
+            opt("max_value", DataType::Float64),
+            // JSON array string for categorical allowed values (simple DuckLake round-trip).
+            opt("categories", utf8()),
+            opt("author_id", utf8()),
+            opt("metadata", string_map()),
+            req("record_date", DataType::Date32),
+        ])
+    }
+}
+
 /// OTLP logs table
 pub struct OtlpLogsTable;
 

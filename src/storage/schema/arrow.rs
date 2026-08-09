@@ -1,4 +1,4 @@
-use crate::models::{Log, Metric, Score, ScoreDataType, ScoreSource, Span};
+use crate::models::{Log, Metric, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::Result;
 use arrow::array::{
@@ -150,18 +150,133 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
     )?)
 }
 
+pub fn score_configs_to_record_batch(
+    configs: &[ScoreConfig],
+    schema: &Schema,
+) -> Result<RecordBatch> {
+    let arrow_schema = Arc::new(schema.clone());
+    let metadata_field = Arc::new(
+        schema
+            .field_with_name("metadata")
+            .map_err(|e| anyhow::anyhow!("metadata field not found in score config schema: {}", e))?
+            .clone(),
+    );
+
+    let config_ids: ArrayRef = Arc::new(StringArray::from(
+        configs
+            .iter()
+            .map(|c| c.config_id.as_str())
+            .collect::<Vec<_>>(),
+    ));
+    let timestamps: ArrayRef = Arc::new(
+        TimestampMicrosecondArray::from(
+            configs
+                .iter()
+                .map(|c| c.timestamp.timestamp_micros())
+                .collect::<Vec<_>>(),
+        )
+        .with_timezone_utc(),
+    );
+    let names: ArrayRef = Arc::new(StringArray::from(
+        configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+    ));
+    let data_types: ArrayRef = Arc::new(StringArray::from(
+        configs
+            .iter()
+            .map(|c| match c.data_type {
+                ScoreDataType::Numeric => "numeric",
+                ScoreDataType::Categorical => "categorical",
+                ScoreDataType::Boolean => "boolean",
+                ScoreDataType::Text => "text",
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let descriptions: ArrayRef = Arc::new(StringArray::from(
+        configs
+            .iter()
+            .map(|c| c.description.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let min_values: ArrayRef = Arc::new(Float64Array::from(
+        configs.iter().map(|c| c.min_value).collect::<Vec<_>>(),
+    ));
+    let max_values: ArrayRef = Arc::new(Float64Array::from(
+        configs.iter().map(|c| c.max_value).collect::<Vec<_>>(),
+    ));
+    let category_strings: Vec<Option<String>> = configs
+        .iter()
+        .map(|c| {
+            if c.categories.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&c.categories).unwrap_or_else(|_| "[]".to_string()))
+            }
+        })
+        .collect();
+    let categories: ArrayRef = Arc::new(StringArray::from(
+        category_strings
+            .iter()
+            .map(|value| value.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let author_ids: ArrayRef = Arc::new(StringArray::from(
+        configs
+            .iter()
+            .map(|c| c.author_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let metadata = build_string_metadata_array(
+        configs.iter().map(|c| &c.metadata),
+        &metadata_field,
+    )?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let record_dates: ArrayRef = Arc::new(Date32Array::from(
+        configs
+            .iter()
+            .map(|c| (c.record_date - epoch).num_days() as i32)
+            .collect::<Vec<_>>(),
+    ));
+
+    Ok(RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            config_ids,
+            timestamps,
+            names,
+            data_types,
+            descriptions,
+            min_values,
+            max_values,
+            categories,
+            author_ids,
+            metadata,
+            record_dates,
+        ],
+    )?)
+}
+
 fn build_score_metadata_array(
     scores: &[Score],
     metadata_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
+    build_string_metadata_array(scores.iter().map(|score| &score.metadata), metadata_field)
+}
+
+fn build_string_metadata_array<'a, I>(
+    maps: I,
+    metadata_field: &arrow::datatypes::FieldRef,
+) -> Result<ArrayRef>
+where
+    I: IntoIterator<Item = &'a std::collections::HashMap<String, String>>,
+{
     use arrow::datatypes::DataType;
 
     let mut keys = Vec::new();
     let mut values = Vec::new();
     let mut offsets = vec![0i32];
     let mut offset = 0i32;
-    for score in scores {
-        for (key, value) in &score.metadata {
+    for map in maps {
+        for (key, value) in map {
             keys.push(key.as_str());
             values.push(value.as_str());
             offset += 1;

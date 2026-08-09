@@ -15,6 +15,7 @@ info:
 
     LLM evaluations are written through:
     - `POST /v1/llm/scores`
+    - `GET|POST /v1/llm/score-configs`
 
     LLM query surfaces (canonical schemas also live in softprobe/sp-llm):
     - `POST /v1/llm/observations/search`
@@ -249,6 +250,85 @@ paths:
           description: Malformed JSON or field type mismatch
         "503":
           description: Tenant runtime, idempotency lookup, or DuckLake write unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/llm/score-configs:
+    get:
+      tags:
+        - llm
+      summary: List score configs (seeds defaults when empty)
+      description: |
+        Returns append-only score schemas for the authenticated tenant. When the
+        tenant has no configs yet, the server seeds built-in defaults
+        (`correctness`, `quality`, `expected_output`) and returns them.
+      operationId: listScoreConfigs
+      responses:
+        "200":
+          description: Score config list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoreConfigListResponse"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "503":
+          description: Tenant runtime or DuckLake unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags:
+        - llm
+      summary: Create an append-only score config
+      description: |
+        Creates a score config in the authenticated tenant's DuckLake scope.
+        `config_id` is the tenant-local idempotency key.
+      operationId: createScoreConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScoreConfigRequest"
+            examples:
+              correctness:
+                value:
+                  config_id: cfg-correctness
+                  timestamp: "2026-07-18T23:22:00Z"
+                  name: correctness
+                  data_type: boolean
+                  description: Whether the turn was correct
+                  author_id: system
+      responses:
+        "201":
+          description: Score config created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoreConfig"
+        "200":
+          description: Existing config returned after an idempotent retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoreConfig"
+        "400":
+          description: Invalid score config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "503":
+          description: Tenant runtime or DuckLake write unavailable
           content:
             application/json:
               schema:
@@ -698,6 +778,71 @@ components:
             record_date:
               type: string
               format: date
+    CreateScoreConfigRequest:
+      type: object
+      required:
+        - config_id
+        - timestamp
+        - name
+        - data_type
+      description: |
+        Append-only score schema used to validate scores that carry `config_id`.
+        Tenant identity is intentionally absent.
+      properties:
+        config_id:
+          type: string
+          minLength: 1
+        timestamp:
+          type: string
+          format: date-time
+        name:
+          type: string
+          minLength: 1
+        data_type:
+          type: string
+          enum: [numeric, categorical, boolean, text]
+        description:
+          type: string
+          nullable: true
+        min_value:
+          type: number
+          format: double
+          nullable: true
+        max_value:
+          type: number
+          format: double
+          nullable: true
+        categories:
+          type: array
+          items:
+            type: string
+          default: []
+        author_id:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+    ScoreConfig:
+      allOf:
+        - $ref: "#/components/schemas/CreateScoreConfigRequest"
+        - type: object
+          required:
+            - record_date
+          properties:
+            record_date:
+              type: string
+              format: date
+    ScoreConfigListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScoreConfig"
     ApiError:
       type: object
       required:

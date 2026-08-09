@@ -2,7 +2,7 @@ pub mod query;
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
-use crate::models::{Score, ScoreDataType, ScoreSource};
+use crate::models::{Score, ScoreConfig, ScoreDataType, ScoreSource};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -54,6 +54,45 @@ impl From<CreateScoreRequest> for Score {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateScoreConfigRequest {
+    pub config_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub name: String,
+    pub data_type: ScoreDataType,
+    pub description: Option<String>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+impl From<CreateScoreConfigRequest> for ScoreConfig {
+    fn from(request: CreateScoreConfigRequest) -> Self {
+        Self {
+            config_id: request.config_id,
+            timestamp: request.timestamp,
+            name: request.name,
+            data_type: request.data_type,
+            description: request.description,
+            min_value: request.min_value,
+            max_value: request.max_value,
+            categories: request.categories,
+            author_id: request.author_id,
+            metadata: request.metadata,
+            record_date: request.timestamp.date_naive(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreConfigListResponse {
+    pub items: Vec<ScoreConfig>,
+}
+
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 pub async fn create_score(
@@ -81,6 +120,33 @@ pub async fn create_score(
             Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
         )
     })?;
+
+    if let Some(config_id) = score.config_id.as_deref() {
+        let config = engine
+            .storage
+            .writer
+            .get_score_config(config_id)
+            .await
+            .map_err(|error| {
+                warn!("score config lookup failed: {}", error);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "score config lookup failed" })),
+                )
+            })?;
+        let Some(config) = config else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "unknown config_id" })),
+            ));
+        };
+        if let Err(message) = config.validate_score(&score) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            ));
+        }
+    }
 
     if engine
         .storage
@@ -112,4 +178,143 @@ pub async fn create_score(
         })?;
 
     Ok((StatusCode::CREATED, Json(score)))
+}
+
+pub async fn create_score_config(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Json(request): Json<CreateScoreConfigRequest>,
+) -> Result<(StatusCode, Json<ScoreConfig>), ApiError> {
+    let config = ScoreConfig::from(request);
+    if let Err(message) = config.validate() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": message })),
+        ));
+    }
+
+    let tenant_info = tenant.as_ref().map(|extension| &extension.0);
+    let engine = match tenant_info {
+        Some(info) => state.engine_for_tenant(info).await,
+        None => state.engine_for_id("").await,
+    }
+    .map_err(|error| {
+        warn!("failed to resolve tenant runtime for score config: {}", error);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
+        )
+    })?;
+
+    if engine
+        .storage
+        .writer
+        .score_config_exists(&config.config_id)
+        .await
+        .map_err(|error| {
+            warn!("score config idempotency lookup failed: {}", error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "score config lookup failed" })),
+            )
+        })?
+    {
+        let stored = engine
+            .storage
+            .writer
+            .get_score_config(&config.config_id)
+            .await
+            .map_err(|error| {
+                warn!("score config reload failed: {}", error);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "score config lookup failed" })),
+                )
+            })?
+            .unwrap_or(config);
+        return Ok((StatusCode::OK, Json(stored)));
+    }
+
+    engine
+        .storage
+        .writer
+        .write_score_config_batches(vec![vec![config.clone()]])
+        .await
+        .map_err(|error| {
+            warn!("score config write failed: {}", error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "score config write failed" })),
+            )
+        })?;
+
+    Ok((StatusCode::CREATED, Json(config)))
+}
+
+pub async fn list_score_configs(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+) -> Result<Json<ScoreConfigListResponse>, ApiError> {
+    let tenant_info = tenant.as_ref().map(|extension| &extension.0);
+    let engine = match tenant_info {
+        Some(info) => state.engine_for_tenant(info).await,
+        None => state.engine_for_id("").await,
+    }
+    .map_err(|error| {
+        warn!("failed to resolve tenant runtime for score config list: {}", error);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
+        )
+    })?;
+
+    // Score-config reads use the writer DuckLake pool (same connection family as
+    // writes). Query-engine SQL mapping for MAP/date columns was unreliable for
+    // this table; keep one read path to avoid empty-list re-seed loops.
+    let mut items = engine
+        .storage
+        .writer
+        .list_score_configs()
+        .await
+        .map_err(|error| {
+            warn!("score config list failed: {}", error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "score config list failed" })),
+            )
+        })?;
+    if items.is_empty() {
+        for seed in ScoreConfig::seed_defaults(Utc::now()) {
+            if engine
+                .storage
+                .writer
+                .score_config_exists(&seed.config_id)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Err(error) = engine
+                .storage
+                .writer
+                .write_score_config_batches(vec![vec![seed]])
+                .await
+            {
+                warn!("score config seed write skipped: {}", error);
+            }
+        }
+        items = engine
+            .storage
+            .writer
+            .list_score_configs()
+            .await
+            .map_err(|error| {
+                warn!("score config list after seed failed: {}", error);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "score config list failed" })),
+                )
+            })?;
+    }
+    Ok(Json(ScoreConfigListResponse { items }))
 }

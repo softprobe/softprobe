@@ -80,5 +80,5 @@ Expect paths such as `"sp.observation.type"` (varchar),
 
 - [`src/storage/schema/variant.rs`](../src/storage/schema/variant.rs)
 - [`src/storage/schema/tables.rs`](../src/storage/schema/tables.rs)
-- [`src/storage/ducklake/mod.rs`](../src/storage/ducklake/mod.rs)
+- [`src/storage/ducklake/`](../src/storage/ducklake/) (`writer.rs`, `otlp.rs`, `util.rs`)
 - [`tests/integration/variant_shredding.rs`](../tests/integration/variant_shredding.rs)

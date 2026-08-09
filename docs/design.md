@@ -63,7 +63,8 @@ attached catalog.
 
 ## Storage and catalog
 
-The writer in `src/storage/ducklake/mod.rs` is the sole durable writer. It:
+The writer in `src/storage/ducklake/` (`writer.rs` plus domain modules
+`otlp.rs`, `scores.rs`, `promotion.rs`) is the sole durable writer. It:
 
 1. resolves the tenant's DuckLake scope;
 2. applies active telemetry-column promotions;
@@ -144,6 +145,13 @@ Immutable LLM evaluation records are stored separately from spans because an
 evaluation commonly arrives after the observed work. A score targets at least
 one trace, span, or session and contains one typed numeric, categorical,
 boolean, or text value. `score_id` is the tenant-local idempotency key.
+
+### `score_configs`
+
+Append-only score schemas (name + data type + optional numeric bounds /
+categorical values). `config_id` is the tenant-local idempotency key. There is
+no PATCH; replace a config by inserting a new `config_id`. Human annotation
+(Annotate panel → scores) is documented in Softprobe LLM `docs/annotation.md`.
 
 ## Schema promotion
 
