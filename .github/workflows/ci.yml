@@ -22,6 +22,16 @@ jobs:
       ENFORCE_SLO: "1"
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          # Prior compose runs leave root-owned MinIO warehouse dirs that break checkout clean.
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
       - name: Checkout
         uses: actions/checkout@v5
 

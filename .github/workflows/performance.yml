@@ -28,6 +28,15 @@ jobs:
       PERF_TARGET_MS: "1000"
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
       - name: Checkout
         uses: actions/checkout@v5
 
