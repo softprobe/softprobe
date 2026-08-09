@@ -1,7 +1,7 @@
 name: Build and Push TheLake Docker Image
 
 # Softprobe convention: GitHub Release vX.Y.Z → make release
-# (ci-full + test-perf + publish-docker; one job, no second compile).
+# (ci-full + test-perf + build-release + publish-docker; Docker never compiles).
 # Warm self-hosted SLO: ≤ 25m (hard timeout 35m).
 on:
   release:
@@ -58,7 +58,7 @@ jobs:
       - name: Start local test infra
         run: make setup-local
 
-      - name: Release gate (ci-full + test-perf + publish)
+      - name: Release gate (ci-full + test-perf + build-release + publish)
         run: |
           set -euo pipefail
           gcloud auth configure-docker "${AR_REGISTRY}" --quiet

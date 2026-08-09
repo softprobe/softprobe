@@ -6,7 +6,6 @@ use axum::routing::post;
 use axum::Router;
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -27,17 +26,9 @@ struct SqliteBackend {
 }
 
 async fn build_router(config: Config) -> Router {
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
     let (router, state) = softprobe_runtime::api::create_router(
         Arc::new(config),
-        pipeline.storage,
-        query_engine,
         post(ingest_traces),
-        None,
         None,
     )
     .await

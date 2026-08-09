@@ -14,7 +14,6 @@ use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span as ModelSpan;
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tonic::Request;
@@ -26,6 +25,8 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     let mut config = Config::default();
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
+    config.query.max_connections = 1;
+    config.ducklake.writer_pool_size = 1;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
     config.ducklake.catalog_type = "postgres".to_string();
@@ -289,27 +290,14 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         .mount(&mock)
         .await;
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
-
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
     };
 
     let config = std::sync::Arc::new(config);
-    let (_router, state) = create_router(
-        config.clone(),
-        pipeline.storage.clone(),
-        query_engine,
-        post(ingest_traces),
-        Some(control),
-        None,
-    )
-    .await
-    .expect("router");
+    let (_router, state) = create_router(config.clone(), post(ingest_traces), Some(control))
+        .await
+        .expect("router");
 
     let api_key = "grpc-integration-test-key";
     let svc = GrpcTraceService {
@@ -341,7 +329,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     .await
     .expect("HTTP-path export should write to the same tenant scope");
 
-    pipeline.force_flush_spans().await.expect("flush spans");
+    // Ingest is flush-through; no separate pipeline flush needed.
 
     let metadata_path = config.ducklake.metadata_path.clone();
     let conn = duckdb::Connection::open_in_memory().expect("duckdb");

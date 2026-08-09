@@ -1,24 +1,27 @@
 # SoftProbe OTLP Backend - Test & Development Makefile
 #
-# Canonical product bits: make build-release → dist/ (cargo-chef + --release --locked).
+# Canonical product bits: make build-release → dist/ (--release --locked; optional USE_CARGO_CHEF=1).
 # Docker/image packaging never compiles Rust — it COPY's dist/ only.
 #
 # Timing SLOs (warm self-hosted Linux):
-#   ci-full  ≤ 15m (900s)   workflow timeout 20m
+#   ci-full  ≤ 15m (900s)   workflow hard timeout 45m (cold DuckDB headroom)
 #   test-perf ≤ 8m (480s)   workflow timeout 15m
 #   release  ≤ 25m (1500s)  workflow timeout 35m
+#
+# PR gate (ci-full): fmt + lint + tests. When CI=true, tests use --release (one profile).
+# Release gate: ci-full + test-perf + build-release → dist/ + publish-docker.
 #
 # Usage:
 #   make setup-local && make ci-full
 #   make test-perf
 #   make build-release && make package-image
-#   make release   # ci-full + test-perf + publish-docker
+#   make release   # ci-full + test-perf + build-release + publish-docker
 
 .PHONY: help test test-all test-local test-smoke test-quick test-r2 test-gcs test-ci test-perf \
 	test-gcp test-gcp-stress test-deployment-local test-deployment-stress \
 	stress-test stress-test-r2-ducklake stress-test-gcs-ducklake \
 	setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres check-local-e2e \
-	clean build build-release package-image publish-docker test-publish-tags \
+	clean build build-release ensure-dist package-image publish-docker test-publish-tags \
 	lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables \
 	ci-full release doctor-ci help-scripts ensure-python-requests
 
@@ -26,6 +29,12 @@ COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-comp
 
 INTEGRATION_E2E_FEATURE = --features integration-e2e
 INTEGRATION_E2E_TESTS = --test tests
+# In CI, use --release so test harness shares the build-release profile (one DuckDB compile).
+ifeq ($(CI),true)
+CARGO_PROFILE_FLAG = --release
+else
+CARGO_PROFILE_FLAG =
+endif
 INTEGRATION_PERF_TESTS = \
 	performance::perf_union_read_concurrency \
 	performance::perf_union_read_latency \
@@ -52,7 +61,7 @@ help:
 	@echo "  make build-release    - cargo-chef + release --locked → dist/"
 	@echo "  make package-image    - docker build from dist/ (local load)"
 	@echo "  make publish-docker   - build-release if needed + push (TAG= TAG_LATEST=)"
-	@echo "  make release          - ci-full + test-perf + publish-docker"
+	@echo "  make release          - ci-full + test-perf + build-release + publish-docker"
 	@echo ""
 	@echo "Test Targets:"
 	@echo "  make test / test-all  - test-quick + test-local (no perf)"
@@ -60,7 +69,7 @@ help:
 	@echo "  make test-local       - Isolated integration-e2e (MinIO + Postgres)"
 	@echo "  make test-perf        - Performance suite only (PERF_SUITE=all|latency|concurrency|stability)"
 	@echo "  make test-ci          - CI tests (fails if infra missing when CI=true)"
-	@echo "  make ci-full          - fmt + lint + build-release + test-ci (≤15m warm SLO)"
+	@echo "  make ci-full          - fmt + lint + test-ci only (≤15m warm SLO; no release build)"
 	@echo ""
 	@echo "Infrastructure: setup-local / teardown-local / doctor-ci"
 	@echo "Stress: make stress-test BACKEND=local|r2|gcs  (aliases: stress-test-r2-ducklake, …)"
@@ -181,7 +190,7 @@ check-local-e2e: check-local check-local-postgres
 # ---- tests ----
 test-quick:
 	@echo "🧪 Library + lightweight tests (no integration-e2e)..."
-	cargo test --lib --test tests -- --test-threads=1
+	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests -- --test-threads=1
 
 test-smoke: test-quick
 
@@ -191,7 +200,7 @@ test-local: check-local-e2e
 	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
-	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
+	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-gcs: check-local-e2e
 	@echo "🧪 Isolated integration-e2e on GCS..."
@@ -207,7 +216,7 @@ test-gcs: check-local-e2e
 		export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
 		export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=gcs; \
 		trap 'echo "🧹 Cleaning GCS prefix $$GCS_E2E_PREFIX"; gcloud storage rm -r "$$GCS_E2E_PREFIX"** >/dev/null 2>&1 || gcloud storage rm -r "$$GCS_E2E_PREFIX" >/dev/null 2>&1 || true' EXIT; \
-		./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
+	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-r2:
 	@echo "🧪 Isolated integration-e2e on R2..."
@@ -219,7 +228,7 @@ test-r2:
 			echo "⚠️  Enabling TLS validation bypass"; \
 		fi; \
 	fi; \
-	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
+	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration::
 
 test-ci:
 	@echo "🧪 Running tests (CI=$${CI:-false})..."
@@ -252,7 +261,7 @@ test-perf: check-local-e2e
 	export AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin}; \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}; \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
-	./scripts/run-isolated-cargo-tests.sh $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
+	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
 	./scripts/slo.sh total test-perf $$(($$(date +%s) - t0)) $(PERF_GOAL_SECS); \
 	echo "✅ Performance tests completed!"
 
@@ -264,24 +273,26 @@ test: test-all
 dev-check: check-fmt lint test-quick
 	@echo "✅ Development checks passed!"
 
-# Continuous Integration: release bits + tests (no perf).
+# PR / main gate: fmt + lint + tests (CI=true → --release profile).
+# Product dist/ is built in `make release` (same host path as local publish).
 ci-full:
 	@set -e; \
 	t0=$$(date +%s); \
 	./scripts/slo.sh phase check-fmt -- $(MAKE) check-fmt; \
 	./scripts/slo.sh phase lint -- $(MAKE) lint; \
-	./scripts/slo.sh phase build-release -- $(MAKE) build-release; \
 	./scripts/slo.sh phase test-ci -- $(MAKE) test-ci; \
 	./scripts/slo.sh total ci-full $$(($$(date +%s) - t0)) $(CI_GOAL_SECS); \
 	echo "✅ CI checks completed!"
 
-# Release gate: same Make targets as CI + perf + publish (one job, no second compile).
-# Pass TAG= / TAG_LATEST= through to publish-docker.
+# Release gate: PR checks + perf + unconditional host build-release + image push
+# (Docker never compiles). Always rebuild dist/ so self-hosted leftovers cannot
+# be published. Pass TAG= / TAG_LATEST= through to publish-docker.
 release:
 	@set -e; \
 	t0=$$(date +%s); \
 	./scripts/slo.sh phase ci-full -- $(MAKE) ci-full; \
 	./scripts/slo.sh phase test-perf -- $(MAKE) test-perf; \
+	./scripts/slo.sh phase build-release -- $(MAKE) build-release; \
 	./scripts/slo.sh phase publish-docker -- $(MAKE) publish-docker TAG="$(or $(TAG),latest)" TAG_LATEST="$(or $(TAG_LATEST),1)"; \
 	./scripts/slo.sh total release $$(($$(date +%s) - t0)) $(RELEASE_GOAL_SECS); \
 	echo "✅ release completed!"

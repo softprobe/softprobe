@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Image tag/push for `make publish-docker`. Bits must already be in dist/
-# (built by `make build-release` — same path as CI). This script only packages
-# and pushes; it never compiles Rust.
+# (from `make build-release` / `make release`; PR `ci-full` does not build dist/).
+# This script only packages and pushes; it never compiles Rust.
 #
 # Usage (via Make):
 #   make publish-docker TAG=v1.2.3

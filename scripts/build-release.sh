@@ -2,16 +2,11 @@
 # Canonical release build for softprobe-runtime.
 # Host → dist/{softprobe-runtime,libduckdb.*,config.yaml}
 #
-# cargo chef cook blanks *.rs (Docker recovers via COPY). On the host we
-# snapshot sources before cook and restore before the real cargo build.
+# Default: plain `cargo build --release --locked` (host/CI cache is the speed path).
+# Optional: USE_CARGO_CHEF=1 to cook deps first (snapshots/restores sources cook blanks).
 #
 # Linux docker images on a non-linux/amd64 host:
 #   TARGET_PLATFORM=linux/amd64 ./scripts/build-release.sh
-#
-# Usage:
-#   ./scripts/build-release.sh
-#   TARGET_PLATFORM=linux/amd64 ./scripts/build-release.sh
-#   IN_LINUX_BUILDER=1 ./scripts/build-release.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +17,7 @@ RECIPE_PATH="${RECIPE_PATH:-recipe.json}"
 DIST_DIR="${DIST_DIR:-dist}"
 BIN_NAME=softprobe-runtime
 SRC_SNAPSHOT=""
+USE_CARGO_CHEF="${USE_CARGO_CHEF:-0}"
 
 host_needs_linux_builder() {
   if [[ "${IN_LINUX_BUILDER:-0}" == "1" ]]; then
@@ -45,6 +41,7 @@ run_in_linux_builder() {
     -e CARGO_HOME=/app/.cargo-linux \
     -e RECIPE_PATH \
     -e DIST_DIR \
+    -e USE_CARGO_CHEF \
     "${image}" \
     bash -lc '
       set -euo pipefail
@@ -64,12 +61,10 @@ ensure_cargo_chef() {
 
 snapshot_sources() {
   SRC_SNAPSHOT="$(mktemp -t thelake-src.XXXXXX.tar)"
-  # Include paths cook/prepare may rewrite; keep build scripts out of the tarball churn.
   tar cf "${SRC_SNAPSHOT}" \
     Cargo.toml Cargo.lock rust-toolchain.toml \
     src tests \
     2>/dev/null || tar cf "${SRC_SNAPSHOT}" Cargo.toml Cargo.lock src tests
-  echo "Source snapshot: ${SRC_SNAPSHOT}"
 }
 
 restore_sources() {
@@ -84,7 +79,6 @@ restore_sources() {
 cleanup() {
   restore_sources || true
 }
-trap cleanup EXIT
 
 stage_dist() {
   mkdir -p "${DIST_DIR}"
@@ -112,14 +106,17 @@ stage_dist() {
 }
 
 build_on_host() {
-  ensure_cargo_chef
-  snapshot_sources
-  echo "cargo chef prepare..."
-  cargo chef prepare --recipe-path "${RECIPE_PATH}"
-  echo "cargo chef cook --release --locked..."
-  cargo chef cook --release --locked --recipe-path "${RECIPE_PATH}"
-  restore_sources
-  trap - EXIT
+  if [[ "${USE_CARGO_CHEF}" == "1" ]]; then
+    trap cleanup EXIT
+    ensure_cargo_chef
+    snapshot_sources
+    echo "cargo chef prepare..."
+    cargo chef prepare --recipe-path "${RECIPE_PATH}"
+    echo "cargo chef cook --release --locked..."
+    cargo chef cook --release --locked --recipe-path "${RECIPE_PATH}"
+    restore_sources
+    trap - EXIT
+  fi
   echo "cargo build --release --locked --bin ${BIN_NAME}..."
   cargo build --release --locked --bin "${BIN_NAME}"
   stage_dist

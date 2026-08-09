@@ -74,11 +74,11 @@ integration tests against MinIO and PostgreSQL (performance is separate).
 GitHub Actions (self-hosted Linux; Make-only):
 
 - `.github/workflows/ci.yml` — on push/PR: `make setup-local` then `make ci-full`
-  (`check-fmt`, `lint`, `build-release` → `dist/`, `test-ci`). Warm SLO ≤ 15m.
+  (`check-fmt`, `lint`, `test-ci` only — no `build-release`). Warm SLO ≤ 15m.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
-  (`ci-full` + `test-perf` + `publish-docker`). Warm SLO ≤ 25m.
+  (`ci-full` + `test-perf` + `build-release` + `publish-docker`). Warm SLO ≤ 25m.
 
 ## Run
 
@@ -215,7 +215,8 @@ Product bits are built **once on the host** (`make build-release` → cargo-chef
 (`COPY dist/…`); it never runs cargo.
 
 Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
-(same `ci-full` + `test-perf` + `publish-docker` as local).
+(`ci-full` + `test-perf` + unconditional `build-release` + `publish-docker`).
+PR CI does not build `dist/`.
 
 Local/emergency image push: `make build-release && make publish-docker TAG=vX.Y.Z`
 (on Mac, `build-release` uses a linux/amd64 builder container running the same

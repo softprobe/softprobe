@@ -18,6 +18,10 @@ EXPLICIT_TESTS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --release)
+      CARGO_ARGS+=("$1")
+      shift
+      ;;
     --features|--test)
       CARGO_ARGS+=("$1" "$2")
       shift 2

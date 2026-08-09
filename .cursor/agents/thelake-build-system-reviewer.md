@@ -30,6 +30,7 @@ You are the **thelake build-system reviewer**. Your only job is to find violatio
 ### Make / workflow DRY
 
 - [ ] Workflows only call Make (`ci-full`, `test-perf`, `release`); no inline `cargo test` / apt compile matrices
+- [ ] PR `ci-full` is fmt + lint + tests only (no `build-release`); `make release` always runs `build-release` before publish
 - [ ] All jobs use `runs-on: [self-hosted, Linux]`
 - [ ] `test-local` / `test-gcs` / `test-r2` do **not** embed `INTEGRATION_PERF_TESTS`
 - [ ] `test-perf` is the sole owner of the integration perf suite

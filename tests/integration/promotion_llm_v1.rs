@@ -14,7 +14,6 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use serde_json::json;
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,17 +109,9 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
     let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
     let (router, state) = softprobe_runtime::api::create_router(
         Arc::new(config),
-        pipeline.storage,
-        query_engine,
         post(ingest_traces),
-        None,
         None,
     )
     .await

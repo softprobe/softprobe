@@ -1,7 +1,8 @@
 name: CI
 
-# Pre-merge / main push gate. Performance is a separate manual workflow.
-# Warm self-hosted SLO: make ci-full ≤ 15m (hard timeout 20m).
+# Pre-merge / main push gate: fmt + lint + tests (CI=true → --release).
+# Performance is manual; product dist/ is built in release.yml via make release.
+# Warm SLO: ci-full ≤ 15m (ENFORCE_SLO); hard timeout 45m for cold DuckDB.
 on:
   push:
     branches: [main]
@@ -13,10 +14,9 @@ concurrency:
 
 jobs:
   ci:
-    name: Build and test
+    name: Lint and test
     runs-on: [self-hosted, Linux]
-    # Hard ceiling above warm 15m goal; cold chef/duckdb download may need headroom.
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CI: "true"
       ENFORCE_SLO: "1"
@@ -26,7 +26,6 @@ jobs:
         run: |
           set -euo pipefail
           WS="${GITHUB_WORKSPACE:-$PWD}"
-          # Prior compose runs leave root-owned MinIO warehouse dirs that break checkout clean.
           if [[ -d "$WS" ]]; then
             sudo rm -rf "$WS/warehouse" || true
             sudo chown -R "$(id -u):$(id -g)" "$WS" || true
@@ -65,7 +64,7 @@ jobs:
       - name: Start local test infra
         run: make setup-local
 
-      - name: CI checks (fmt, lint, build-release, tests)
+      - name: CI checks (fmt, lint, tests)
         run: make ci-full
 
       - name: Teardown local infra

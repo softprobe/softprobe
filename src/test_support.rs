@@ -9,11 +9,13 @@ use axum::Router;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-/// File-backed DuckLake under `temp`; compaction and metadata maintenance disabled.
+/// File-backed DuckLake under `temp`; compaction/metadata off; test-sized pools
+/// via [`Config::shrink_pools_for_tests`].
 pub fn file_backed_test_config(temp: &TempDir) -> Config {
     let mut config = Config::default();
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
+    config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into_owned());
 
     let duck_dir = temp.path().join("ducklake");
@@ -29,25 +31,15 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
     config
 }
 
-/// Router + [`AppState`] from [`create_router`] (same wiring as `AppPipeline::into_router`).
+/// Router + [`AppState`] from [`create_router`] (lazy engines; no throwaway [`AppPipeline`]).
 pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempDir)> {
     let temp = TempDir::new()?;
-    let config = file_backed_test_config(&temp);
-    let config = Arc::new(config);
-    let app = AppPipeline::new(config.as_ref()).await?;
-    let (router, state) = create_router(
-        config.clone(),
-        app.storage,
-        app.query_engine,
-        post(ingest_traces),
-        None,
-        None,
-    )
-    .await?;
+    let config = Arc::new(file_backed_test_config(&temp));
+    let (router, state) = create_router(config, post(ingest_traces), None).await?;
     Ok((router, state, temp))
 }
 
-/// Builds the local test router (same as `AppPipeline::into_router()`).
+/// Builds the local test router (lazy [`RuntimeEngineManager`], same as production HTTP wiring).
 pub async fn local_router() -> anyhow::Result<(Router, TempDir)> {
     let (router, _, temp) = local_router_and_state().await?;
     Ok((router, temp))

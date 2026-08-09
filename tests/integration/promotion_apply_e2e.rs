@@ -8,7 +8,6 @@ use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
 use std::sync::Arc;
@@ -83,22 +82,14 @@ async fn setup() -> PostgresBackend {
         .mount(&mock)
         .await;
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine =
-        softprobe_runtime::query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
     };
     let metadata_path = config.ducklake.metadata_path.clone();
     let (router, state) = create_router(
         Arc::new(config),
-        pipeline.storage,
-        query_engine,
         post(ingest_traces),
         Some(control),
-        None,
     )
     .await
     .expect("router");

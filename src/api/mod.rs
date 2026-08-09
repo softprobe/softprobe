@@ -13,7 +13,6 @@ pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;
-use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
@@ -94,29 +93,15 @@ impl AppPipeline {
             query_engine,
         })
     }
-
-    pub async fn into_router(self) -> anyhow::Result<Router> {
-        let config = Arc::new(Config::load()?);
-        let (r, _) = create_router(
-            config,
-            self.storage,
-            self.query_engine,
-            post(ingestion::traces::ingest_traces),
-            None,
-            None,
-        )
-        .await?;
-        Ok(r)
-    }
 }
 
+/// HTTP router + [`AppState`]. Per-tenant DuckLake/query engines are created
+/// lazily on first request via [`RuntimeEngineManager`] — callers must not
+/// pre-build an unused [`AppPipeline`] just to satisfy this API.
 pub async fn create_router(
     config: Arc<Config>,
-    _storage: Storage,
-    _query_engine: QueryEngine,
     traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
-    _dropdown_catalog: Option<Arc<DropdownCatalog>>,
 ) -> anyhow::Result<(Router, AppState)> {
     let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
     let runtime_engine_manager = Arc::new(RuntimeEngineManager::new(

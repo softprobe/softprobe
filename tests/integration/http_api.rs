@@ -1,4 +1,5 @@
-//! Integration tests for the OTLP HTTP surface (`AppPipeline` router — same handlers as production without `main` middleware layers).
+//! Integration tests for the OTLP HTTP surface (in-process router — same handlers as
+//! production without `main` middleware layers). Engines are lazy via RuntimeEngineManager.
 
 use axum::body::Body;
 use axum::http::{header, Request, Response, StatusCode};
@@ -16,7 +17,7 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
 use serde_json::{json, Value};
-use softprobe_runtime::api::{AppPipeline, AppState};
+use softprobe_runtime::api::AppState;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -30,17 +31,10 @@ async fn build_router() -> (Router, tempfile::TempDir) {
 
 async fn build_router_and_state() -> (Router, AppState, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let config = file_backed_test_config(&temp);
-    let config = Arc::new(config);
-    let app = AppPipeline::new(config.as_ref())
-        .await
-        .expect("app pipeline");
+    let config = Arc::new(file_backed_test_config(&temp));
     let (router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        app.storage,
-        app.query_engine,
+        config,
         axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
         None,
     )
     .await
@@ -1068,15 +1062,9 @@ async fn inlined_data_stays_readable_across_maintenance() {
     config.maintenance.enabled = true;
     config.maintenance.metadata_enabled = true;
     let config = Arc::new(config);
-    let app = AppPipeline::new(config.as_ref())
-        .await
-        .expect("app pipeline");
     let (router, state) = softprobe_runtime::api::create_router(
         config.clone(),
-        app.storage,
-        app.query_engine,
         axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
         None,
     )
     .await
