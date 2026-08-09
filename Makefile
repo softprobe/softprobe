@@ -15,7 +15,7 @@
 #   make teardown-local - Stop local test infrastructure
 #   make clean          - Clean build artifacts
 
-.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables
+.PHONY: help test test-all test-local test-smoke test-r2 test-gcs test-ci test-gcp test-gcp-stress test-deployment-local test-deployment-stress stress-test stress-test-r2-ducklake stress-test-gcs-ducklake setup-local teardown-local setup-minio teardown-minio check-minio check-local check-local-postgres clean build lint fmt check-fmt demo-session duckdb-shell generate-telemetry drop-tables publish-docker test-publish-tags
 
 # Gated modules: tests/integration/mod.rs (iceberg, ingest/query, …). DuckDB-heavy performance
 # tests must run one cargo process per test to avoid libduckdb SIGSEGV after repeated global-state
@@ -92,9 +92,26 @@ build-release:
 	@echo "🔨 Building release..."
 	cargo build --release
 
+# Official images: GitHub Release vX.Y.Z → .github/workflows/release.yml → this target.
+# Local/emergency: make publish-docker [TAG=vX.Y.Z] [TAG_LATEST=0]
+# TAG_LATEST=0 skips moving :latest (used for GitHub prereleases).
 publish-docker:
-	@echo "🔨 Publishing Docker image..."
-	docker buildx build --platform linux/amd64 --push -t gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/splake:latest .
+	@echo "🔨 Publishing Docker image TAG=$(or $(TAG),latest) TAG_LATEST=$(or $(TAG_LATEST),1)..."
+	TAG_LATEST=$(or $(TAG_LATEST),1) ./build.sh $(or $(TAG),latest)
+
+# Guard: prerelease / TAG_LATEST=0 must not plan :latest (production pulls :latest).
+test-publish-tags:
+	@set -euo pipefail; \
+	out=$$(PRINT_TAGS=1 TAG_LATEST=0 ./build.sh v1.2.3-rc.1); \
+	echo "$$out" | grep -qx '.*:v1.2.3-rc.1'; \
+	! echo "$$out" | grep -q ':latest$$'; \
+	out=$$(PRINT_TAGS=1 ./build.sh v1.2.3); \
+	echo "$$out" | grep -qx '.*:v1.2.3'; \
+	echo "$$out" | grep -qx '.*:latest'; \
+	out=$$(PRINT_TAGS=1 ./build.sh latest); \
+	echo "$$out" | grep -qx '.*:latest'; \
+	test "$$(echo "$$out" | wc -l | tr -d ' ')" = "1"; \
+	echo "✅ publish tag plan ok"
 
 # Code quality targets
 lint:
