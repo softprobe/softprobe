@@ -1,6 +1,12 @@
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+
+#[cfg(feature = "integration-e2e")]
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
+#[cfg(feature = "integration-e2e")]
+use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
+#[cfg(feature = "integration-e2e")]
 use opentelemetry_proto::tonic::resource::v1::Resource;
+#[cfg(feature = "integration-e2e")]
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 
 pub fn string_kv(key: &str, value: &str) -> KeyValue {
@@ -30,15 +36,7 @@ pub fn double_kv(key: &str, value: f64) -> KeyValue {
     }
 }
 
-pub fn bool_kv(key: &str, value: bool) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::BoolValue(value)),
-        }),
-    }
-}
-
+#[cfg(feature = "integration-e2e")]
 pub fn create_test_otlp_request() -> ExportTraceServiceRequest {
     let span = Span {
         trace_id: vec![

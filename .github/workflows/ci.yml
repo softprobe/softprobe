@@ -1,8 +1,8 @@
 name: CI
 
-# Pre-merge / main push gate: fmt + lint + tests (CI=true → --release).
-# Performance is manual; product dist/ is built in release.yml via make release.
-# Warm SLO: ci-full ≤ 15m (ENFORCE_SLO); hard timeout 45m for cold DuckDB.
+# Pre-merge / main push: make doctor → setup → ci (fmt + lint + test + test-e2e).
+# Warm SLO: ci ≤ 15m (ENFORCE_SLO); hard timeout 45m for cold DuckDB.
+# Cache: ~/.cache/thelake via Make ensure-cache — no actions/cache for target/.
 on:
   push:
     branches: [main]
@@ -19,9 +19,11 @@ jobs:
     timeout-minutes: 45
     env:
       CI: "true"
+      CARGO_INCREMENTAL: "0"
       ENFORCE_SLO: "1"
 
     steps:
+      # Must stay inline and before checkout: root-owned warehouse/ blocks actions/checkout.
       - name: Pre-clean workspace permissions
         run: |
           set -euo pipefail
@@ -34,39 +36,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-thelake-ci-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-thelake-ci-
-            ${{ runner.os }}-thelake-
-
-      - name: Install host tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep curl clang mold
-
+      # Skip dtolnay/rust-toolchain: arc-runner already has rustc/cargo/rustfmt/clippy
+      # (and mold/clang). make doctor fails fast if anything is missing.
       - name: Doctor
-        run: make doctor-ci
+        run: make doctor
 
       - name: Start local test infra
-        run: make setup-local
+        run: make setup
 
-      - name: CI checks (fmt, lint, tests)
-        run: make ci-full
+      - name: CI checks (fmt, lint, test, test-e2e)
+        run: make ci
 
       - name: Teardown local infra
         if: always()
-        run: make teardown-local
+        run: make teardown

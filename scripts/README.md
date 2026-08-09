@@ -1,44 +1,31 @@
-# Scripts
+# thelake/scripts — Make-owned helpers only
 
-Most workflows are exposed via Makefile targets; scripts are thin helpers.
+Do not add parallel entrypoints. Product compile, gates, and stress are Makefile
+targets; these scripts are thin helpers invoked by Make.
 
-## Quick Start
+## Surviving scripts → Make owner
 
-```bash
-# Automated verification (ingest + DuckLake + HTTP API)
-make setup-local && make test
+| Script | Make target |
+|--------|-------------|
+| `assert-duckdb-version.sh` | `build-release` (stages `dist/`) |
+| `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf` |
+| `stress-test.sh` | `stress BACKEND=local\|r2\|gcs` |
+| `interactive_query.sh` + `duckdb_ducklake_*` | `duckdb-shell` |
+| `interactive_query_ducklake_production.sh` | `duckdb-shell-prod` |
+| `demo_session_queries.sh` | `demo-session` |
+| `drop_all_tables.sh` | `drop-tables` |
+| `generate_telemetry.py` | `generate-telemetry` |
+| `telemetrygen_hosted.sh` | `telemetrygen` |
 
-# Performance gate (manual / release)
-make test-perf
+## Public Make surface
 
-# Host-first release bits → dist/, then package image (linux/amd64)
-make build-release
-make package-image   # or: TARGET_PLATFORM=linux/amd64 make build-release && make publish-docker TAG=vX.Y.Z
-
-# Interactive DuckDB against local DuckLake
-make duckdb-shell
-
-# Live load stress (not the integration perf gate)
-make stress-test BACKEND=local   # or r2 / gcs
+```text
+Build:    build | build-release | package | publish
+Test:     test | test-e2e | test-perf
+Gates:    ci | release
+Infra:    setup | teardown | doctor
+Stress:   stress BACKEND=local|r2|gcs
 ```
 
-## DuckDB + DuckLake (local)
-
-The runtime stores committed telemetry in **DuckLake** (`ATTACH 'ducklake:postgres:…'`, `data_path` on S3/MinIO). **`make duckdb-shell`** builds that ATTACH from **`CONFIG_FILE`** so `catalog_alias`, `metadata_schema`, and `data_path` match the process you are debugging.
-
-- `scripts/duckdb_ducklake_render_init.py` — emits ATTACH + S3 `SET`s from YAML
-- `scripts/duckdb_ducklake_combo.sh` — temp `-init` for existing tables
-- `scripts/interactive_query.sh` — used by `make duckdb-shell`
-
-## Build / CI helpers
-
-- **build-release.sh** — cargo-chef cook (dep cache) + locked release build → `dist/` (snapshots/restores sources blanked by cook)
-- **run-isolated-cargo-tests.sh** — `cargo test --no-run` once, then per-test process isolation
-- **stress-test.sh** — unified live `perf_stress` driver (`BACKEND=local|r2|gcs`)
-- **slo.sh** — phase timings + wall-clock SLO enforcement
-- **assert-duckdb-version.sh** — refuse to stage a libduckdb that does not match Cargo.lock
-
-## Other
-
-- **telemetrygen_hosted.sh** — OTLP smoke against a hosted runtime
-- **demo_session_queries.sh** / **drop_all_tables.sh** — Make-backed helpers
+Cache: `~/.cache/thelake` (`THELAKE_CACHE_ROOT`). No host cargo-chef. Compile and
+publish live only in the Makefile (no parallel release/SLO/publish scripts).

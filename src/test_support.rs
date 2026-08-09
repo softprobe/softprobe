@@ -1,4 +1,4 @@
-//! Local router + config helpers for `#[cfg(test)]` modules (`make test-quick` / `cargo test --lib` / `llvm-cov --lib`).
+//! Local router + config helpers for `#[cfg(test)]` modules (`make test` / `cargo test --lib` / `llvm-cov --lib`).
 //! Mirrors `tests/util/config.rs` so unit tests do not depend on the integration-test crate.
 
 use crate::api::ingestion::traces::ingest_traces;

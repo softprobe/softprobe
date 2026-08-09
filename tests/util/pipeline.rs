@@ -6,7 +6,6 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 pub struct TestPipeline {
-    pub config: Config,
     pub cache_dir: TempDir,
     pub pipeline: IngestPipeline,
     query_engine: QueryEngine,
@@ -49,7 +48,6 @@ impl TestPipeline {
             .expect("query engine");
 
         Self {
-            config,
             cache_dir,
             pipeline,
             query_engine,

@@ -2,8 +2,8 @@
 # Fail the build if the libduckdb being packaged is not the engine version
 # Cargo.lock resolved to.
 #
-# Why this exists: `scripts/build-release.sh` stages libduckdb with
-# `find -print -quit` under target/duckdb-download. A stale download cache
+# Why this exists: `make build-release` stages libduckdb with
+# `find -print -quit` under CARGO_TARGET_DIR/duckdb-download. A stale download cache
 # can ship an engine that differs from what the build resolved -- silently,
 # under a tag claiming otherwise. DuckDB 1.5.2 crashes on empty-array VARIANT
 # values and invalidates the whole database (2026-08-03 outage), so "which

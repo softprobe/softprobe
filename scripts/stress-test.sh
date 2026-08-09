@@ -55,7 +55,7 @@ smoke_ok() {
 
 case "${BACKEND}" in
   local)
-    make setup-minio
+    make setup
     PORT="${PORT:-38090}"
     TMP_CONFIG="/tmp/splake-stress.yaml"
     LOG="/tmp/splake-stress.log"
@@ -63,7 +63,7 @@ case "${BACKEND}" in
     echo "🚀 Starting softprobe-runtime on port ${PORT} (local MinIO)..."
     SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin softprobe-runtime >"${LOG}" 2>&1 &
     PID=$!
-    trap 'kill ${PID} >/dev/null 2>&1 || true; make teardown-minio >/dev/null 2>&1 || true; rm -f "${TMP_CONFIG}"' EXIT
+    trap 'kill ${PID} >/dev/null 2>&1 || true; make --no-print-directory _teardown-minio >/dev/null 2>&1 || true; rm -f "${TMP_CONFIG}"' EXIT
     wait_health "${PORT}" "${LOG}" 10
     run_perf "${TMP_CONFIG}" "${PORT}" "${PERF_ARGS[@]}"
     ;;

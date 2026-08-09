@@ -1,7 +1,6 @@
 //! Verify DuckLake VARIANT shredding for hot attribute columns.
 
 use chrono::Utc;
-use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
 use softprobe_runtime::query;
@@ -588,7 +587,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
 
 #[tokio::test]
 async fn variant_write_fails_fast_on_legacy_map_table() {
-    // make test-local exports SPLAKE_RESET_DUCKLAKE=1; that path drops tables for local
+    // make test-e2e exports SPLAKE_RESET_DUCKLAKE=1; that path drops tables for local
     // iteration only. This test must not rely on DROP and must not fight that reset.
     let previous_reset = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
     std::env::remove_var("SPLAKE_RESET_DUCKLAKE");

@@ -214,6 +214,7 @@ async fn perf_union_read_latency() {
         config.query.max_connections = 1;
     }
 
+    let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -299,7 +300,6 @@ async fn perf_union_read_latency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -421,6 +421,7 @@ async fn perf_union_read_concurrency() {
         config.query.max_connections = 1;
     }
 
+    let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -510,7 +511,6 @@ async fn perf_union_read_concurrency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)

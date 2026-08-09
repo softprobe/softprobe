@@ -24,10 +24,12 @@ jobs:
     timeout-minutes: 15
     env:
       CI: "true"
+      CARGO_INCREMENTAL: "0"
       ENFORCE_SLO: "1"
       PERF_TARGET_MS: "1000"
 
     steps:
+      # Must stay inline and before checkout: root-owned warehouse/ blocks actions/checkout.
       - name: Pre-clean workspace permissions
         run: |
           set -euo pipefail
@@ -40,23 +42,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install host tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep curl clang mold
-
+      # Skip dtolnay/rust-toolchain: arc-runner already has rustc/cargo/rustfmt/clippy
+      # (and mold/clang). make doctor fails fast if anything is missing.
       - name: Doctor
-        run: make doctor-ci
+        run: make doctor
 
       - name: Start local test infra
-        run: make setup-local
+        run: make setup
 
       - name: Run performance suite
         run: make test-perf PERF_SUITE=${{ inputs.suite }}
 
       - name: Teardown local infra
         if: always()
-        run: make teardown-local
+        run: make teardown

@@ -3,17 +3,12 @@ use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
 use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
 use chrono::Utc;
-use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
 // Note: perf + config helpers live under `tests/util/`.
-
-async fn build_test_pipeline(mut config: Config) -> TestPipeline {
-    TestPipeline::new(config).await
-}
 
 #[tokio::test]
 async fn test_config_loading() {
@@ -26,9 +21,9 @@ async fn test_config_loading() {
 
 #[tokio::test]
 async fn test_ingestion_perf_5000_spans_under_one_second() {
-    let mut config = load_test_config();
+    let config = load_test_config();
     // Allow buffering without forcing flush during perf check
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
@@ -81,10 +76,10 @@ async fn test_ingestion_perf_5000_spans_under_one_second() {
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_session_roundtrip() {
-    let mut config = load_test_config();
+    let config = load_test_config();
     warn_if_minio_unresolvable();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with spans to test multi-session row groups
@@ -445,8 +440,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
 #[tokio::test]
 async fn test_duckdb_union_read_realtime_performance() {
-    let mut config = load_test_config();
-    let test_pipeline = build_test_pipeline(config).await;
+    let config = load_test_config();
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
@@ -612,10 +607,10 @@ async fn test_duckdb_union_read_realtime_performance() {
 
 #[tokio::test]
 async fn test_iceberg_writer_bulk_log_roundtrip() {
-    let mut config = load_test_config();
+    let config = load_test_config();
     warn_if_minio_unresolvable();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Create multiple sessions with logs to test multi-session row groups
@@ -780,10 +775,10 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 async fn test_iceberg_writer_bulk_metric_roundtrip() {
     use softprobe_runtime::models::Metric;
 
-    let mut config = load_test_config();
+    let config = load_test_config();
     warn_if_minio_unresolvable();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Create multiple metric names with data points to test metric_name-based row groups
@@ -1041,7 +1036,7 @@ async fn test_http_fields_in_span_model() {
 
     // Verify the span can be converted to Arrow RecordBatch
     let config = load_test_config();
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Write the span and verify it succeeds
@@ -1058,9 +1053,9 @@ async fn test_http_fields_in_span_model() {
 
 #[tokio::test]
 async fn test_pinned_metadata_updates_on_commit() {
-    let mut config = load_test_config();
+    let config = load_test_config();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
     let now = Utc::now();
 
@@ -1134,7 +1129,7 @@ async fn test_pinned_metadata_updates_on_commit() {
 #[tokio::test]
 async fn test_duckdb_union_read_realtime_concurrency() {
     let config = load_test_config();
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let now = Utc::now();
@@ -1229,9 +1224,9 @@ async fn test_duckdb_union_read_realtime_concurrency() {
 
 #[tokio::test]
 async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
-    let mut config = load_test_config();
+    let config = load_test_config();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let session_id = format!("sql-flush-{}", uuid::Uuid::new_v4());
@@ -1307,9 +1302,9 @@ async fn test_metadata_maintenance_job_expires_snapshots() {
 
 #[tokio::test]
 async fn test_wal_cleanup_after_flush() {
-    let mut config = load_test_config();
+    let config = load_test_config();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // First flush: create WAL files
@@ -1415,10 +1410,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     // 7. Data appears in Iceberg view
     // 8. Union view still returns correct count after commit
 
-    let mut config = load_test_config();
+    let config = load_test_config();
     warn_if_minio_unresolvable();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
     let now = Utc::now();
 

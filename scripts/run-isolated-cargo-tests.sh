@@ -75,35 +75,29 @@ if [[ "${cargo_rc}" -ne 0 ]]; then
   exit "${cargo_rc}"
 fi
 
-# Example: Executable tests/tests.rs (target/debug/deps/tests-abc123)
+# Example: Executable tests/tests.rs (/abs/or/rel/target/debug/deps/tests-abc123)
 TEST_BIN="$(
   awk -v name="${test_name}" '
-    $1 == "Executable" {
-      # fields: Executable <path> (target/...)
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /^\(target\//) {
-          gsub(/^\(/, "", $i)
-          gsub(/\)$/, "", $i)
-          bin = $i
-          # Prefer the harness whose basename starts with --test name-
-          n = split(bin, parts, "/")
-          base = parts[n]
-          if (index(base, name "-") == 1) {
-            print bin
-            found = 1
-            exit
-          }
-        }
+    $1 == "Executable" && match($0, /\([^)]+\)/) {
+      bin = substr($0, RSTART + 1, RLENGTH - 2)
+      n = split(bin, parts, "/")
+      base = parts[n]
+      if (index(base, name "-") == 1) {
+        print bin
+        found = 1
+        exit
       }
     }
     END { if (!found) exit 1 }
   ' "${build_log}"
 )" || true
 
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
 if [[ -z "${TEST_BIN}" || ! -x "${TEST_BIN}" ]]; then
   # Fallback: newest executable matching deps/<name>-*
   TEST_BIN="$(
-    find target -type f -path "*/deps/${test_name}-*" ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null \
+    find "${TARGET_DIR}" -type f -path "*/deps/${test_name}-*" ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null \
       | while read -r p; do
           if [[ -x "$p" ]]; then
             echo "$(stat -f '%m' "$p" 2>/dev/null || stat -c '%Y' "$p" 2>/dev/null) $p"
@@ -122,7 +116,7 @@ fi
 echo "Using test binary: ${TEST_BIN}"
 
 # libduckdb is dynamically linked; the harness needs the download dir on the loader path.
-DUCKDB_LIB_DIR="$(find target/duckdb-download -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
 if [[ -n "${DUCKDB_LIB_DIR}" ]]; then
   case "$(uname -s)" in
     Darwin) export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" ;;

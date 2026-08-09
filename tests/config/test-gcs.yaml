@@ -4,7 +4,7 @@
 #   GCS_BUCKET (optional; Make injects a unique e2e prefix under softprobe-datalake-ducklake)
 #
 # Usage:
-#   make test-gcs
+#   E2E_BACKEND=gcs make test-e2e
 #   # or: E2E_BACKEND=gcs GCS_BUCKET=softprobe-datalake-ducklake cargo test ...
 
 server:
