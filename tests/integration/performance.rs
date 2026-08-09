@@ -9,13 +9,26 @@ use std::time::Instant;
 use crate::util::pipeline::TestPipeline;
 use crate::util::storage_config::load_test_config;
 
-// ========================================
-// Performance test goals (tunable via env):
-// - Ingest N events (WAL + DuckLake commit)
-// - Query last N days via DuckDB union view
-// - Warm p95 latency target under PERF_TARGET_MS
-// - Parallel queries under PERF_CONCURRENCY
-// ========================================
+// =============================================================================
+// Performance quality bar (do not raise PERF_TARGET_MS to hide regressions)
+//
+// Asserted here (latency + concurrency):
+//   Warm union_logs COUNT(*) p95  <  PERF_TARGET_MS   (default 1000 ms / 1s)
+//   Latency:      5 timed iterations after warmup
+//   Concurrency:  one timed query per worker (N = PERF_CONCURRENCY)
+//
+// Workload defaults:
+//   PERF_EVENTS_PER_SESSION = 1000   rows per base/staged/buffer session
+//   PERF_CONCURRENCY        = 8      parallel workers (concurrency test)
+//   PERF_TARGET_MS          = 1000   warm p95 latency ceiling
+//   PERF_DAYS_BACK          = 7      record_date window (in-test default only;
+//                                    Makefile does not export this)
+//   Makefile exports: PERF_TARGET_MS, PERF_CONCURRENCY, PERF_EVENTS_PER_SESSION
+//
+// Suite wall-clock SLO lives in the Makefile, not here:
+//   make test-perf  ≤ 480s  (ENFORCE_SLO=1 / CI=true)
+//   See Makefile header + .github/workflows/performance.yml
+// =============================================================================
 
 fn load_perf_config() -> Config {
     if let Ok(config_file) = std::env::var("PERF_CONFIG_FILE") {
@@ -33,6 +46,8 @@ fn load_perf_config() -> Config {
     config
 }
 
+/// Warm union_logs p95 must stay under this duration (default **1s**).
+/// Override with `PERF_TARGET_MS`; do not raise the default to mask regressions.
 fn perf_target() -> std::time::Duration {
     if let Ok(target_ms) = std::env::var("PERF_TARGET_MS") {
         let ms = target_ms.parse::<u64>().unwrap_or(1000);
@@ -191,6 +206,7 @@ async fn retry_query_until_count(
     }
 }
 
+/// Single-client warm read: p95 of 5 timed `union_logs` queries < `PERF_TARGET_MS` (1s).
 #[tokio::test]
 async fn perf_union_read_latency() {
     let mut config = load_perf_config();
@@ -198,6 +214,7 @@ async fn perf_union_read_latency() {
         config.query.max_connections = 1;
     }
 
+    let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -283,7 +300,6 @@ async fn perf_union_read_latency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -387,15 +403,17 @@ async fn perf_union_read_latency() {
         run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
         run_diagnostics(&query_engine, "union_logs", &sql).await;
     }
+    // Quality bar: warm p95 < 1s (PERF_TARGET_MS).
     println!("p95 warm union_logs latency: {:?}", p95);
     assert!(
         p95 < perf_target(),
-        "Expected p95 warm query under {:?}, got {:?}",
+        "Expected p95 warm query under {:?} (PERF_TARGET_MS), got {:?}",
         perf_target(),
         p95
     );
 }
 
+/// Concurrent warm reads (`PERF_CONCURRENCY` workers): same p95 < `PERF_TARGET_MS` (1s) bar.
 #[tokio::test]
 async fn perf_union_read_concurrency() {
     let mut config = load_perf_config();
@@ -403,6 +421,7 @@ async fn perf_union_read_concurrency() {
         config.query.max_connections = 1;
     }
 
+    let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -492,7 +511,6 @@ async fn perf_union_read_concurrency() {
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
     );
-    let warmup_workers = std::cmp::max(1, test_pipeline.config.query.max_connections);
     for _ in 0..warmup_workers {
         let warmup = query_engine
             .execute_query(&warmup_sql)
@@ -602,15 +620,18 @@ async fn perf_union_read_concurrency() {
         run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
         run_diagnostics(&query_engine, "union_logs", &union_sql).await;
     }
+    // Quality bar: warm p95 < 1s under concurrent load (same PERF_TARGET_MS).
     println!("p95 warm union_logs latency: {:?}", p95);
     assert!(
         p95 < perf_target(),
-        "Expected p95 warm query under {:?}, got {:?}",
+        "Expected p95 warm query under {:?} (PERF_TARGET_MS), got {:?}",
         perf_target(),
         p95
     );
 }
 
+/// Correctness/stability only (view recreate counters) — no latency SLO.
+/// Hardcodes 1000 events / 7-day window (ignores PERF_* env workload knobs).
 #[tokio::test]
 async fn perf_view_recreate_stability() {
     let config = load_perf_config();

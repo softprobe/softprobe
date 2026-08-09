@@ -199,7 +199,10 @@ pub async fn create_score_config(
         None => state.engine_for_id("").await,
     }
     .map_err(|error| {
-        warn!("failed to resolve tenant runtime for score config: {}", error);
+        warn!(
+            "failed to resolve tenant runtime for score config: {}",
+            error
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
@@ -261,7 +264,10 @@ pub async fn list_score_configs(
         None => state.engine_for_id("").await,
     }
     .map_err(|error| {
-        warn!("failed to resolve tenant runtime for score config list: {}", error);
+        warn!(
+            "failed to resolve tenant runtime for score config list: {}",
+            error
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": "tenant runtime unavailable" })),

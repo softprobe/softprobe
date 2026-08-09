@@ -1,8 +1,8 @@
-target
+# Packaging-only: only dist/ is required in the build context.
+*
+!dist/
+!dist/**
+
+# Keep explicit denies if someone force-includes sources later.
 .git
-.gitignore
-tmp
-.DS_Store
-*.log
-# Google GitHub Actions auth may write this into the workspace; never ship it in the image.
 gha-creds-*.json

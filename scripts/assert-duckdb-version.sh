@@ -2,12 +2,12 @@
 # Fail the build if the libduckdb being packaged is not the engine version
 # Cargo.lock resolved to.
 #
-# Why this exists: the Dockerfile picks the library with `find -print -quit`,
-# which is tied to nothing. A stale download cache or a leftover layer can ship
-# an engine that differs from what the build resolved -- silently, under a tag
-# claiming otherwise. DuckDB 1.5.2 crashes on empty-array VARIANT values and
-# invalidates the whole database (2026-08-03 outage), so "which engine is
-# actually in the image" is not something to leave to chance.
+# Why this exists: `make build-release` stages libduckdb with
+# `find -print -quit` under CARGO_TARGET_DIR/duckdb-download. A stale download cache
+# can ship an engine that differs from what the build resolved -- silently,
+# under a tag claiming otherwise. DuckDB 1.5.2 crashes on empty-array VARIANT
+# values and invalidates the whole database (2026-08-03 outage), so "which
+# engine is actually packaged" is not something to leave to chance.
 #
 # The duckdb crate encodes the engine version in its own: 1.1<mm><pp>.<n>,
 # e.g. 1.10505.0 -> DuckDB 1.5.5. `DUCKDB_DOWNLOAD_LIB=1` then places the

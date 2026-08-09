@@ -265,11 +265,14 @@ ingestion and promotion contract is in
 From the repository root:
 
 ```bash
-make setup-local
-make test
-make lint
-make check-fmt
+make setup
+make ci
 ```
 
-`make test` covers unit tests plus isolated MinIO/PostgreSQL integration
-tests. `make duckdb-shell` is the supported manual ATTACH smoke.
+CI on GitHub runs the same Make entry points (`make ci` after
+`make setup`; see `.github/workflows/ci.yml` — fmt, lint, `test`, and `test-e2e`;
+release packaging is `make release` / `release.yml`). Performance suites are
+manual (`make test-perf` / `.github/workflows/performance.yml`).
+
+`make test` is unit/lightweight; `make test-e2e` is isolated MinIO/PostgreSQL
+integration. `make duckdb-shell` is the supported manual ATTACH smoke.

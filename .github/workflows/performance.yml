@@ -1,0 +1,58 @@
+name: Performance Tests
+
+# Manual only — not part of the PR/main CI gate.
+# Warm self-hosted SLO: make test-perf ≤ 8m (hard timeout 15m).
+# Quality bar: PERF_TARGET_MS=1000 (warm union_logs p95 < 1s).
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Performance suite filter (PERF_SUITE)"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - latency
+          - concurrency
+          - stability
+
+jobs:
+  performance:
+    name: Performance (${{ inputs.suite }})
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      ENFORCE_SLO: "1"
+      PERF_TARGET_MS: "1000"
+
+    steps:
+      # Must stay inline and before checkout: root-owned warehouse/ blocks actions/checkout.
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Skip dtolnay/rust-toolchain: arc-runner already has rustc/cargo/rustfmt/clippy
+      # (and mold/clang). make doctor fails fast if anything is missing.
+      - name: Doctor
+        run: make doctor
+
+      - name: Start local test infra
+        run: make setup
+
+      - name: Run performance suite
+        run: make test-perf PERF_SUITE=${{ inputs.suite }}
+
+      - name: Teardown local infra
+        if: always()
+        run: make teardown

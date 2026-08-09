@@ -359,7 +359,8 @@ Optional / phase-dependent:
 | Perf smoke | After query-engine changes (Phase C) | `INTEGRATION_PERF_TESTS` subset already invoked by `test-local` |
 | Manual DuckDB attach | After catalog/ATTACH changes | `make duckdb-shell` + `SELECT 1` / count on `traces` |
 
-CI note: repo GitHub Actions coverage is thin (see `.github/workflows/performance-tests.yml`).
+CI note: GitHub Actions CI is `.github/workflows/ci.yml` (`make ci-full`).
+Performance is manual via `.github/workflows/performance.yml` (`make test-perf`).
 Treat **local Make targets** as the authoritative gate for this cleanup.
 
 ### 9.3 Per-phase gate focus

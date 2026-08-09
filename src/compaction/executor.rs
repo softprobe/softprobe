@@ -255,9 +255,8 @@ impl MaintenanceExecutor {
         // Match qualified name used for tables (see ducklake_qualified_table_name).
         let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
         let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-        let target_file_size = crate::storage::ducklake::size_literal(
-            self.config.maintenance.target_file_size_bytes,
-        );
+        let target_file_size =
+            crate::storage::ducklake::size_literal(self.config.maintenance.target_file_size_bytes);
         let set_target = format!(
             "CALL {}.set_option('target_file_size', '{}', {});",
             ducklake.catalog_alias, target_file_size, scope

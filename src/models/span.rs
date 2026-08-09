@@ -122,7 +122,10 @@ impl Span {
         }
 
         // Extract events
-        let events = otlp_span.events.iter().map(|event| {
+        let events = otlp_span
+            .events
+            .iter()
+            .flat_map(|event| {
             let mut event_attributes = HashMap::new();
             for attr in &event.attributes {
                 if let Some(value) = &attr.value {
@@ -141,7 +144,7 @@ impl Span {
                 chrono::DateTime::from_timestamp(
                     (event.time_unix_nano / 1_000_000_000) as i64,
                     (event.time_unix_nano % 1_000_000_000) as u32
-                ).unwrap_or_else(|| chrono::Utc::now())
+                ).unwrap_or_else(chrono::Utc::now)
             } else {
                 chrono::Utc::now()
             };
@@ -151,7 +154,7 @@ impl Span {
                 timestamp: event_timestamp,
                 attributes: event_attributes,
             })
-        }).flatten().collect();
+        }).collect();
 
         // Convert timestamps
         let timestamp = if otlp_span.start_time_unix_nano > 0 {
@@ -159,7 +162,7 @@ impl Span {
                 (otlp_span.start_time_unix_nano / 1_000_000_000) as i64,
                 (otlp_span.start_time_unix_nano % 1_000_000_000) as u32,
             )
-            .unwrap_or_else(|| chrono::Utc::now())
+            .unwrap_or_else(chrono::Utc::now)
         } else {
             chrono::Utc::now()
         };
@@ -170,7 +173,7 @@ impl Span {
                     (otlp_span.end_time_unix_nano / 1_000_000_000) as i64,
                     (otlp_span.end_time_unix_nano % 1_000_000_000) as u32,
                 )
-                .unwrap_or_else(|| chrono::Utc::now()),
+                .unwrap_or_else(chrono::Utc::now),
             )
         } else {
             None

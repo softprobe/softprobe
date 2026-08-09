@@ -2,7 +2,7 @@ use crate::config::Config;
 use anyhow::{anyhow, Result};
 use duckdb::{Connection, ToSql};
 use once_cell::sync::Lazy;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const DUCKDB_CACHE_HTTPFS_INIT_SQL: &str = include_str!("sql/duckdb_cache_httpfs_init.sql");
@@ -28,7 +28,7 @@ impl CacheSettings {
     }
 }
 
-fn configure_cache_httpfs(cache_dir: &PathBuf, conn: &Connection) -> Result<()> {
+fn configure_cache_httpfs(cache_dir: &Path, conn: &Connection) -> Result<()> {
     let cache_path = cache_dir.join("duckdb_http_cache");
     std::fs::create_dir_all(&cache_path)?;
     let cache_dir_str = cache_path.to_string_lossy().to_string();

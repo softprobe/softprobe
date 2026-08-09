@@ -66,4 +66,3 @@ pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) ->
     let config = Config::default();
     configure_object_store(conn, &config, data_path)
 }
-

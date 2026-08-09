@@ -1,8 +1,8 @@
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
-use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
@@ -32,12 +32,10 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded");
 
+    // Maintenance needs a writer/catalog; HTTP/gRPC engines are built lazily per tenant.
     let pipeline = IngestPipeline::new(config.as_ref()).await?;
     let storage = pipeline.storage.clone();
     let dropdown_catalog = pipeline.dropdown_catalog.clone();
-    let query_engine =
-        softprobe_runtime::query::create_query_engine(config.as_ref(), Arc::new(storage.clone()))
-            .await?;
 
     if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
         config.as_ref(),
@@ -52,15 +50,8 @@ async fn main() -> anyhow::Result<()> {
     let control_plane = control_plane_runtime_from_env()?;
     let traces = post(ingest_traces);
 
-    let (mut app, state) = api::create_router(
-        config.clone(),
-        storage.clone(),
-        query_engine,
-        traces,
-        Some(control_plane.clone()),
-        dropdown_catalog,
-    )
-    .await?;
+    let (mut app, state) =
+        api::create_router(config.clone(), traces, Some(control_plane.clone())).await?;
     app = app.merge(runtime_control_routes().with_state(state.clone()));
 
     let app = app

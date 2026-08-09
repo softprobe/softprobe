@@ -3,32 +3,27 @@
 //! runtime **DuckLake** query path (`union_spans` / `union_logs`), not Iceberg REST scans.
 //!
 //! Requirements: `integration-e2e` feature, local MinIO on the configured S3 endpoint, and
-//! `tests/config/test.yaml` (see `make test-local`).
+//! `tests/config/test.yaml` (see `make test-e2e`).
 
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
 use crate::util::storage_config::load_test_config;
 use chrono::Utc;
-use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use std::collections::HashMap;
 use std::time::Duration;
-
-async fn build_test_pipeline(mut config: Config) -> TestPipeline {
-    TestPipeline::new(config).await
-}
 
 /// DuckLake / union view contract: non-empty counts, HTTP columns, `record_date` partition,
 /// and distinct session scope (replaces former ad hoc Iceberg SQL checks).
 #[tokio::test]
 async fn strict_trace_union_shape_ducklake_contract() {
-    let mut config = load_test_config();
+    let config = load_test_config();
 
     let session_id = format!("strict-trace-{}", uuid::Uuid::new_v4());
     let trace_id = format!("strict-tr-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let span = SpanData {
@@ -137,13 +132,13 @@ async fn strict_trace_union_shape_ducklake_contract() {
 /// shared trace correlation.
 #[tokio::test]
 async fn strict_session_correlates_traces_and_logs() {
-    let mut config = load_test_config();
+    let config = load_test_config();
 
     let session_id = format!("strict-sess-{}", uuid::Uuid::new_v4());
     let trace_id = format!("strict-tid-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
 
-    let test_pipeline = build_test_pipeline(config).await;
+    let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     let span = SpanData {

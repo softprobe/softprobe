@@ -50,26 +50,34 @@ Prerequisites:
 Start MinIO and DuckLake PostgreSQL:
 
 ```bash
-make setup-local
+make setup
 ```
 
-Build and run checks:
+Build and run checks (cargo cache under `~/.cache/thelake`):
 
 ```bash
-DUCKDB_DOWNLOAD_LIB=1 make build
-make test
-make lint
-make check-fmt
+make doctor
+make build
+make test          # unit + lightweight
+make test-e2e      # needs setup
+make ci            # fmt + lint + test + test-e2e
 ```
 
 Stop local infrastructure:
 
 ```bash
-make teardown-local
+make teardown
 ```
 
-`make test` is the pre-merge test target. It runs unit tests and isolated
-integration tests against MinIO and PostgreSQL.
+`make ci` is the pre-merge gate. Performance is `make test-perf` (manual / release).
+
+GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
+
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 15m.
+- `.github/workflows/performance.yml` — **manual** only: `make test-perf`
+  (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
+- `.github/workflows/release.yml` — on GitHub Release: `make release`
+  (`ci` + `test-perf` + `build-release` + `publish`). Warm SLO ≤ 25m.
 
 ## Run
 
@@ -198,6 +206,22 @@ scope:
 - prune optional dropdown-catalog values.
 
 Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
+
+## Publish Docker image
+
+Product bits are built **once on the host** (`make build-release` →
+`cargo build --release --locked` → `dist/`). The Dockerfile is packaging-only
+(`COPY dist/…`); it never runs cargo. Cache lives at `~/.cache/thelake`.
+
+Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
+(`ci` + `test-perf` + unconditional `build-release` + `publish`).
+PR CI does not build `dist/`.
+
+Local/emergency image push: `make build-release && make publish TAG=vX.Y.Z`
+(on Mac, `TARGET_PLATFORM=linux/amd64 make build-release` re-enters the same
+Make recipe in a linux/amd64 container). `publish` refuses incomplete `dist/`.
+Optional BuildKit registry cache (`…/splake:buildcache`) speeds base layers
+only — do not deploy `:buildcache` as a runtime image.
 
 ## License
 

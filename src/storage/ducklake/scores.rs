@@ -62,7 +62,6 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
     }))
 }
 
-
 impl DuckLakeWriter {
     pub async fn write_score_batches(&self, batches: Vec<Vec<Score>>) -> Result<()> {
         let scores: Vec<Score> = batches.into_iter().flatten().collect();
@@ -139,9 +138,9 @@ impl DuckLakeWriter {
         let schema = ScoreConfigTable::schema();
         let record_batch = arrow::score_configs_to_record_batch(&configs, &schema)?;
         if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| anyhow!("score config writes require a tenant-bound DuckLake writer"))?;
+            let scope = self.tenant_bound_scope().ok_or_else(|| {
+                anyhow!("score config writes require a tenant-bound DuckLake writer")
+            })?;
             let dk = self.effective_ducklake(&scope);
             return self
                 .write_record_batches_internal_with_ducklake(
@@ -158,11 +157,9 @@ impl DuckLakeWriter {
 
     pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
         let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| {
-                    anyhow!("score config lookup requires a tenant-bound DuckLake writer")
-                })?;
+            let scope = self.tenant_bound_scope().ok_or_else(|| {
+                anyhow!("score config lookup requires a tenant-bound DuckLake writer")
+            })?;
             self.effective_ducklake(&scope)
         } else {
             self.ducklake.clone()
@@ -173,9 +170,8 @@ impl DuckLakeWriter {
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 for table in candidates {
-                    let sql = format!(
-                        "SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)"
-                    );
+                    let sql =
+                        format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)");
                     match conn.query_row(&sql, [&config_id], |row| row.get::<_, bool>(0)) {
                         Ok(exists) => return Ok(exists),
                         Err(error) if error.to_string().contains("does not exist") => continue,
@@ -191,11 +187,9 @@ impl DuckLakeWriter {
 
     pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
         let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| {
-                    anyhow!("score config list requires a tenant-bound DuckLake writer")
-                })?;
+            let scope = self.tenant_bound_scope().ok_or_else(|| {
+                anyhow!("score config list requires a tenant-bound DuckLake writer")
+            })?;
             self.effective_ducklake(&scope)
         } else {
             self.ducklake.clone()
@@ -232,11 +226,9 @@ impl DuckLakeWriter {
 
     pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
         let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| {
-                    anyhow!("score config lookup requires a tenant-bound DuckLake writer")
-                })?;
+            let scope = self.tenant_bound_scope().ok_or_else(|| {
+                anyhow!("score config lookup requires a tenant-bound DuckLake writer")
+            })?;
             self.effective_ducklake(&scope)
         } else {
             self.ducklake.clone()
@@ -258,7 +250,7 @@ impl DuckLakeWriter {
                     };
                     let mut rows = stmt.query([&config_id])?;
                     if let Some(row) = rows.next()? {
-                        return Ok(score_config_from_sql_row(row)?);
+                        return score_config_from_sql_row(row);
                     }
                 }
                 Ok(None)
@@ -267,6 +259,4 @@ impl DuckLakeWriter {
         .await
         .map_err(|error| anyhow!("DuckLake score config get task failed: {error}"))?
     }
-
-
 }

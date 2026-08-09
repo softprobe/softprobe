@@ -323,6 +323,13 @@ impl Config {
         }
     }
 
+    /// Single query worker + single writer connection for in-process / local tests.
+    /// Keeps production defaults (`max_connections=10`, `writer_pool_size=4`) elsewhere.
+    pub fn shrink_pools_for_tests(&mut self) {
+        self.query.max_connections = 1;
+        self.ducklake.writer_pool_size = 1;
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         let config_file =
             std::env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yaml".to_string());

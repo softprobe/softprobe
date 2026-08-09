@@ -97,4 +97,3 @@ pub(crate) fn size_literal(bytes: usize) -> String {
         format!("{}B", bytes)
     }
 }
-

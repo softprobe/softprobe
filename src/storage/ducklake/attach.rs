@@ -67,10 +67,7 @@ pub(crate) fn ducklake_attach_options(dk: &DuckLakeConfig) -> Vec<String> {
 /// SQLite catalogs need the metadata DB parent directory. Local (non-URI)
 /// `DATA_PATH` must exist for both sqlite and postgres catalogs so DuckLake can
 /// create files under it.
-pub(crate) fn prepare_local_ducklake_paths(
-    dk: &DuckLakeConfig,
-    attach_target: &str,
-) -> Result<()> {
+pub(crate) fn prepare_local_ducklake_paths(dk: &DuckLakeConfig, attach_target: &str) -> Result<()> {
     if dk.catalog_type == "sqlite" {
         let raw = attach_target
             .strip_prefix("sqlite:")
@@ -120,7 +117,6 @@ pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> 
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +132,4 @@ mod tests {
             "schema => 'tenant_a', table_name => 'traces'"
         );
     }
-
 }

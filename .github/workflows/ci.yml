@@ -1,0 +1,52 @@
+name: CI
+
+# Pre-merge / main push: make doctor → setup → ci (fmt + lint + test + test-e2e).
+# Dev Cargo profile only (clippy + tests share one compile). Warm SLO ≤ 15m.
+# Cache: ~/.cache/thelake via Make ensure-cache — no actions/cache for target/.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint and test
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      ENFORCE_SLO: "1"
+
+    steps:
+      # Must stay inline and before checkout: root-owned warehouse/ blocks actions/checkout.
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Skip dtolnay/rust-toolchain: arc-runner already has rustc/cargo/rustfmt/clippy
+      # (and mold/clang). make doctor fails fast if anything is missing.
+      - name: Doctor
+        run: make doctor
+
+      - name: Start local test infra
+        run: make setup
+
+      - name: CI checks (fmt, lint, test, test-e2e)
+        run: make ci
+
+      - name: Teardown local infra
+        if: always()
+        run: make teardown

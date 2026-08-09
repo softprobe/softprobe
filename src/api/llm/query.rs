@@ -332,9 +332,10 @@ pub async fn get_session(
 /// Ordering happens in DuckDB over the whole time window. Doing it client-side
 /// only ever sorts whatever page happened to be loaded, which is the wrong
 /// answer to "show me the worst sessions today".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOrderBy {
+    #[default]
     StartTime,
     ErrorCount,
     Duration,
@@ -342,23 +343,12 @@ pub enum SessionOrderBy {
     TotalCost,
 }
 
-impl Default for SessionOrderBy {
-    fn default() -> Self {
-        Self::StartTime
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
     Asc,
+    #[default]
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        Self::Desc
-    }
 }
 
 impl SortDirection {
@@ -1358,7 +1348,10 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
     // connection, so it is retryable. INTERNAL errors are NOT listed here:
     // the query that trips the assertion fails deterministically.
     if head.starts_with("FATAL Error") {
-        return StorageErrorKind { code: "query_unavailable", retryable: true };
+        return StorageErrorKind {
+            code: "query_unavailable",
+            retryable: true,
+        };
     }
 
     // Object-store and network faults, including S3/MinIO throttling and 5xx.

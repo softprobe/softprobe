@@ -1,6 +1,6 @@
 # Test fixtures (reference)
 
-**Strict enforcement:** `tests/integration/storage_contract_validation.rs` (run with `make test-local` / `cargo test --features integration-e2e --test tests`).
+**Strict enforcement:** `tests/integration/storage_contract_validation.rs` (run with `make test-e2e` / `cargo test --features integration-e2e --test tests`).
 
 **Working DuckDB attach** for local dev: `softprobe-runtime/scripts/duckdb_ducklake_local_init.sql` (used by `make duckdb-shell` / `scripts/interactive_query.sh`). See [`docs/adhoc-duckdb-ducklake.md`](../docs/adhoc-duckdb-ducklake.md).
 

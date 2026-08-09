@@ -1,5 +1,5 @@
 # GCS DuckLake stress / local-against-GCS smoke.
-# Prefer tests/config/test-gcs.yaml for e2e. This file remains for stress-test-gcs-ducklake.
+# Prefer tests/config/test-gcs.yaml for e2e. This file remains for `make stress BACKEND=gcs`.
 #
 # Requires: GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET and a real GCS_BUCKET.
 

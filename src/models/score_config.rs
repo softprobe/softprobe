@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{ScoreDataType, Score};
+use super::{Score, ScoreDataType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreConfig {
@@ -95,11 +95,7 @@ impl ScoreConfig {
                 description: Some("Coarse quality label".to_string()),
                 min_value: None,
                 max_value: None,
-                categories: vec![
-                    "good".to_string(),
-                    "ok".to_string(),
-                    "bad".to_string(),
-                ],
+                categories: vec!["good".to_string(), "ok".to_string(), "bad".to_string()],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
                 record_date,

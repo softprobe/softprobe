@@ -24,7 +24,7 @@ use super::attach::{
 };
 use super::object_store::configure_object_store;
 use super::util::{
-    escape_sql_literal, ensure_variant_column_types, size_literal, WriteAttemptError,
+    ensure_variant_column_types, escape_sql_literal, size_literal, WriteAttemptError,
 };
 
 pub(super) struct WriterPool {
@@ -262,8 +262,8 @@ impl DuckLakeWriter {
         let order_clause = self.insert_order_clause(table_name);
         let select_prefix = parquet_select_with_variant_casts(table_name);
         let variant_table_name = table_name.to_string();
-        let deduplicate_scores = table_name == ScoreTable::table_name()
-            || table_name == ScoreConfigTable::table_name();
+        let deduplicate_scores =
+            table_name == ScoreTable::table_name() || table_name == ScoreConfigTable::table_name();
         let dedupe_id_column: Option<&'static str> = if !deduplicate_scores {
             None
         } else if table_name == ScoreConfigTable::table_name() {
@@ -388,7 +388,11 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub(super) fn write_temp_parquet(&self, table_name: &str, batches: &[RecordBatch]) -> Result<PathBuf> {
+    pub(super) fn write_temp_parquet(
+        &self,
+        table_name: &str,
+        batches: &[RecordBatch],
+    ) -> Result<PathBuf> {
         let base_dir = std::env::temp_dir().join("splake-ducklake");
         std::fs::create_dir_all(&base_dir)?;
         let temp_path = base_dir.join(format!(
@@ -482,7 +486,11 @@ impl DuckLakeWriter {
         ducklake_qualified_table_name(dk, table_name)
     }
 
-    pub(super) fn table_name_candidates_for(&self, table_name: &str, dk: &DuckLakeConfig) -> Vec<String> {
+    pub(super) fn table_name_candidates_for(
+        &self,
+        table_name: &str,
+        dk: &DuckLakeConfig,
+    ) -> Vec<String> {
         // Prefer catalog.schema.table when metadata lives in a non-main schema; fall back to
         // catalog.table if the engine rejects the three-part name. set_option scope must match
         // whichever form succeeds (see write_record_batches_internal_with_ducklake).
@@ -522,7 +530,6 @@ impl DuckLakeWriter {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +561,4 @@ mod tests {
             "promoted telemetry columns come from runtime-scoped promotion apply, not process config"
         );
     }
-
 }
