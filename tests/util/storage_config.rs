@@ -6,6 +6,7 @@ pub fn load_test_config() -> Config {
             println!("Loading test config from CONFIG_FILE: {}", config_file);
             let mut config = Config::load().expect("Failed to load config");
             assign_unique_ducklake_paths(&mut config);
+            warn_if_config_needs_minio_hostname(&config);
             return config;
         }
     }
@@ -21,6 +22,7 @@ pub fn load_test_config() -> Config {
     std::env::set_var("CONFIG_FILE", config_file);
     let mut config = Config::load().expect("Failed to load test config");
     assign_unique_ducklake_paths(&mut config);
+    warn_if_config_needs_minio_hostname(&config);
     config
 }
 
@@ -82,18 +84,38 @@ fn assign_unique_ducklake_paths(config: &mut Config) {
     }
 }
 
-/// Check if minio hostname resolves (needed for local testing when URLs use minio:9000)
-fn check_minio_hostname() -> bool {
+fn endpoint_uses_minio_hostname(endpoint: &str) -> bool {
+    // Match docker-compose host `minio`, not substrings like `minion`.
+    let rest = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or(rest)
+        .split(':')
+        .next()
+        .unwrap_or(rest);
+    host.eq_ignore_ascii_case("minio")
+}
+
+fn minio_hostname_resolves() -> bool {
     use std::net::ToSocketAddrs;
     "minio:9000".to_socket_addrs().is_ok()
 }
 
-/// Warn if minio hostname doesn't resolve (informational only)
-pub fn warn_if_minio_unresolvable() {
-    if !check_minio_hostname() {
-        eprintln!("⚠️  INFO: 'minio' hostname does not resolve.");
-        eprintln!("   If tests fail with 'minio:9000' connection errors, you can:");
-        eprintln!("   1. Add '127.0.0.1 minio' to /etc/hosts (requires sudo)");
-        eprintln!("   2. Run tests in Docker where 'minio' hostname resolves");
+/// Only when this config talks to hostname `minio` (e.g. test-docker.yaml).
+/// Host-local configs use localhost:9000 — no warning.
+fn warn_if_config_needs_minio_hostname(config: &Config) {
+    let Some(endpoint) = config.object_store.endpoint.as_deref() else {
+        return;
+    };
+    if !endpoint_uses_minio_hostname(endpoint) || minio_hostname_resolves() {
+        return;
     }
+    eprintln!(
+        "warning: object_store.endpoint is `{endpoint}` but hostname `minio` does not resolve"
+    );
+    eprintln!("  Add `127.0.0.1 minio` to /etc/hosts, or use tests/config/test.yaml (localhost).");
 }

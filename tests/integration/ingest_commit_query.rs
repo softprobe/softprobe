@@ -1,7 +1,7 @@
 use crate::util::perf::{PerformanceMetrics, Timer};
 use crate::util::pipeline::TestPipeline;
 use crate::util::poll::wait_for;
-use crate::util::storage_config::{load_test_config, warn_if_minio_unresolvable};
+use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
 use std::collections::HashMap;
@@ -77,8 +77,6 @@ async fn test_ingestion_perf_5000_spans_under_one_second() {
 #[tokio::test]
 async fn test_iceberg_writer_bulk_session_roundtrip() {
     let config = load_test_config();
-    warn_if_minio_unresolvable();
-
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -608,8 +606,6 @@ async fn test_duckdb_union_read_realtime_performance() {
 #[tokio::test]
 async fn test_iceberg_writer_bulk_log_roundtrip() {
     let config = load_test_config();
-    warn_if_minio_unresolvable();
-
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -776,8 +772,6 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     use softprobe_runtime::models::Metric;
 
     let config = load_test_config();
-    warn_if_minio_unresolvable();
-
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
@@ -1411,8 +1405,6 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     // 8. Union view still returns correct count after commit
 
     let config = load_test_config();
-    warn_if_minio_unresolvable();
-
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
     let now = Utc::now();
