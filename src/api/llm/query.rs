@@ -332,9 +332,10 @@ pub async fn get_session(
 /// Ordering happens in DuckDB over the whole time window. Doing it client-side
 /// only ever sorts whatever page happened to be loaded, which is the wrong
 /// answer to "show me the worst sessions today".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOrderBy {
+    #[default]
     StartTime,
     ErrorCount,
     Duration,
@@ -342,23 +343,12 @@ pub enum SessionOrderBy {
     TotalCost,
 }
 
-impl Default for SessionOrderBy {
-    fn default() -> Self {
-        Self::StartTime
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
     Asc,
+    #[default]
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        Self::Desc
-    }
 }
 
 impl SortDirection {

@@ -940,10 +940,7 @@ pub fn validate_telemetry_column_additive(
         let path = format!("columns[{idx}].name");
         validate_identifier(&path, &col.name)?;
         for table in &spec.target.tables {
-            if reserved_telemetry_column_names(table)
-                .iter()
-                .any(|&n| n == col.name.as_str())
-            {
+            if reserved_telemetry_column_names(table).contains(&col.name.as_str()) {
                 return Err(PromotionValidationError::new(
                     "column_already_exists",
                     path.clone(),

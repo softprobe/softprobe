@@ -250,7 +250,7 @@ impl DuckLakeWriter {
                     };
                     let mut rows = stmt.query([&config_id])?;
                     if let Some(row) = rows.next()? {
-                        return Ok(score_config_from_sql_row(row)?);
+                        return score_config_from_sql_row(row);
                     }
                 }
                 Ok(None)

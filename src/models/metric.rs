@@ -183,7 +183,7 @@ impl Metric {
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
             )
-            .unwrap_or_else(|| chrono::Utc::now())
+            .unwrap_or_else(chrono::Utc::now)
         } else {
             chrono::Utc::now()
         };
@@ -225,7 +225,7 @@ impl Metric {
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
             )
-            .unwrap_or_else(|| chrono::Utc::now())
+            .unwrap_or_else(chrono::Utc::now)
         } else {
             chrono::Utc::now()
         };
@@ -265,7 +265,7 @@ impl Metric {
                 (data_point.time_unix_nano / 1_000_000_000) as i64,
                 (data_point.time_unix_nano % 1_000_000_000) as u32,
             )
-            .unwrap_or_else(|| chrono::Utc::now())
+            .unwrap_or_else(chrono::Utc::now)
         } else {
             chrono::Utc::now()
         };

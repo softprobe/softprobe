@@ -134,7 +134,8 @@ test-publish-tags:
 # Code quality targets
 lint:
 	@echo "🔍 Running clippy..."
-	cargo clippy -- -D warnings
+	# Product surfaces only — tooling bins like perf_stress stay out of the -D warnings gate.
+	cargo clippy --lib --bin softprobe-runtime -- -D warnings
 
 fmt:
 	@echo "✨ Formatting code..."

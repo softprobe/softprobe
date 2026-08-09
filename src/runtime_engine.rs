@@ -190,7 +190,6 @@ impl DuckLakeScopeResolver {
         parse_postgres_kv_config(&mut pg, &dl.metadata_path)?;
         let mgr_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
-            ..Default::default()
         };
         let mgr = Manager::from_config(pg, NoTls, mgr_config);
         let pool = Pool::builder(mgr).max_size(8).build()?;
