@@ -53,7 +53,8 @@ done
 buildx_args=(
   --builder "${BUILDER_NAME}"
   --platform linux/amd64
-  --cache-from "type=registry,ref=${CACHE_REF}"
+  # ignore-error: first publish (or deleted :buildcache) must not fail the build.
+  --cache-from "type=registry,ref=${CACHE_REF},ignore-error=true"
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
   --push
   "${docker_tags[@]}"
@@ -69,13 +70,22 @@ ensure_cache_builder() {
   if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
     echo "Creating Buildx builder ${BUILDER_NAME} (docker-container; required for registry cache)..."
     docker buildx create --name "${BUILDER_NAME}" --driver docker-container
+  else
+    # CI may have already created this name via setup-buildx-action.
+    echo "Reusing Buildx builder ${BUILDER_NAME}"
   fi
-  # Bootstrap so the first build doesn't race the builder container start.
-  docker buildx inspect --bootstrap "${BUILDER_NAME}" >/dev/null
+  # Bootstrap is best-effort: a builder already started by setup-buildx-action
+  # can return a non-zero bootstrap status even when inspect/build work.
+  if ! docker buildx inspect --bootstrap "${BUILDER_NAME}" >/dev/null 2>&1; then
+    echo "warning: bootstrap of ${BUILDER_NAME} returned non-zero; continuing if inspect works"
+    docker buildx inspect "${BUILDER_NAME}" >/dev/null
+  fi
   local driver
   driver="$(docker buildx inspect "${BUILDER_NAME}" | awk '/^Driver:/{print $2; exit}')"
+  echo "Builder ${BUILDER_NAME} driver=${driver:-<empty>}"
   if [[ "${driver}" != "docker-container" ]]; then
     echo "error: builder ${BUILDER_NAME} uses driver '${driver}'; need docker-container for --cache-to type=registry" >&2
+    docker buildx ls >&2 || true
     exit 1
   fi
 }

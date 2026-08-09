@@ -126,7 +126,7 @@ test-publish-tags:
 	echo "$$args" | grep -Fxq -- '--builder'; \
 	echo "$$args" | grep -Fxq -- 'thelake-builder'; \
 	echo "$$args" | grep -Fxq -- '--cache-from'; \
-	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache'; \
+	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache,ignore-error=true'; \
 	echo "$$args" | grep -Fxq -- '--cache-to'; \
 	echo "$$args" | grep -Fxq -- 'type=registry,ref=us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake:buildcache,mode=max'; \
 	echo "✅ publish tag plan ok"

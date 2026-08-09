@@ -30,10 +30,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          # Same name as build.sh ensure_cache_builder — avoid a second anonymous builder.
-          name: thelake-builder
-          driver: docker-container
+        # build.sh creates/reuses docker-container builder `thelake-builder` for
+        # registry cache; leave the action's default builder unnamed to avoid
+        # bootstrap races on a shared name.
 
       - name: Build and push docker image
         run: |
