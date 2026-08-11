@@ -140,6 +140,10 @@ pub async fn create_router(
             "/v1/llm/sessions/{session_id}",
             get(llm::query::get_session),
         )
+        .route(
+            "/v1/llm/sessions/{session_id}/recording",
+            get(llm::query::get_session_recording),
+        )
         .route("/v1/query/sql", post(query::execute_sql))
         .route("/v1/telemetry/search", post(telemetry::search))
         .route("/v1/telemetry/details", post(telemetry::details_post))
@@ -483,6 +487,46 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                     }
                 }
             },
+            "/v1/llm/sessions/{session_id}/recording": {
+                "get": {
+                    "summary": "Get web session recording batches for a session",
+                    "operationId": "getSessionRecording",
+                    "security": [{ "bearerAuth": [] }],
+                    "parameters": [
+                        { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
+                        { "name": "from", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "to", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
+                        { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Ordered recording batches and flattened rrweb events",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionRecording" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Missing time range or invalid limit",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "503": {
+                            "description": "Tenant runtime or query unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "/v1/query/sql": { "post": { "summary": "Execute SQL query" } },
             "/v1/telemetry/search": { "post": { "summary": "Search telemetry evidence" } },
             "/v1/telemetry/details": { "post": { "summary": "Fetch evidence details" } },
@@ -727,6 +771,42 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                             "items": { "$ref": "#/components/schemas/Score" }
                         },
                         "next_cursor": { "type": "string", "nullable": true }
+                    }
+                },
+                "SessionRecording": {
+                    "type": "object",
+                    "required": ["session_id", "from", "to", "batches", "events"],
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "from": { "type": "string", "format": "date-time" },
+                        "to": { "type": "string", "format": "date-time" },
+                        "batches": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/RecordingBatch" }
+                        },
+                        "events": {
+                            "type": "array",
+                            "description": "Flattened rrweb events sorted by timestamp",
+                            "items": { "type": "object" }
+                        }
+                    }
+                },
+                "RecordingBatch": {
+                    "type": "object",
+                    "required": ["span_id", "trace_id", "start_time", "events"],
+                    "properties": {
+                        "span_id": { "type": "string" },
+                        "trace_id": { "type": "string" },
+                        "start_time": { "type": "string", "format": "date-time" },
+                        "batch_index": { "type": "integer", "nullable": true },
+                        "attributes": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "object" }
+                        }
                     }
                 }
             }

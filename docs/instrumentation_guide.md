@@ -411,6 +411,37 @@ span.setAttribute('sp.session.id', sessionId);
 // If no sp.session.id is set, trace_id is used as grouping key
 ```
 
+## Web session recording (rrweb)
+
+Browser DOM recordings are ingested as ordinary OTLP spans (no separate write API).
+
+| Field | Value |
+|---|---|
+| span name | `softprobe.web.recording` |
+| attribute `sp.observation.type` | `recording` |
+| attribute `sp.session.id` | correlation id (same as LLM session when linked) |
+| attribute `sp.recording.batch_index` | monotonic batch counter |
+| event name | `sp.recording.batch` |
+| event attribute `sp.recording.events` | JSON string of rrweb events (FullSnapshots may set `isCompressed`) |
+
+Query: `GET /v1/llm/sessions/{session_id}/recording?from=&to=&limit=` returns
+ordered `batches` and flattened `events` for the player. Batches are ordered by
+`sp.recording.batch_index` (then `start_time`). The response includes
+`truncated: true` when the batch `limit` (default 50, max 200) was hit — long
+sessions may need a narrower `from`/`to` window.
+
+Producer SDK: [`@softprobe/web-record`](https://github.com/softprobe/softprobe-js/tree/main/packages/web-record).
+Explorer UI: Softprobe LLM [web session replay](https://github.com/softprobe/sp-llm/blob/main/docs/web-session-replay.md).
+
+Keep searchable metadata (browser, URL, visitor id) on span attributes; keep the
+large rrweb payload on the span event — same pattern as HTTP bodies.
+
+### Browser CORS note
+
+Browser OTLP (`POST /v1/traces` with `Authorization`) triggers a CORS OPTIONS
+preflight **without** a Bearer token. The runtime skips auth for `OPTIONS /v1/*`
+and keeps `CorsLayer` outermost so SPA recorders (e.g. softprobe-code) can export.
+
 ## Next Steps
 
 1. **Validate Instrumentation**: Use the OTLP endpoint at `http://localhost:8090/v1/traces`.

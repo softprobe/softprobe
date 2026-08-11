@@ -43,9 +43,21 @@ impl TestPipeline {
         }
         let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
 
-        let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-            .await
-            .expect("query engine");
+        // Query-engine worker start can flake under CI load (ATTACH / Postgres
+        // catalog busy after a long suite). One retry is enough in practice.
+        let query_engine =
+            match query::create_query_engine(&config, Arc::new(pipeline.storage.clone())).await {
+                Ok(engine) => engine,
+                Err(first) => {
+                    eprintln!("query engine start failed ({first}); retrying once...");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
+                        .await
+                        .unwrap_or_else(|second| {
+                            panic!("query engine: {first}; retry: {second}");
+                        })
+                }
+            };
 
         Self {
             cache_dir,

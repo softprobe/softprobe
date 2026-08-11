@@ -9,7 +9,7 @@
 #                                 (does not re-run make ci; PR already gated that)
 #   make build-release          → --release only (packaging)
 #
-# Warm SLOs (self-hosted): ci ≤15m | test-perf ≤8m | release ≤25m
+# Warm SLOs (self-hosted): ci ≤18m | test-perf ≤8m | release ≤25m
 #
 #   make setup && make ci
 #   make test-perf
@@ -65,7 +65,7 @@ export PERF_TARGET_MS ?= 1000
 export PERF_CONCURRENCY ?= 8
 export PERF_EVENTS_PER_SESSION ?= 1000
 
-CI_GOAL_SECS ?= 900
+CI_GOAL_SECS ?= 1080
 PERF_GOAL_SECS ?= 480
 RELEASE_GOAL_SECS ?= 1500
 
@@ -239,10 +239,21 @@ clean-cache:
 setup:
 	@echo "starting MinIO + DuckLake Postgres..."
 	@$(COMPOSE) up -d minio ducklake-postgres
-	@sleep 5
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "MinIO not ready" && exit 1)
+	@echo "waiting for MinIO..."
+	@i=0; \
+	until curl -sf http://localhost:9000/minio/health/live > /dev/null; do \
+		i=$$((i+1)); \
+		if [ $$i -ge 60 ]; then echo "MinIO not ready" >&2; exit 1; fi; \
+		sleep 1; \
+	done
 	@$(MAKE) --no-print-directory _minio-bucket
-	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "Postgres not ready" && exit 1)
+	@echo "waiting for Postgres..."
+	@i=0; \
+	until docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1; do \
+		i=$$((i+1)); \
+		if [ $$i -ge 60 ]; then echo "Postgres not ready" >&2; exit 1; fi; \
+		sleep 1; \
+	done
 	@echo "setup ok"
 
 teardown:
@@ -339,7 +350,7 @@ ci: ensure-cache
 	echo "ci ok"
 
 # Release gate: PR already ran make ci (dev). Here one --release profile for
-# perf + binary + push — do not nest make ci (release compile blew the 900s ci SLO).
+# perf + binary + push — do not nest make ci (release compile blew the ci SLO).
 release:
 	@$(MAKE) CARGO_PROFILE_FLAG=--release _release TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"
 

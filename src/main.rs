@@ -54,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
         api::create_router(config.clone(), traces, Some(control_plane.clone())).await?;
     app = app.merge(runtime_control_routes().with_state(state.clone()));
 
+    // CorsLayer must be outermost: browsers send OPTIONS preflight without
+    // Authorization. If auth wraps CORS, preflight 401s and SPA OTLP never runs;
+    // authenticated error responses also lack ACAO and look like opaque CORS failures.
     let app = app
+        .layer(from_fn_with_state(state.clone(), runtime_auth_middleware))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -62,8 +66,7 @@ async fn main() -> anyhow::Result<()> {
                 .layer(RequestDecompressionLayer::new())
                 .layer(DefaultBodyLimit::max(config.server.max_body_size))
                 .into_inner(),
-        )
-        .layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
+        );
 
     // OTLP/gRPC (4317). Set `SOFTPROBE_GRPC_DISABLE=1` to skip (e.g. port conflicts in tests).
     if !std::env::var("SOFTPROBE_GRPC_DISABLE")

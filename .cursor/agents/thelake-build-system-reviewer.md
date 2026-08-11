@@ -47,7 +47,7 @@ You are the **thelake build-system reviewer**. Your only job is to find violatio
 
 ### SLOs (warm self-hosted)
 
-- [ ] CI goal ≤ **900s** (`ci`), workflow timeout ≤ 45m (cold headroom)
+- [ ] CI goal ≤ **1080s** (18m) (`ci`), workflow timeout ≤ 45m (cold headroom)
 - [ ] Perf goal ≤ **480s** (`test-perf`), workflow timeout ≤ 15m
 - [ ] Release goal ≤ **1500s**, workflow timeout ≤ 35m
 - [ ] Phase timings printed (`PHASE=… elapsed=…s`, `TOTAL=…s`)

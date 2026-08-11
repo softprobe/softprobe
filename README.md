@@ -73,7 +73,7 @@ make teardown
 
 GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
 
-- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 15m.
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 18m.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
@@ -163,11 +163,18 @@ Query and telemetry:
 - `GET /v1/telemetry/fields/{field}/values`
 - `GET /v1/telemetry/sessions/{session_id}`
 - `GET /v1/telemetry/traces/{trace_id}`
+- `GET /v1/llm/sessions/{session_id}/recording` (web session replay batches)
 - `GET /v1/data/ducklake-connection`
 
 Control-plane routes also cover tenant provisioning, promotions, and dropdown
-catalog lookups. `/v1/*` operational routes require bearer authentication;
-tenant provisioning validates its admin bearer inside the handler.
+catalog lookups. `/v1/*` operational routes require bearer authentication
+(`OPTIONS /v1/*` is exempt for browser CORS preflight); tenant provisioning
+validates its admin bearer inside the handler.
+
+Web session recording contract:
+[`docs/instrumentation_guide.md`](docs/instrumentation_guide.md#web-session-recording-rrweb)
+and the Softprobe LLM
+[web session replay guide](https://github.com/softprobe/sp-llm/blob/main/docs/web-session-replay.md).
 
 The focused ingestion and promotion HTTP contract is
 [`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml). Schema promotion

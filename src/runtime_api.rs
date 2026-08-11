@@ -20,7 +20,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Require `Authorization: Bearer` for `/v1/*`, resolve tenant, store [`TenantInfo`] in extensions.
+/// Require `Authorization: Bearer` for `/v1/*` (except CORS `OPTIONS` preflight and
+/// admin `POST /v1/tenants`), resolve tenant, store [`TenantInfo`] in extensions.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -54,6 +55,12 @@ pub async fn runtime_auth_middleware(
 }
 
 fn requires_runtime_auth(method: &Method, path: &str) -> bool {
+    // Defense in depth with outermost CorsLayer: browser CORS preflight is OPTIONS
+    // without Authorization. Auth here would 401 and block SPA OTLP
+    // (e.g. @softprobe/web-record → POST /v1/traces).
+    if *method == Method::OPTIONS && path.starts_with("/v1/") {
+        return false;
+    }
     if path == "/v1/tenants" && *method == Method::POST {
         return false;
     }
@@ -817,12 +824,14 @@ mod bearer_tests {
     }
 
     #[test]
-    fn requires_auth_for_v1_options_preflight() {
-        assert!(requires_runtime_auth(
+    fn skips_auth_for_v1_options_preflight() {
+        assert!(!requires_runtime_auth(
             &Method::OPTIONS,
             "/v1/telemetry/search"
         ));
+        assert!(!requires_runtime_auth(&Method::OPTIONS, "/v1/traces"));
         assert!(requires_runtime_auth(&Method::POST, "/v1/telemetry/search"));
+        assert!(requires_runtime_auth(&Method::POST, "/v1/traces"));
     }
 
     #[test]

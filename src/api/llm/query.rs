@@ -327,6 +327,201 @@ pub async fn get_session(
     }))
 }
 
+const RECORDING_EVENT_NAME: &str = "sp.recording.batch";
+const RECORDING_EVENTS_ATTR: &str = "sp.recording.events";
+const DEFAULT_RECORDING_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingBatch {
+    pub span_id: String,
+    pub trace_id: String,
+    pub start_time: DateTime<Utc>,
+    pub batch_index: Option<i64>,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+    pub events: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecording {
+    pub session_id: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// True when the batch LIMIT was hit; more recording spans may exist.
+    #[serde(default)]
+    pub truncated: bool,
+    pub batches: Vec<RecordingBatch>,
+    pub events: Vec<Value>,
+}
+
+/// Fetch web session recording batches for a session (`sp.observation.type=recording`).
+pub async fn get_session_recording(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionQuery>,
+) -> Result<Json<SessionRecording>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(bad_request("session_id is required".to_string()));
+    }
+    if params.from > params.to {
+        return Err(bad_request("`from` must be <= `to`".to_string()));
+    }
+    let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
+    let sql = compile_session_recording_sql(&session_id, params.from, params.to, limit)
+        .map_err(bad_request)?;
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let result = state
+        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .await
+        .map_err(storage_error)?;
+
+    let mut batches = result
+        .rows
+        .iter()
+        .filter_map(|row| map_recording_batch(&result.columns, row))
+        .collect::<Vec<_>>();
+    // Prefer producer batch_index; fall back to start_time / span_id.
+    batches.sort_by(|a, b| {
+        a.batch_index
+            .unwrap_or(0)
+            .cmp(&b.batch_index.unwrap_or(0))
+            .then_with(|| a.start_time.cmp(&b.start_time))
+            .then_with(|| a.span_id.cmp(&b.span_id))
+    });
+
+    let truncated = batches.len() >= limit;
+    let mut events = Vec::new();
+    for batch in &batches {
+        events.extend(batch.events.iter().cloned());
+    }
+    events.sort_by(|a, b| {
+        event_timestamp(a)
+            .cmp(&event_timestamp(b))
+            .then_with(|| event_index(a).cmp(&event_index(b)))
+    });
+
+    Ok(Json(SessionRecording {
+        session_id,
+        from: params.from,
+        to: params.to,
+        truncated,
+        batches,
+        events,
+    }))
+}
+
+pub fn compile_session_recording_sql(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    limit: usize,
+) -> Result<String, String> {
+    if from > to {
+        return Err("`from` must be <= `to`".to_string());
+    }
+    let obs_type = format!(
+        "COALESCE({}, 'span')",
+        variant_varchar("attributes", "sp.observation.type")
+    );
+    Ok(format!(
+        "SELECT {projection} FROM union_spans \
+         WHERE session_id = {session} \
+           AND timestamp >= {from_ts} \
+           AND timestamp <= {to_ts} \
+           AND {obs_type} = 'recording' \
+         ORDER BY timestamp ASC, span_id ASC \
+         LIMIT {limit}",
+        projection = observation_projection(true),
+        session = sql_string_literal(session_id),
+        from_ts = timestamp_literal(&from),
+        to_ts = timestamp_literal(&to),
+        obs_type = obs_type,
+        limit = limit,
+    ))
+}
+
+fn map_recording_batch(columns: &[String], row: &[Value]) -> Option<RecordingBatch> {
+    let detail = map_observation_detail(columns, row)?;
+    let events = extract_recording_events(&detail.events);
+    let batch_index = detail
+        .attributes
+        .get("sp.recording.batch_index")
+        .and_then(|v| v.parse::<i64>().ok());
+    Some(RecordingBatch {
+        span_id: detail.summary.span_id,
+        trace_id: detail.summary.trace_id,
+        start_time: detail.summary.start_time,
+        batch_index,
+        attributes: detail.attributes,
+        events,
+    })
+}
+
+/// Pull rrweb event arrays out of `sp.recording.batch` span events.
+pub fn extract_recording_events(span_events: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for event in span_events {
+        let Some(obj) = event.as_object() else {
+            continue;
+        };
+        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name != RECORDING_EVENT_NAME {
+            continue;
+        }
+        let Some(attrs) = obj.get("attributes") else {
+            continue;
+        };
+        let raw = match attrs {
+            Value::Object(map) => map.get(RECORDING_EVENTS_ATTR).cloned(),
+            Value::String(text) => {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .and_then(|parsed| match parsed {
+                        Value::Object(map) => map.get(RECORDING_EVENTS_ATTR).cloned(),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        let Some(raw) = raw else {
+            continue;
+        };
+        match raw {
+            Value::Array(items) => out.extend(items),
+            Value::String(text) => {
+                if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&text) {
+                    out.extend(items);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn event_timestamp(event: &Value) -> i64 {
+    event
+        .get("timestamp")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_f64().map(|f| f as i64))
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0)
+}
+
+fn event_index(event: &Value) -> i64 {
+    event
+        .get("eventIndex")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_f64().map(|f| f as i64))
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0)
+}
+
 /// How a session list should be ordered.
 ///
 /// Ordering happens in DuckDB over the whole time window. Doing it client-side
@@ -462,6 +657,9 @@ pub fn compile_session_search_sql(
         format!("timestamp <= {}", timestamp_literal(&request.to)),
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
+        // Web recording shares session_id with LLM spans but is not an LLM
+        // observation — keep it off list aggregates / trace counts.
+        exclude_recording_observation_sql(),
     ];
     if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
         predicates.push(format!(
@@ -749,7 +947,8 @@ pub fn compile_session_aggregate_sql(
          FROM union_spans \
          WHERE session_id = {session} \
            AND timestamp >= {from_ts} \
-           AND timestamp <= {to_ts}",
+           AND timestamp <= {to_ts} \
+           AND {not_recording}",
         input_tokens = expr_input_tokens(),
         output_tokens = expr_output_tokens(),
         total_tokens = expr_total_tokens(),
@@ -758,6 +957,7 @@ pub fn compile_session_aggregate_sql(
         session = sql_string_literal(session_id),
         from_ts = timestamp_literal(&from),
         to_ts = timestamp_literal(&to),
+        not_recording = exclude_recording_observation_sql(),
     ))
 }
 
@@ -772,10 +972,11 @@ pub fn compile_session_traces_sql(
         return Err("`from` must be <= `to`".to_string());
     }
     let where_sql = format!(
-        "session_id = {} AND timestamp >= {} AND timestamp <= {}",
+        "session_id = {} AND timestamp >= {} AND timestamp <= {} AND {}",
         sql_string_literal(session_id),
         timestamp_literal(&from),
-        timestamp_literal(&to)
+        timestamp_literal(&to),
+        exclude_recording_observation_sql(),
     );
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
     let inner = format!(
@@ -794,6 +995,15 @@ pub fn compile_session_traces_sql(
         "SELECT * FROM ({inner}) AS t{outer_cursor} ORDER BY start_time DESC, trace_id DESC LIMIT {fetch}",
         fetch = limit + 1
     ))
+}
+
+/// Recording spans share `session_id` with LLM work but must not inflate
+/// session list / detail LLM aggregates or crowd out conversation traces.
+fn exclude_recording_observation_sql() -> String {
+    format!(
+        "COALESCE({}, '') <> 'recording'",
+        variant_varchar("attributes", "sp.observation.type")
+    )
 }
 
 pub fn compile_scores_for_span_sql(span_id: &str) -> String {
@@ -1557,6 +1767,8 @@ mod tests {
         assert!(sql.contains("timestamp <="));
         // spans with no session id must not become a session row
         assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
+        // recording spans share session_id but must not inflate LLM session rows
+        assert!(sql.contains("<> 'recording'"));
         // one extra row is what tells us another page exists
         assert!(sql.contains("LIMIT 51"));
     }
@@ -1773,5 +1985,73 @@ mod tests {
         assert_eq!(summary.observation_type, "generation");
         assert_eq!(summary.input_tokens, Some(10));
         assert_eq!(summary.model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn recording_sql_filters_observation_type_and_orders_ascending() {
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sql = compile_session_recording_sql("sess-1", from, to, 50).expect("sql");
+        assert!(sql.contains("session_id = "));
+        assert!(sql.contains("sess-1"));
+        assert!(sql.contains("recording"));
+        assert!(sql.contains("ORDER BY timestamp ASC, span_id ASC"));
+        assert!(sql.contains("LIMIT 50"));
+        assert!(sql.contains("events"));
+    }
+
+    #[test]
+    fn recording_sql_rejects_inverted_range() {
+        let from = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(compile_session_recording_sql("sess-1", from, to, 10).is_err());
+    }
+
+    #[test]
+    fn session_llm_sql_excludes_recording_observation_type() {
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let agg = compile_session_aggregate_sql("sess-1", from, to).expect("agg");
+        let traces = compile_session_traces_sql("sess-1", from, to, 50, None).expect("traces");
+        assert!(agg.contains("<> 'recording'"));
+        assert!(traces.contains("<> 'recording'"));
+    }
+
+    #[test]
+    fn extract_recording_events_parses_json_string_payload() {
+        let events_json =
+            r#"[{"type":4,"timestamp":100},{"type":2,"timestamp":200,"isCompressed":true}]"#;
+        let span_events = vec![serde_json::json!({
+            "name": "sp.recording.batch",
+            "timestamp": "2026-07-18T00:00:01.000Z",
+            "attributes": {
+                "sp.recording.events": events_json
+            }
+        })];
+        let events = extract_recording_events(&span_events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], 4);
+        assert_eq!(events[1]["isCompressed"], true);
+    }
+
+    #[test]
+    fn extract_recording_events_ignores_other_event_names() {
+        let span_events = vec![serde_json::json!({
+            "name": "gen_ai.content.prompt",
+            "attributes": { "content": "hi" }
+        })];
+        assert!(extract_recording_events(&span_events).is_empty());
     }
 }
