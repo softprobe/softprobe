@@ -285,7 +285,7 @@ _export-minio-aws = \
 # ---- tests ----
 test: ensure-cache
 	@echo "unit + lightweight tests (no e2e infra)..."
-	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests -- --test-threads=1
+	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
 
 test-e2e: ensure-cache check-infra
 	@set -e; \

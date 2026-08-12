@@ -24,7 +24,8 @@ use super::attach::{
 };
 use super::object_store::configure_object_store;
 use super::util::{
-    ensure_variant_column_types, escape_sql_literal, size_literal, WriteAttemptError,
+    ensure_metrics_fidelity_columns, ensure_variant_column_types, escape_sql_literal, size_literal,
+    WriteAttemptError,
 };
 
 pub(super) struct WriterPool {
@@ -336,6 +337,10 @@ impl DuckLakeWriter {
                         })?;
                         ensure_variant_column_types(conn, qualified_table, &variant_table_name)
                             .map_err(WriteAttemptError::from_variant_guard)?;
+                        if variant_table_name == "metrics" {
+                            ensure_metrics_fidelity_columns(conn, qualified_table)
+                                .map_err(WriteAttemptError::Fatal)?;
+                        }
                         conn.execute_batch(&insert).map_err(|e| {
                             WriteAttemptError::Retryable(anyhow!("INSERT failed: {e}"))
                         })?;

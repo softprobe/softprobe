@@ -58,13 +58,23 @@ fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     // Defense in depth with outermost CorsLayer: browser CORS preflight is OPTIONS
     // without Authorization. Auth here would 401 and block SPA OTLP
     // (e.g. @softprobe/web-record → POST /v1/traces).
-    if *method == Method::OPTIONS && path.starts_with("/v1/") {
+    if *method == Method::OPTIONS && is_authenticated_api_prefix(path) {
         return false;
     }
     if path == "/v1/tenants" && *method == Method::POST {
         return false;
     }
+    is_authenticated_api_prefix(path)
+}
+
+/// Paths that require Bearer → tenant resolution (OTLP/control + compatibility stubs).
+fn is_authenticated_api_prefix(path: &str) -> bool {
     path.starts_with("/v1/")
+        || path.starts_with("/api/v1/")
+        || path.starts_with("/loki/api/v1/")
+        || path.starts_with("/api/traces")
+        || path.starts_with("/api/v2/traces")
+        || path.starts_with("/api/search")
 }
 
 fn admin_provision_token_matches(token: &str) -> bool {
@@ -830,8 +840,17 @@ mod bearer_tests {
             "/v1/telemetry/search"
         ));
         assert!(!requires_runtime_auth(&Method::OPTIONS, "/v1/traces"));
+        assert!(!requires_runtime_auth(&Method::OPTIONS, "/api/v1/query"));
+        assert!(!requires_runtime_auth(
+            &Method::OPTIONS,
+            "/loki/api/v1/labels"
+        ));
         assert!(requires_runtime_auth(&Method::POST, "/v1/telemetry/search"));
         assert!(requires_runtime_auth(&Method::POST, "/v1/traces"));
+        assert!(requires_runtime_auth(&Method::GET, "/api/v1/query"));
+        assert!(requires_runtime_auth(&Method::GET, "/loki/api/v1/query"));
+        assert!(requires_runtime_auth(&Method::GET, "/api/traces/abc"));
+        assert!(requires_runtime_auth(&Method::GET, "/api/search"));
     }
 
     #[test]
@@ -843,7 +862,14 @@ mod bearer_tests {
             );
         }
 
-        for path in ["/v1/traces", "/v1/meta", "/v1/promotions/apply"] {
+        for path in [
+            "/v1/traces",
+            "/v1/meta",
+            "/v1/promotions/apply",
+            "/api/v1/labels",
+            "/loki/api/v1/labels",
+            "/api/search/tags",
+        ] {
             assert!(
                 requires_runtime_auth(&Method::GET, path),
                 "{path} must require auth"

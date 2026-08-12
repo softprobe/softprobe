@@ -139,6 +139,28 @@ resource attributes, trace/span correlation, and `record_date`.
 Core columns include metric name, description, unit, type, timestamp, value,
 attributes, resource attributes, and `record_date`.
 
+Phase 0 also stores nullable classic histogram / summary fidelity columns on
+the same row shape (gauge/sum leave them `NULL`):
+
+- `count`, `sum`
+- `bucket_counts`, `explicit_bounds` (classic histogram)
+- `quantiles` (summary: list of `{quantile, value}`)
+- `aggregation_temporality`
+- `exemplars_json`
+
+When OTLP omits histogram `sum` (valid for negative observations), the fidelity
+`sum` column is stored as SQL `NULL`. The scalar `value` column still uses
+`0.0` in that case for backward SQL compatibility — adapters reconstructing
+Prometheus `_sum` must read the fidelity `sum` column, not `value`.
+
+Existing DuckLake `metrics` tables are widened on write with
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` (`ensure_metrics_fidelity_columns`).
+If a fidelity name already exists with an incompatible type (e.g. a leftover
+promotion column), widen fails loud rather than writing into the wrong type.
+Column names and SQL types are owned by `src/metrics_fidelity.rs`.
+Exponential / native histograms are not stored; those datapoints are skipped
+with a stable `unsupported_feature` log.
+
 ### `scores`
 
 Immutable LLM evaluation records are stored separately from spans because an

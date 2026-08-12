@@ -13,6 +13,7 @@ pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;
+use crate::compat::stubs::compat_stub_routes;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
@@ -160,6 +161,7 @@ pub async fn create_router(
             "/v1/telemetry/traces/{trace_id}",
             get(telemetry::trace_details),
         )
+        .merge(compat_stub_routes())
         .with_state(state.clone());
 
     Ok((router, state))

@@ -1271,6 +1271,7 @@ fn sample_metric(counter: u64) -> Metric {
         value,
         attributes,
         resource_attributes,
+        ..Default::default()
     }
 }
 

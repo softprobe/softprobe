@@ -130,6 +130,7 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
         value: 1.0,
         attributes: metric_attrs,
         resource_attributes: HashMap::new(),
+        ..Default::default()
     };
 
     pipeline
@@ -355,6 +356,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         value: 3.0,
         attributes: metric_attrs,
         resource_attributes: metric_resource,
+        ..Default::default()
     };
 
     let mut log_attrs = HashMap::new();

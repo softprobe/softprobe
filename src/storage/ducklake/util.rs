@@ -1,3 +1,4 @@
+use crate::metrics_fidelity::{fidelity_sql_types_compatible, METRICS_FIDELITY_COLUMNS};
 use crate::storage::schema::variant::hot_variant_columns;
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
@@ -38,23 +39,7 @@ pub(super) fn ensure_variant_column_types(
     if expected.is_empty() {
         return Ok(());
     }
-    let sql = format!("DESCRIBE {qualified_table};");
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let dtype: String = row.get(1)?;
-            Ok((name, dtype))
-        })
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
-
-    let mut found: HashMap<String, String> = HashMap::new();
-    for row in rows {
-        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
-        found.insert(name, dtype);
-    }
+    let found = describe_columns(conn, qualified_table)?;
 
     for col in expected {
         let Some(dtype) = found.get(*col) else {
@@ -73,6 +58,66 @@ pub(super) fn ensure_variant_column_types(
         }
     }
     Ok(())
+}
+
+/// Widen existing `metrics` tables with nullable fidelity columns before INSERT BY NAME.
+/// Existing columns must already match the expected SQL type (name-only widen is not enough
+/// when a deactivated promotion left a wrong-typed orphan).
+pub(super) fn ensure_metrics_fidelity_columns(
+    conn: &Connection,
+    qualified_table: &str,
+) -> Result<()> {
+    let found = describe_columns(conn, qualified_table)?;
+    let mut ddls = Vec::new();
+    for (name, sql_type) in METRICS_FIDELITY_COLUMNS {
+        match found.get(*name) {
+            None => {
+                ddls.push(format!(
+                    "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {name} {sql_type};"
+                ));
+            }
+            Some(dtype) if fidelity_sql_types_compatible(dtype, sql_type) => {}
+            Some(dtype) => {
+                return Err(anyhow!(
+                    "table {qualified_table} column '{name}' has type {dtype}, expected {sql_type}. \
+                     A prior promotion or manual DDL left a conflicting column; rebuild or fix the \
+                     metrics table before ingesting classic histogram/summary fidelity."
+                ));
+            }
+        }
+    }
+    if ddls.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(&ddls.join("\n")).map_err(|e| {
+        anyhow!(
+            "failed to add metrics fidelity columns on {qualified_table}: {e}. \
+             Classic histogram/summary columns are required for Grafana/Prometheus compatibility; \
+             fix DDL permissions or rebuild the metrics table, then retry ingest."
+        )
+    })?;
+    Ok(())
+}
+
+fn describe_columns(conn: &Connection, qualified_table: &str) -> Result<HashMap<String, String>> {
+    let sql = format!("DESCRIBE {qualified_table};");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let name: String = row.get(0)?;
+            let dtype: String = row.get(1)?;
+            Ok((name, dtype))
+        })
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
+
+    let mut found: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
+        found.insert(name, dtype);
+    }
+    Ok(found)
 }
 
 pub(super) fn quote_duckdb_ident(input: &str) -> String {

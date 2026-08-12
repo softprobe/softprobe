@@ -3,7 +3,7 @@ use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
-    StringArray, StructArray, TimestampMicrosecondArray,
+    StringArray, StructArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -361,6 +361,13 @@ const METRICS_BASE_FIELDS: &[&str] = &[
     "value",
     "attributes",
     "resource_attributes",
+    "count",
+    "sum",
+    "bucket_counts",
+    "explicit_bounds",
+    "quantiles",
+    "aggregation_temporality",
+    "exemplars_json",
     "record_date",
 ];
 
@@ -1068,7 +1075,6 @@ pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<Re
     );
 
     // Convert values to Float64Array
-    use arrow::array::Float64Array;
     let values: ArrayRef = Arc::new(Float64Array::from(
         metrics.iter().map(|m| m.value).collect::<Vec<_>>(),
     ));
@@ -1083,6 +1089,59 @@ pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<Re
         metrics.iter().map(|m| &m.resource_attributes).collect();
     let resource_attributes_array =
         build_metric_map_array(&resource_attributes_maps, &resource_attributes_field)?;
+
+    let counts: ArrayRef = Arc::new(UInt64Array::from(
+        metrics.iter().map(|m| m.count).collect::<Vec<_>>(),
+    ));
+    let sums: ArrayRef = Arc::new(Float64Array::from(
+        metrics.iter().map(|m| m.sum).collect::<Vec<_>>(),
+    ));
+
+    let bucket_counts_field = arrow_schema
+        .field_with_name("bucket_counts")
+        .map_err(|e| anyhow::anyhow!("bucket_counts field missing: {e}"))?;
+    let bucket_counts = build_u64_list_array(
+        metrics
+            .iter()
+            .map(|m| m.bucket_counts.as_deref())
+            .collect::<Vec<_>>(),
+        bucket_counts_field,
+    )?;
+
+    let explicit_bounds_field = arrow_schema
+        .field_with_name("explicit_bounds")
+        .map_err(|e| anyhow::anyhow!("explicit_bounds field missing: {e}"))?;
+    let explicit_bounds = build_f64_list_array(
+        metrics
+            .iter()
+            .map(|m| m.explicit_bounds.as_deref())
+            .collect::<Vec<_>>(),
+        explicit_bounds_field,
+    )?;
+
+    let quantiles_field = arrow_schema
+        .field_with_name("quantiles")
+        .map_err(|e| anyhow::anyhow!("quantiles field missing: {e}"))?;
+    let quantiles = build_quantiles_list_array(
+        metrics
+            .iter()
+            .map(|m| m.quantiles.as_deref())
+            .collect::<Vec<_>>(),
+        quantiles_field,
+    )?;
+
+    let aggregation_temporality: ArrayRef = Arc::new(StringArray::from(
+        metrics
+            .iter()
+            .map(|m| m.aggregation_temporality.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+    let exemplars_json: ArrayRef = Arc::new(StringArray::from(
+        metrics
+            .iter()
+            .map(|m| m.exemplars_json.as_deref())
+            .collect::<Vec<_>>(),
+    ));
 
     // Convert dates to days since epoch (Date32)
     let record_dates: ArrayRef = Arc::new(Date32Array::from(
@@ -1115,12 +1174,158 @@ pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<Re
         values,
         attributes_array,
         resource_attributes_array,
+        counts,
+        sums,
+        bucket_counts,
+        explicit_bounds,
+        quantiles,
+        aggregation_temporality,
+        exemplars_json,
         record_dates,
     ];
     arrays.extend(promoted_arrays);
     let record_batch = RecordBatch::try_new(arrow_schema.clone(), arrays)?;
 
     Ok(record_batch)
+}
+
+fn build_u64_list_array(
+    values: Vec<Option<&[u64]>>,
+    list_field: &arrow::datatypes::Field,
+) -> Result<ArrayRef> {
+    let item_field = match list_field.data_type() {
+        arrow::datatypes::DataType::List(f) => f.clone(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "expected List for {}, got {:?}",
+                list_field.name(),
+                other
+            ))
+        }
+    };
+    let mut offsets = Vec::with_capacity(values.len() + 1);
+    let mut flat: Vec<Option<u64>> = Vec::new();
+    let mut validity = Vec::with_capacity(values.len());
+    offsets.push(0i32);
+    for v in values {
+        match v {
+            Some(items) => {
+                validity.push(true);
+                for x in items {
+                    flat.push(Some(*x));
+                }
+            }
+            None => validity.push(false),
+        }
+        offsets.push(flat.len() as i32);
+    }
+    let values_array = UInt64Array::from(flat);
+    let list = ListArray::new(
+        item_field,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(values_array),
+        Some(arrow::buffer::NullBuffer::from(validity)),
+    );
+    Ok(Arc::new(list))
+}
+
+fn build_f64_list_array(
+    values: Vec<Option<&[f64]>>,
+    list_field: &arrow::datatypes::Field,
+) -> Result<ArrayRef> {
+    let item_field = match list_field.data_type() {
+        arrow::datatypes::DataType::List(f) => f.clone(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "expected List for {}, got {:?}",
+                list_field.name(),
+                other
+            ))
+        }
+    };
+    let mut offsets = Vec::with_capacity(values.len() + 1);
+    let mut flat: Vec<Option<f64>> = Vec::new();
+    let mut validity = Vec::with_capacity(values.len());
+    offsets.push(0i32);
+    for v in values {
+        match v {
+            Some(items) => {
+                validity.push(true);
+                for x in items {
+                    flat.push(Some(*x));
+                }
+            }
+            None => validity.push(false),
+        }
+        offsets.push(flat.len() as i32);
+    }
+    let values_array = Float64Array::from(flat);
+    let list = ListArray::new(
+        item_field,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(values_array),
+        Some(arrow::buffer::NullBuffer::from(validity)),
+    );
+    Ok(Arc::new(list))
+}
+
+fn build_quantiles_list_array(
+    values: Vec<Option<&[crate::models::SummaryQuantile]>>,
+    list_field: &arrow::datatypes::Field,
+) -> Result<ArrayRef> {
+    let item_field = match list_field.data_type() {
+        arrow::datatypes::DataType::List(f) => f.clone(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "expected List for quantiles, got {:?}",
+                other
+            ))
+        }
+    };
+    let struct_fields = match item_field.data_type() {
+        arrow::datatypes::DataType::Struct(fields) => fields.clone(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "expected Struct item for quantiles, got {:?}",
+                other
+            ))
+        }
+    };
+
+    let mut offsets = Vec::with_capacity(values.len() + 1);
+    let mut q_vals: Vec<Option<f64>> = Vec::new();
+    let mut v_vals: Vec<Option<f64>> = Vec::new();
+    let mut validity = Vec::with_capacity(values.len());
+    offsets.push(0i32);
+    for row in values {
+        match row {
+            Some(items) => {
+                validity.push(true);
+                for q in items {
+                    q_vals.push(Some(q.quantile));
+                    v_vals.push(Some(q.value));
+                }
+            }
+            None => validity.push(false),
+        }
+        offsets.push(q_vals.len() as i32);
+    }
+
+    let struct_array = StructArray::new(
+        struct_fields,
+        vec![
+            Arc::new(Float64Array::from(q_vals)) as ArrayRef,
+            Arc::new(Float64Array::from(v_vals)) as ArrayRef,
+        ],
+        None,
+    );
+    let list = ListArray::new(
+        item_field,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(struct_array),
+        Some(arrow::buffer::NullBuffer::from(validity)),
+    );
+    Ok(Arc::new(list))
 }
 
 /// Build a JSON (Utf8) array for metric VARIANT attribute columns.

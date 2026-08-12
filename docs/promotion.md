@@ -363,6 +363,14 @@ as `session_id`, `trace_id`, `span_id`, `attributes`, `events`,
 `http_request_body`, `record_date`, and the other base fields defined in
 `src/storage/schema/tables.rs` / `src/promotion.rs`.
 
+For **metrics**, Phase 0 also reserves classic histogram / summary fidelity
+columns owned by `src/metrics_fidelity.rs`: `count`, `sum`, `bucket_counts`,
+`explicit_bounds`, `quantiles`, `aggregation_temporality`, `exemplars_json`.
+Apply-time validation rejects new manifests that declare those names. If an
+already-active promotion still collides after upgrade, metrics ingest fails
+loud via `ensure_promoted_columns_not_reserved` until the promotion is
+deactivated or rebuilt.
+
 ### Query examples
 
 Without promotion (always available after instrumentation):

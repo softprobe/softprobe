@@ -824,6 +824,7 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
                 value,
                 attributes,
                 resource_attributes,
+                ..Default::default()
             });
         }
         all_metric_batches.push(metric_data_points);
