@@ -2,31 +2,36 @@
 //!
 //! Auth is enforced by [`crate::runtime_api::runtime_auth_middleware`].
 //! Scope-header mismatch is checked here after `TenantInfo` is available.
+//! Error bodies use protocol-native envelopes (see [`crate::compat::envelopes`]).
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
+use crate::compat::envelopes::{error_envelope, error_response};
 use crate::compat::errors::CompatError;
 use crate::compat::tenant::{
     scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
     TEMPO_SCOPE_HEADER,
 };
 use axum::extract::Extension;
+use axum::response::Response;
 use axum::routing::get;
-use axum::{Json, Router};
-use serde_json::{json, Value};
+use axum::Router;
+use serde_json::Value;
 
 fn stub_unsupported(
     tenant: TenantInfo,
     protocol: ProtocolScope,
     scope_header: Option<&str>,
     feature: &'static str,
-) -> Result<Json<Value>, CompatError> {
-    let _ctx =
-        TenantContext::from_authenticated(tenant, protocol, scope_header, QueryLimits::default())?;
-    Err(CompatError::unsupported(feature))
+) -> Response {
+    match TenantContext::from_authenticated(tenant, protocol, scope_header, QueryLimits::default())
+    {
+        Ok(_) => error_response(protocol, CompatError::unsupported(feature)),
+        Err(err) => error_response(protocol, err),
+    }
 }
 
-async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Result<Json<Value>, CompatError> {
+async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Response {
     stub_unsupported(
         tenant.0.clone(),
         ProtocolScope::Prometheus,
@@ -35,18 +40,12 @@ async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Result<Json<Value>, C
     )
 }
 
-async fn stub_loki(
-    tenant: Extension<TenantInfo>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<Value>, CompatError> {
+async fn stub_loki(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMap) -> Response {
     let scope = scope_header_value(&headers, LOKI_SCOPE_HEADER);
     stub_unsupported(tenant.0.clone(), ProtocolScope::Loki, scope, "loki_api")
 }
 
-async fn stub_tempo(
-    tenant: Extension<TenantInfo>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<Value>, CompatError> {
+async fn stub_tempo(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMap) -> Response {
     let scope = scope_header_value(&headers, TEMPO_SCOPE_HEADER);
     stub_unsupported(tenant.0.clone(), ProtocolScope::Tempo, scope, "tempo_api")
 }
@@ -121,11 +120,8 @@ pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] 
 }
 
 pub fn unsupported_json_body() -> Value {
-    json!({
-        "status": "error",
-        "error": {
-            "code": "unsupported_feature",
-            "message": "unsupported feature"
-        }
-    })
+    error_envelope(
+        ProtocolScope::Prometheus,
+        &CompatError::unsupported("prometheus_api"),
+    )
 }

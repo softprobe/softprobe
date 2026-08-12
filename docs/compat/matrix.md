@@ -22,8 +22,8 @@ Attribute projections: [`projections.md`](projections.md).
 | Auth | `Authorization: Bearer <softprobe-api-key>` required on all compatibility routes |
 | Tenant selection | From authenticated context only; never from query params or body |
 | Content types | `application/json` responses unless a protocol requires otherwise |
-| Unsupported feature | HTTP `501` (or protocol envelope with error) and stable code `unsupported_feature` |
-| Auth failure | `401` missing/invalid bearer shape; `403` unresolved or mismatched tenant |
+| Unsupported feature | HTTP `501` + protocol-native error envelope; Softprobe code `unsupported_feature` is prefixed in the error message (Tempo also sets `softprobe_code`) |
+| Auth failure | `401` missing/invalid bearer shape; `403` unresolved or mismatched tenant (middleware is status-only; scope mismatch uses protocol-native JSON) |
 | Default timeout | 30s query deadline unless a route documents a lower limit |
 | Default series/response caps | See capability manifest `limits` |
 
@@ -43,10 +43,29 @@ Phase 1 implements the supported subset.
 
 **Out of scope:** remote write/read, admin, TSDB, alerts, rules, targets.
 
-**Response envelope (target):** Prometheus JSON `{ "status": "success"|"error", ... }`.  
-**Errors:** `errorType` + `error` string; Softprobe also emits `unsupported_feature` in shared error mapping docs when the request hits an unsupported language feature.
+**Headers:** `Authorization` required (`supported`). Optional Grafana org headers ignored for tenancy (`ignored`).
 
-**Headers:** `Authorization` required. Optional Grafana org headers ignored for tenancy.
+**Error envelope (Phase 0):** `{ "status":"error", "errorType":"execution", "error":"unsupported_feature: ..." }` (`application/json`).  
+**Success envelope (Phase 1 target):** `{ "status":"success", "data": { "resultType", "result" } }` — see `tests/compat/fixtures/prometheus_success_minimal.json`.
+
+### Prometheus endpoint parameters
+
+Status values describe the **declared Phase N contract** (what adapters will do).
+Phase 0 stubs authenticate and return the error envelope without parsing these
+params (`ignored` at runtime today).
+
+Status legend: `supported` | `ignored` | `unsupported_feature` | `phase_1`.
+
+| Route | Param / field | In | Status | Notes |
+|-------|---------------|----|--------|-------|
+| `query` / `query_range` | `query` | query/body | `unsupported_feature` | PromQL; Phase 0 stubs ignore body |
+| `query` / `query_range` | `time` / `start` / `end` / `step` | query/body | `unsupported_feature` | |
+| `query` / `query_range` | `timeout` | query/body | `ignored` | Server uses `limits.query_timeout_seconds` |
+| `query` / `query_range` | `tenant_id` | query/body | `ignored` | Must not change tenant scope |
+| `labels` / `label/{name}/values` / `series` | `match[]` / `start` / `end` | query | `unsupported_feature` | |
+| `metadata` | `metric` / `limit` | query | `unsupported_feature` | |
+| all | response `status`/`data` | out | `phase_1` | Stub returns error envelope only |
+| all | response `errorType`/`error` | out | `supported` | Phase 0 stub |
 
 ## Loki HTTP API (query-only)
 
@@ -62,7 +81,24 @@ Base path: `/loki/api/v1`.
 
 **Out of scope:** push, tail, index stats, delete, ruler.
 
-**Headers:** `Authorization` required. `X-Scope-OrgID` must match authenticated tenant when present (see [`auth.md`](auth.md)).
+**Headers:** `Authorization` required (`supported`). `X-Scope-OrgID` must match authenticated tenant when present (`supported` consistency check; see [`auth.md`](auth.md)).
+
+**Error envelope (Phase 0):** `{ "status":"error", "error":"unsupported_feature: ..." }`.  
+**Success envelope (Phase 2 target):** `{ "status":"success", "data": { "resultType", "result" } }`.
+
+### Loki endpoint parameters
+
+Phase 0 stubs do not parse query params (declared Phase 2 contract below).
+
+| Route | Param / field | In | Status | Notes |
+|-------|---------------|----|--------|-------|
+| `query` / `query_range` | `query` | query | `unsupported_feature` | LogQL |
+| `query` / `query_range` | `limit` / `time` / `start` / `end` / `step` / `direction` | query | `unsupported_feature` | |
+| `query` / `query_range` | `timeout` | query | `ignored` | Uses capability timeout |
+| all | `tenant_id` | query/body | `ignored` | Never selects tenant |
+| `labels` / `label/{name}/values` / `series` | `start` / `end` / `match[]` | query | `unsupported_feature` | |
+| all | response `status`/`data` | out | `phase_2` | |
+| all | response `error` | out | `supported` | Phase 0 stub |
 
 ## Tempo HTTP API (query-only)
 
@@ -76,7 +112,24 @@ Base path: `/loki/api/v1`.
 
 **Out of scope:** write/push APIs, TraceQL full parity before subset is proven.
 
-**Headers:** `Authorization` required. Tempo tenant header (`X-Scope-OrgID` or configured equivalent) must match authenticated tenant when present.
+**Headers:** `Authorization` required (`supported`). Tempo tenant header (`X-Scope-OrgID`) must match authenticated tenant when present (`supported`).
+
+**Error envelope (Phase 0):** `{ "message":"unsupported_feature: ...", "softprobe_code":"unsupported_feature" }`.  
+**Success envelope (Phase 3 target):** trace JSON / search hits — see `tests/compat/fixtures/tempo_success_minimal.json`.
+
+### Tempo endpoint parameters
+
+Phase 0 stubs do not parse path/query params beyond routing (declared Phase 3 contract below).
+
+| Route | Param / field | In | Status | Notes |
+|-------|---------------|----|--------|-------|
+| `/api/traces/{traceID}` | `traceID` | path | `unsupported_feature` | Parsed later in Phase 3 |
+| `/api/v2/traces/{traceID}` | `traceID` | path | `unsupported_feature` | |
+| `/api/search` | `tags` / `minDuration` / `maxDuration` / `limit` / `start` / `end` / `q` | query | `unsupported_feature` | |
+| `/api/search/tags` | (none required) | query | `unsupported_feature` | |
+| `/api/search/tag/{tag}/values` | `tag` | path | `unsupported_feature` | |
+| all | `tenant_id` | query/body | `ignored` | |
+| all | response body | out | `phase_3` success / `supported` error | |
 
 ## Grafana
 
@@ -92,14 +145,15 @@ No custom Grafana datasource plugin in initial scope.
 | Classic histogram | count, sum, bucket_counts, explicit_bounds, temporality, exemplars | Absent OTLP `sum` stores SQL NULL (scalar `value` stays `0.0` for backward SQL). |
 | Summary | count, sum, quantiles | — |
 | Exponential / native histogram | Datapoint skipped with `unsupported_feature` log | Ingest of exponential hist datapoints |
+| Structured attributes | Scalars + arrays/kvlists (VARIANT nested JSON) + bytes (base64) | — |
+| Traces | Spans, events, status, resource/span attributes, HTTP body columns | Span links, instrumentation scope columns ([#33](https://github.com/softprobe/thelake/issues/33) Phase 3) |
+| Logs | Body, severity, attributes, resource attributes, trace/span ids | — |
 
 When a batch mixes supported and exponential-histogram datapoints, supported
 points are committed and the request may still return `2xx` with
 `ingested_count` reflecting only stored points. An all-exponential batch yields
 `ingested_count = 0` with `2xx` today; a stricter partial-failure envelope is a
 follow-up.
-| Traces | Spans, events, status, resource/span attributes, HTTP body columns | Span links, instrumentation scope columns (Phase 3 gap) |
-| Logs | Body, severity, attributes, resource attributes, trace/span ids | — |
 
 ## Language feature parity
 

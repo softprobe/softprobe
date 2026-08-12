@@ -230,10 +230,39 @@ async fn compat_routes_authenticated_return_unsupported_feature() {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            json["error"]["code"], "unsupported_feature",
-            "{method} {path}: {json}"
-        );
+        let path = *path;
+        if path.starts_with("/api/v1/") {
+            assert_eq!(json["status"], "error", "{method} {path}: {json}");
+            assert_eq!(json["errorType"], "execution", "{method} {path}: {json}");
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("unsupported_feature:"),
+                "{method} {path}: {json}"
+            );
+        } else if path.starts_with("/loki/") {
+            assert_eq!(json["status"], "error", "{method} {path}: {json}");
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("unsupported_feature:"),
+                "{method} {path}: {json}"
+            );
+        } else {
+            assert_eq!(
+                json["softprobe_code"], "unsupported_feature",
+                "{method} {path}: {json}"
+            );
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("unsupported_feature:"),
+                "{method} {path}: {json}"
+            );
+        }
     }
 }
 
@@ -253,6 +282,18 @@ async fn loki_mismatched_scope_header_is_forbidden() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["status"], "error");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("forbidden:"),
+        "{json}"
+    );
 }
 
 #[tokio::test]
@@ -271,6 +312,18 @@ async fn tempo_mismatched_scope_header_is_forbidden() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["softprobe_code"], "forbidden");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("forbidden:"),
+        "{json}"
+    );
 }
 
 #[tokio::test]
@@ -290,6 +343,49 @@ async fn compat_query_tenant_id_param_does_not_override_auth() {
         .unwrap();
     // Still authenticated for tenant-compat; stub returns unsupported (not a cross-tenant leak).
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn compat_query_tenant_id_body_does_not_override_auth() {
+    // Negative isolation: JSON body tenant_id must not change authenticated scope.
+    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/query")
+                .header("Authorization", "Bearer good-key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"up","tenant_id":"attacker"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["errorType"], "execution");
+}
+
+#[test]
+fn auth_contract_fixtures_document_expected_statuses() {
+    let dir = format!("{}/tests/compat/fixtures", env!("CARGO_MANIFEST_DIR"));
+    for name in [
+        "auth_missing_bearer.json",
+        "auth_forbidden.json",
+        "auth_scope_mismatch.json",
+    ] {
+        let raw = std::fs::read_to_string(format!("{dir}/{name}")).expect(name);
+        let v: serde_json::Value = serde_json::from_str(&raw).expect(name);
+        let status = v["expect"]["http_status"].as_u64().expect("http_status");
+        assert!(
+            status == 401 || status == 403,
+            "{name} unexpected status {status}"
+        );
+    }
 }
 
 #[test]

@@ -7,6 +7,7 @@
 
 pub mod backends;
 pub mod capability;
+pub mod envelopes;
 pub mod errors;
 pub mod ordering;
 pub mod projection;

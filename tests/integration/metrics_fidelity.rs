@@ -205,7 +205,12 @@ async fn http_otlp_histogram_ingest_then_sql_and_compat_stub() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(stub_json["error"]["code"], "unsupported_feature");
+    assert_eq!(stub_json["status"], "error");
+    assert_eq!(stub_json["errorType"], "execution");
+    assert!(stub_json["error"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("unsupported_feature:"));
 }
 
 #[tokio::test]
@@ -366,6 +371,172 @@ async fn classic_histogram_absent_sum_persists_null_in_ducklake() {
         sum, None,
         "absent OTLP histogram sum must persist as SQL NULL"
     );
+}
+
+#[tokio::test]
+async fn nested_otlp_attributes_round_trip_ducklake() {
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let data_path = config.ducklake.data_path.clone();
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+
+    let mut attrs = HashMap::new();
+    attrs.insert("tags".into(), r#"sp.json:["a",1]"#.into());
+    attrs.insert("meta".into(), r#"sp.json:{"region":"us","ok":true}"#.into());
+    attrs.insert("http.route".into(), "/api".into());
+    let mut resource = HashMap::new();
+    resource.insert("service.name".into(), "checkout".into());
+
+    let gauge = MetricRow {
+        metric_name: "app.gauge".into(),
+        description: "".into(),
+        unit: "1".into(),
+        metric_type: "gauge".into(),
+        timestamp: Utc::now(),
+        value: 1.0,
+        attributes: attrs,
+        resource_attributes: resource,
+        ..Default::default()
+    };
+
+    pipeline
+        .write_metric_batches(vec![vec![gauge]])
+        .await
+        .expect("write gauge with nested attrs");
+
+    let conn = attach(&metadata_path, &data_path);
+    let attrs_json: String = conn
+        .query_row(
+            "SELECT CAST(attributes AS JSON) FROM softprobe.metrics WHERE metric_name = 'app.gauge'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read attributes JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).expect("parse attrs");
+    assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
+    assert_eq!(parsed["meta"]["region"], "us");
+    assert_eq!(parsed["meta"]["ok"], true);
+    assert_eq!(parsed["http.route"], "/api");
+}
+
+#[tokio::test]
+async fn http_otlp_nested_attributes_round_trip_ducklake() {
+    use opentelemetry_proto::tonic::common::v1::{
+        any_value, AnyValue, ArrayValue, KeyValue, KeyValueList,
+    };
+    use opentelemetry_proto::tonic::metrics::v1::{
+        metric::Data, Gauge, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use prost::Message;
+
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let data_path = config.ducklake.data_path.clone();
+    let router = build_tenant_router(config).await;
+
+    let gauge = opentelemetry_proto::tonic::metrics::v1::Metric {
+        name: "app.nested".into(),
+        description: "".into(),
+        unit: "1".into(),
+        data: Some(Data::Gauge(Gauge {
+            data_points: vec![NumberDataPoint {
+                attributes: vec![
+                    KeyValue {
+                        key: "tags".into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                                values: vec![
+                                    AnyValue {
+                                        value: Some(any_value::Value::StringValue("a".into())),
+                                    },
+                                    AnyValue {
+                                        value: Some(any_value::Value::IntValue(1)),
+                                    },
+                                ],
+                            })),
+                        }),
+                    },
+                    KeyValue {
+                        key: "meta".into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::KvlistValue(KeyValueList {
+                                values: vec![KeyValue {
+                                    key: "region".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("us".into())),
+                                    }),
+                                }],
+                            })),
+                        }),
+                    },
+                ],
+                start_time_unix_nano: 0,
+                time_unix_nano: 1_640_995_200_000_000_000,
+                value: Some(
+                    opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(
+                        3.0,
+                    ),
+                ),
+                exemplars: vec![],
+                flags: 0,
+            }],
+        })),
+        metadata: vec![],
+    };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("checkout".into())),
+                    }),
+                }],
+                dropped_attributes_count: 0,
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics: vec![gauge],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+
+    let ingest = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(req.encode_to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ingest.status(), StatusCode::OK);
+    let ingest_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(ingest.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ingest_json["ingested_count"], 1);
+
+    let conn = attach(&metadata_path, &data_path);
+    let attrs_json: String = conn
+        .query_row(
+            "SELECT CAST(attributes AS JSON) FROM softprobe.metrics WHERE metric_name = 'app.nested'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read nested attrs");
+    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).unwrap();
+    assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
+    assert_eq!(parsed["meta"]["region"], "us");
 }
 
 #[tokio::test]

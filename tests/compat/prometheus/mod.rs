@@ -1,7 +1,8 @@
 //! Prometheus Phase 0: auth isolation + capability contract (stubs only).
 
 use softprobe_runtime::authn::TenantInfo;
-use softprobe_runtime::compat::errors::CompatErrorCode;
+use softprobe_runtime::compat::envelopes::{error_envelope, success_envelope_minimal};
+use softprobe_runtime::compat::errors::{CompatError, CompatErrorCode};
 use softprobe_runtime::compat::stubs::declared_compat_probe_paths;
 use softprobe_runtime::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
 
@@ -11,6 +12,16 @@ fn tenant(id: &str) -> TenantInfo {
         bucket_name: "b".into(),
         dataset_id: "d".into(),
     }
+}
+
+fn load_fixture(name: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/tests/compat/fixtures/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    serde_json::from_str(&raw).expect("parse fixture")
 }
 
 #[test]
@@ -34,4 +45,23 @@ fn prometheus_context_rejects_tenant_spoof_via_scope_header() {
     )
     .expect_err("spoof");
     assert_eq!(err.code, CompatErrorCode::Forbidden);
+}
+
+#[test]
+fn prometheus_error_fixture_matches_envelope_helper() {
+    let expected = load_fixture("prometheus_error_unsupported.json");
+    let actual = error_envelope(
+        ProtocolScope::Prometheus,
+        &CompatError::unsupported("prometheus_api"),
+    );
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn prometheus_success_minimal_fixture_matches_helper() {
+    let expected = load_fixture("prometheus_success_minimal.json");
+    assert_eq!(
+        success_envelope_minimal(ProtocolScope::Prometheus),
+        expected
+    );
 }

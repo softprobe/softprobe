@@ -73,8 +73,8 @@ storage_fidelity:
   classic_histogram: preserved
   summary: preserved
   exponential_histogram: unsupported_feature
-  span_links: phase_3_gap
-  instrumentation_scope_columns: phase_3_gap
+  span_links: phase_3_gap  # tracked: https://github.com/softprobe/thelake/issues/33
+  instrumentation_scope_columns: phase_3_gap  # tracked: https://github.com/softprobe/thelake/issues/33
 errors:
   unsupported_feature:
     code: unsupported_feature

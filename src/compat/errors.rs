@@ -1,4 +1,8 @@
 //! Stable compatibility error classes (never silent approximation).
+//!
+//! For **protocol** HTTP responses (Prometheus/Loki/Tempo), use
+//! [`crate::compat::envelopes::error_response`]. The `IntoResponse` impl below
+//! is Softprobe-internal JSON only and must not be used for compat stubs.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

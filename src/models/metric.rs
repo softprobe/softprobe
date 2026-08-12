@@ -164,19 +164,10 @@ impl Metric {
     pub fn extract_resource_attributes(
         resource_metrics: &opentelemetry_proto::tonic::metrics::v1::ResourceMetrics,
     ) -> HashMap<String, String> {
-        let mut attributes = HashMap::new();
-
-        if let Some(resource) = &resource_metrics.resource {
-            for attr in &resource.attributes {
-                if let Some(value) = &attr.value {
-                    if let Some(value_str) = any_value_to_string(value) {
-                        attributes.insert(attr.key.clone(), value_str);
-                    }
-                }
-            }
+        match &resource_metrics.resource {
+            Some(resource) => crate::models::key_values_to_map(&resource.attributes),
+            None => HashMap::new(),
         }
-
-        attributes
     }
 
     fn from_number_data_point(
@@ -294,15 +285,7 @@ impl Metric {
     fn extract_attributes(
         otlp_attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
     ) -> HashMap<String, String> {
-        let mut attributes = HashMap::new();
-        for attr in otlp_attributes {
-            if let Some(attr_value) = &attr.value {
-                if let Some(value_str) = any_value_to_string(attr_value) {
-                    attributes.insert(attr.key.clone(), value_str);
-                }
-            }
-        }
-        attributes
+        crate::models::key_values_to_map(otlp_attributes)
     }
 
     pub fn partition_key(&self) -> chrono::NaiveDate {
@@ -340,17 +323,6 @@ fn temporality_name(v: i32) -> &'static str {
     }
 }
 
-fn any_value_to_string(value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Option<String> {
-    use opentelemetry_proto::tonic::common::v1::any_value::Value;
-    match value.value.as_ref() {
-        Some(Value::StringValue(s)) => Some(s.clone()),
-        Some(Value::IntValue(i)) => Some(i.to_string()),
-        Some(Value::DoubleValue(d)) => Some(d.to_string()),
-        Some(Value::BoolValue(b)) => Some(b.to_string()),
-        _ => None,
-    }
-}
-
 fn encode_number_exemplars(
     exemplars: &[opentelemetry_proto::tonic::metrics::v1::Exemplar],
 ) -> Option<String> {
@@ -373,8 +345,11 @@ fn encode_number_exemplars(
                 .filtered_attributes
                 .iter()
                 .filter_map(|kv| {
-                    let v = kv.value.as_ref().and_then(any_value_to_string)?;
-                    Some((kv.key.clone(), serde_json::Value::String(v)))
+                    let v = kv
+                        .value
+                        .as_ref()
+                        .and_then(crate::models::any_value_to_json)?;
+                    Some((kv.key.clone(), v))
                 })
                 .collect();
             serde_json::json!({
@@ -568,7 +543,7 @@ mod tests {
         let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
         let json = rows[0].exemplars_json.as_deref().expect("exemplars");
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed[0]["filtered_attributes"]["http.status_code"], "500");
+        assert_eq!(parsed[0]["filtered_attributes"]["http.status_code"], 500);
         assert_eq!(parsed[0]["value"], 12.0);
     }
 

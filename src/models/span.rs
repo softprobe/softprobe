@@ -98,63 +98,30 @@ impl Span {
         otlp_span: opentelemetry_proto::tonic::trace::v1::Span,
         resource_attributes: &HashMap<String, String>,
     ) -> Result<Self> {
-        // Extract span attributes
-        let mut attributes = HashMap::new();
-        for attr in &otlp_span.attributes {
-            if let Some(value) = &attr.value {
-                let value_str = match value.value.as_ref() {
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
-                    ) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
-                        i.to_string()
-                    }
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
-                    ) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
-                        b,
-                    )) => b.to_string(),
-                    _ => continue,
-                };
-                attributes.insert(attr.key.clone(), value_str);
-            }
-        }
+        let attributes = crate::models::key_values_to_map(&otlp_span.attributes);
 
         // Extract events
         let events = otlp_span
             .events
             .iter()
-            .flat_map(|event| {
-            let mut event_attributes = HashMap::new();
-            for attr in &event.attributes {
-                if let Some(value) = &attr.value {
-                    let value_str = match value.value.as_ref() {
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => s.clone(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => i.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => d.to_string(),
-                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => b.to_string(),
-                        _ => return None,
-                    };
-                    event_attributes.insert(attr.key.clone(), value_str);
+            .map(|event| {
+                let event_timestamp = if event.time_unix_nano > 0 {
+                    chrono::DateTime::from_timestamp(
+                        (event.time_unix_nano / 1_000_000_000) as i64,
+                        (event.time_unix_nano % 1_000_000_000) as u32,
+                    )
+                    .unwrap_or_else(chrono::Utc::now)
+                } else {
+                    chrono::Utc::now()
+                };
+
+                SpanEvent {
+                    name: event.name.clone(),
+                    timestamp: event_timestamp,
+                    attributes: crate::models::key_values_to_map(&event.attributes),
                 }
-            }
-
-            let event_timestamp = if event.time_unix_nano > 0 {
-                chrono::DateTime::from_timestamp(
-                    (event.time_unix_nano / 1_000_000_000) as i64,
-                    (event.time_unix_nano % 1_000_000_000) as u32
-                ).unwrap_or_else(chrono::Utc::now)
-            } else {
-                chrono::Utc::now()
-            };
-
-            Some(SpanEvent {
-                name: event.name.clone(),
-                timestamp: event_timestamp,
-                attributes: event_attributes,
             })
-        }).collect();
+            .collect();
 
         // Convert timestamps
         let timestamp = if otlp_span.start_time_unix_nano > 0 {
@@ -245,36 +212,10 @@ impl Span {
     pub fn extract_resource_attributes(
         resource_spans: &opentelemetry_proto::tonic::trace::v1::ResourceSpans,
     ) -> HashMap<String, String> {
-        let mut attributes = HashMap::new();
-
-        if let Some(resource) = &resource_spans.resource {
-            for attr in &resource.attributes {
-                if let Some(value) = &attr.value {
-                    let value_str = match value.value.as_ref() {
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                s,
-                            ),
-                        ) => s.clone(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
-                        ) => i.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
-                                d,
-                            ),
-                        ) => d.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
-                        ) => b.to_string(),
-                        _ => continue,
-                    };
-                    attributes.insert(attr.key.clone(), value_str);
-                }
-            }
+        match &resource_spans.resource {
+            Some(resource) => crate::models::key_values_to_map(&resource.attributes),
+            None => HashMap::new(),
         }
-
-        attributes
     }
 
     /// Extract HTTP data from span events

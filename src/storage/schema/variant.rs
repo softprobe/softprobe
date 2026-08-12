@@ -107,6 +107,15 @@ fn typed_json_value(key: &str, value: &str) -> Value {
             }
         }
     }
+    // Only rehydrate values explicitly tagged by any_value encoding (arrays/kvlists).
+    // Plain OTLP StringValues that look like JSON stay strings.
+    if let Some(payload) = crate::models::strip_nested_json_prefix(value) {
+        match serde_json::from_str::<Value>(payload) {
+            Ok(parsed @ (Value::Object(_) | Value::Array(_))) => return parsed,
+            Ok(other) => return other,
+            Err(_) => return Value::String(value.to_string()),
+        }
+    }
     Value::String(value.to_string())
 }
 
@@ -159,5 +168,19 @@ mod tests {
 
         let plain = parse_projected_json_value(Value::String("not-json".to_string()));
         assert_eq!(plain, Value::String("not-json".to_string()));
+    }
+
+    #[test]
+    fn encode_attributes_json_rehydrates_only_tagged_nested() {
+        let mut map = HashMap::new();
+        map.insert("tags".into(), r#"sp.json:["a",1]"#.into());
+        map.insert("meta".into(), r#"sp.json:{"k":false}"#.into());
+        map.insert("plain".into(), "hello".into());
+        map.insert("looks_like_json".into(), r#"{"a":1}"#.into());
+        let json: Value = serde_json::from_str(&encode_attributes_json(&map)).unwrap();
+        assert_eq!(json["tags"], serde_json::json!(["a", 1]));
+        assert_eq!(json["meta"], serde_json::json!({"k": false}));
+        assert_eq!(json["plain"], "hello");
+        assert_eq!(json["looks_like_json"], r#"{"a":1}"#);
     }
 }

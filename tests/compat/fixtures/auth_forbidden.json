@@ -1,0 +1,15 @@
+{
+  "case": "rejected_api_key",
+  "request": {
+    "method": "GET",
+    "path": "/loki/api/v1/labels",
+    "headers": {
+      "Authorization": "Bearer bad-key"
+    }
+  },
+  "expect": {
+    "http_status": 403,
+    "body": null,
+    "notes": "runtime_auth_middleware returns status-only FORBIDDEN when resolver rejects the key"
+  }
+}

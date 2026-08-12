@@ -10,9 +10,14 @@ handlers. Handlers call typed backends that already apply these policies.
 
 1. **Resource vs datapoint/span attributes:** datapoint/span attributes win on
    key collision when projecting to a flat label/tag map.
-2. **Non-string OTel values:** stringify with stable formatting (`true`/`false`,
-   decimal integers, JSON for arrays/maps when retained as structured metadata).
-3. **Empty keys:** dropped.
+2. **Non-string OTel values:** scalars use stable string forms (`true`/`false`,
+   decimal integers/floats). Arrays and kvlists are **preserved** in storage as
+   nested JSON inside DuckLake VARIANT. In the in-memory attribute map they are
+   tagged with the `sp.json:` prefix so plain OTLP StringValues that look like
+   JSON are not rehydrated. Bytes are stored as standard base64. Protocol
+   label/tag projection uses the stored string/JSON text form (no silent drop).
+3. **Empty keys:** dropped. Nested empty/unencodeable AnyValue children become
+   JSON `null` (not omitted from arrays/objects).
 4. **Cardinality:** projected label/tag sets are subject to
    `limits.max_labels_per_series` (see capability manifest). Excess keys are
    dropped in lexicographic key order after reserved keys are kept; adapters
@@ -54,8 +59,9 @@ stream cardinality.
 | Intrinsic fields | `traceID`, `spanID`, `name`, `status`, duration derived from timestamps |
 
 Span **links** and **instrumentation scope** are not first-class storage
-columns in Phase 0 (documented matrix gap). Phase 3 may extend storage before
-claiming TraceQL parity for those fields.
+columns in Phase 0 (documented matrix gap; tracked in
+[#33](https://github.com/softprobe/thelake/issues/33)). Phase 3 may extend
+storage before claiming TraceQL parity for those fields.
 
 ## Explicit non-goals
 
