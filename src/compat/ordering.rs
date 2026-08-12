@@ -9,8 +9,7 @@ pub fn cmp_label_pairs(a: &(String, String), b: &(String, String)) -> Ordering {
 
 /// Sort samples by timestamp ascending, then value bits for stability.
 pub fn cmp_samples_by_ts(a: &(i64, f64), b: &(i64, f64)) -> Ordering {
-    a.0.cmp(&b.0)
-        .then_with(|| a.1.total_cmp(&b.1))
+    a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1))
 }
 
 /// Sort series identity strings lexicographically.

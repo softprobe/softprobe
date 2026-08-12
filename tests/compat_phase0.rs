@@ -26,7 +26,10 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-async fn authenticated_router(auth_success: bool, tenant_id: &str) -> (Router, MockServer, TempDir) {
+async fn authenticated_router(
+    auth_success: bool,
+    tenant_id: &str,
+) -> (Router, MockServer, TempDir) {
     let mock = MockServer::start().await;
     let body = if auth_success {
         serde_json::json!({

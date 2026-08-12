@@ -338,9 +338,7 @@ fn temporality_name(v: i32) -> &'static str {
     }
 }
 
-fn any_value_to_string(
-    value: &opentelemetry_proto::tonic::common::v1::AnyValue,
-) -> Option<String> {
+fn any_value_to_string(value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Option<String> {
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     match value.value.as_ref() {
         Some(Value::StringValue(s)) => Some(s.clone()),
@@ -361,9 +359,9 @@ fn encode_number_exemplars(
         .iter()
         .map(|e| {
             let value = match e.value {
-                Some(
-                    opentelemetry_proto::tonic::metrics::v1::exemplar::Value::AsDouble(v),
-                ) => serde_json::json!(v),
+                Some(opentelemetry_proto::tonic::metrics::v1::exemplar::Value::AsDouble(v)) => {
+                    serde_json::json!(v)
+                }
                 Some(opentelemetry_proto::tonic::metrics::v1::exemplar::Value::AsInt(v)) => {
                     serde_json::json!(v as f64)
                 }
@@ -391,8 +389,8 @@ mod tests {
     use super::*;
     use chrono::{Datelike, TimeZone};
     use opentelemetry_proto::tonic::metrics::v1::{
-        metric::Data, ExponentialHistogram, Histogram, HistogramDataPoint, Metric as OtlpMetric,
-        Summary, SummaryDataPoint, summary_data_point::ValueAtQuantile,
+        metric::Data, summary_data_point::ValueAtQuantile, ExponentialHistogram, Histogram,
+        HistogramDataPoint, Metric as OtlpMetric, Summary, SummaryDataPoint,
     };
 
     fn base_metric(name: &str, metric_type: &str, value: f64, ts: DateTime<Utc>) -> Metric {

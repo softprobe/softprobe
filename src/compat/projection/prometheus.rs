@@ -97,7 +97,10 @@ mod tests {
         dp.insert("http.method".into(), "POST".into());
         let labels = project_prometheus_labels("http_requests", &resource, &dp, 40);
         assert_eq!(labels.get("http_method").map(String::as_str), Some("POST"));
-        assert_eq!(labels.get("__name__").map(String::as_str), Some("http_requests"));
+        assert_eq!(
+            labels.get("__name__").map(String::as_str),
+            Some("http_requests")
+        );
     }
 
     #[test]

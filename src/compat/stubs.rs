@@ -3,20 +3,18 @@
 //! Auth is enforced by [`crate::runtime_api::runtime_auth_middleware`].
 //! Scope-header mismatch is checked here after `TenantInfo` is available.
 
+use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::compat::errors::CompatError;
 use crate::compat::tenant::{
     scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
 };
-use crate::api::AppState;
 use axum::extract::Extension;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-async fn stub_prometheus(
-    tenant: Extension<TenantInfo>,
-) -> Result<Json<Value>, CompatError> {
+async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Result<Json<Value>, CompatError> {
     let _ctx = TenantContext::from_authenticated(
         tenant.0.clone(),
         ProtocolScope::Prometheus,

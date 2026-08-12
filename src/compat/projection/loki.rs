@@ -75,9 +75,7 @@ mod tests {
             Some("api")
         );
         assert_eq!(
-            p.structured_metadata
-                .get("http.route")
-                .map(String::as_str),
+            p.structured_metadata.get("http.route").map(String::as_str),
             Some("/v1")
         );
     }

@@ -1,9 +1,9 @@
 //! Prometheus Phase 0: auth isolation + capability contract (stubs only).
 
+use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::compat::errors::CompatErrorCode;
 use softprobe_runtime::compat::stubs::declared_compat_probe_paths;
 use softprobe_runtime::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
-use softprobe_runtime::authn::TenantInfo;
 
 fn tenant(id: &str) -> TenantInfo {
     TenantInfo {

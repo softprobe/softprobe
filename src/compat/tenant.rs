@@ -105,10 +105,7 @@ impl TenantContext {
 }
 
 /// Extract Loki/Tempo scope header value from a header map (case-insensitive name).
-pub fn scope_header_value<'a>(
-    headers: &'a http::HeaderMap,
-    header_name: &str,
-) -> Option<&'a str> {
+pub fn scope_header_value<'a>(headers: &'a http::HeaderMap, header_name: &str) -> Option<&'a str> {
     headers
         .get(header_name)
         .or_else(|| headers.get(LOKI_SCOPE_HEADER))
