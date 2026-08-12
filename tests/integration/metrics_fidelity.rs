@@ -1,12 +1,31 @@
 //! DuckLake round-trip for classic histogram / summary fidelity columns (Phase 0).
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::middleware::from_fn;
+use axum::routing::post;
+use axum::Router;
 use chrono::Utc;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+use opentelemetry_proto::tonic::metrics::v1::{
+    metric::Data, summary_data_point::ValueAtQuantile, Histogram, HistogramDataPoint, Metric,
+    ResourceMetrics, ScopeMetrics, Summary, SummaryDataPoint,
+};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use prost::Message;
+use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::models::{Metric, SummaryQuantile};
+use softprobe_runtime::models::{Metric as MetricRow, SummaryQuantile};
+use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
+use crate::util::tenant::inject_local_sqlite_tenant;
 
 fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
     let connection = duckdb::Connection::open_in_memory().expect("duckdb");
@@ -25,6 +44,170 @@ fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
     connection
 }
 
+async fn build_tenant_router(config: Config) -> Router {
+    let (router, state) =
+        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
+            .await
+            .expect("router");
+    router
+        .merge(runtime_control_routes().with_state(state))
+        .layer(from_fn(inject_local_sqlite_tenant))
+}
+
+fn histogram_and_summary_otlp() -> ExportMetricsServiceRequest {
+    let hist = Metric {
+        name: "http.server.duration".into(),
+        description: "latency".into(),
+        unit: "ms".into(),
+        data: Some(Data::Histogram(Histogram {
+            data_points: vec![HistogramDataPoint {
+                attributes: vec![KeyValue {
+                    key: "http.route".into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("/api/orders".into())),
+                    }),
+                }],
+                start_time_unix_nano: 0,
+                time_unix_nano: 1_640_995_200_000_000_000,
+                count: 10,
+                sum: Some(100.0),
+                bucket_counts: vec![2, 5, 3],
+                explicit_bounds: vec![10.0, 50.0],
+                exemplars: vec![],
+                flags: 0,
+                min: Some(1.0),
+                max: Some(80.0),
+            }],
+            aggregation_temporality: 2,
+        })),
+        metadata: vec![],
+    };
+    let summary = Metric {
+        name: "rpc.latency".into(),
+        description: "".into(),
+        unit: "ms".into(),
+        data: Some(Data::Summary(Summary {
+            data_points: vec![SummaryDataPoint {
+                attributes: vec![],
+                start_time_unix_nano: 0,
+                time_unix_nano: 1_640_995_200_000_000_000,
+                count: 100,
+                sum: 500.0,
+                quantile_values: vec![
+                    ValueAtQuantile {
+                        quantile: 0.5,
+                        value: 4.0,
+                    },
+                    ValueAtQuantile {
+                        quantile: 0.99,
+                        value: 20.0,
+                    },
+                ],
+                flags: 0,
+            }],
+        })),
+        metadata: vec![],
+    };
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("checkout".into())),
+                    }),
+                }],
+                dropped_attributes_count: 0,
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics: vec![hist, summary],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn http_otlp_histogram_ingest_then_sql_and_compat_stub() {
+    // End-to-end for Phase 0: HTTP OTLP → DuckLake fidelity columns → compat stub 501.
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let data_path = config.ducklake.data_path.clone();
+    let router = build_tenant_router(config).await;
+
+    let body = histogram_and_summary_otlp().encode_to_vec();
+    let ingest = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ingest.status(), StatusCode::OK, "OTLP metrics ingest");
+    let ingest_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(ingest.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ingest_json["success"], true);
+    assert_eq!(ingest_json["ingested_count"], 2);
+
+    let conn = attach(&metadata_path, &data_path);
+    let (count, sum, buckets): (Option<i64>, Option<f64>, Option<String>) = conn
+        .query_row(
+            "SELECT count, sum, CAST(bucket_counts AS VARCHAR) \
+             FROM softprobe.metrics WHERE metric_name = 'http.server.duration'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("SQL read histogram after HTTP ingest");
+    assert_eq!(count, Some(10));
+    assert_eq!(sum, Some(100.0));
+    assert!(
+        buckets.as_deref().unwrap_or("").contains('2'),
+        "bucket_counts={buckets:?}"
+    );
+
+    let (qcount, quantiles): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT count, CAST(quantiles AS VARCHAR) \
+             FROM softprobe.metrics WHERE metric_name = 'rpc.latency'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("SQL read summary");
+    assert_eq!(qcount, Some(100));
+    assert!(quantiles.as_deref().unwrap_or("").contains("0.99"));
+
+    let stub = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/query")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stub.status(), StatusCode::NOT_IMPLEMENTED);
+    let stub_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(stub.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stub_json["error"]["code"], "unsupported_feature");
+}
+
 #[tokio::test]
 async fn classic_histogram_and_summary_round_trip_ducklake() {
     let temp = TempDir::new().expect("temp");
@@ -39,7 +222,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
     let mut resource = HashMap::new();
     resource.insert("service.name".into(), "checkout".into());
 
-    let histogram = Metric {
+    let histogram = MetricRow {
         metric_name: "http.server.duration".into(),
         description: "latency".into(),
         unit: "ms".into(),
@@ -57,7 +240,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         exemplars_json: Some(r#"[{"value":1.5}]"#.into()),
     };
 
-    let summary = Metric {
+    let summary = MetricRow {
         metric_name: "rpc.latency".into(),
         description: "".into(),
         unit: "ms".into(),
@@ -143,13 +326,11 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
 
 #[tokio::test]
 async fn legacy_metrics_table_widens_on_gauge_ingest() {
-    // Simulate a pre-Phase-0 metrics table (no fidelity columns), then ingest a gauge.
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
     let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
 
-    // Create legacy-shaped metrics table via DuckLake attach.
     {
         let conn = attach(&metadata_path, &data_path);
         conn.execute_batch(
@@ -169,7 +350,7 @@ async fn legacy_metrics_table_widens_on_gauge_ingest() {
     }
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let gauge = Metric {
+    let gauge = MetricRow {
         metric_name: "cpu.usage".into(),
         description: "".into(),
         unit: "%".into(),
@@ -193,27 +374,14 @@ async fn legacy_metrics_table_widens_on_gauge_ingest() {
         .expect("read gauge");
     assert_eq!(value, 55.0);
 
-    // Fidelity columns exist (nullable) after ensure_metrics_fidelity_columns.
-    let has_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.columns \
-             WHERE table_name = 'metrics' AND column_name = 'count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| {
-            // DuckLake may not expose information_schema the same way; fall back to DESCRIBE.
-            let mut stmt = conn.prepare("DESCRIBE softprobe.metrics").unwrap();
-            let names: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect();
-            assert!(
-                names.iter().any(|n| n == "count"),
-                "expected count column after widen, got {names:?}"
-            );
-            1
-        });
-    assert!(has_count >= 1);
+    let mut stmt = conn.prepare("DESCRIBE softprobe.metrics").unwrap();
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "count"),
+        "expected count column after widen, got {names:?}"
+    );
 }
