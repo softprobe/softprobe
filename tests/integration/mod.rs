@@ -1,5 +1,6 @@
 pub mod authn_contract;
 pub mod http_api;
+pub mod metrics_fidelity;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_apply_e2e;
 pub mod promotion_business_row_extraction;

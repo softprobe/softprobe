@@ -7,7 +7,7 @@ pub mod score_config;
 pub mod span;
 
 pub use log::Log;
-pub use metric::Metric;
+pub use metric::{Metric, SummaryQuantile, UNSUPPORTED_EXPONENTIAL_HISTOGRAM};
 pub use score::{Score, ScoreDataType, ScoreSource};
 pub use score_config::ScoreConfig;
 pub use span::{Span, SpanEvent};

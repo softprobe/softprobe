@@ -1,0 +1,96 @@
+version: compat.v0
+otlp_write_canonical: true
+protocols:
+  prometheus:
+    base_path: /api/v1
+    write_apis: false
+    endpoints:
+      - method: [GET, POST]
+        path: /api/v1/query
+        status: stub
+      - method: [GET, POST]
+        path: /api/v1/query_range
+        status: stub
+      - method: [GET]
+        path: /api/v1/labels
+        status: stub
+      - method: [GET]
+        path: /api/v1/label/{name}/values
+        status: stub
+      - method: [GET]
+        path: /api/v1/series
+        status: stub
+      - method: [GET]
+        path: /api/v1/metadata
+        status: stub
+    language_features:
+      promql: subset_pending_phase_1
+  loki:
+    base_path: /loki/api/v1
+    write_apis: false
+    endpoints:
+      - method: [GET]
+        path: /loki/api/v1/query
+        status: stub
+      - method: [GET]
+        path: /loki/api/v1/query_range
+        status: stub
+      - method: [GET]
+        path: /loki/api/v1/labels
+        status: stub
+      - method: [GET]
+        path: /loki/api/v1/label/{name}/values
+        status: stub
+      - method: [GET]
+        path: /loki/api/v1/series
+        status: stub
+    language_features:
+      logql: subset_pending_phase_2
+  tempo:
+    write_apis: false
+    endpoints:
+      - method: [GET]
+        path: /api/traces/{traceID}
+        status: stub
+      - method: [GET]
+        path: /api/v2/traces/{traceID}
+        status: stub
+      - method: [GET]
+        path: /api/search
+        status: stub
+      - method: [GET]
+        path: /api/search/tags
+        status: stub
+      - method: [GET]
+        path: /api/search/tag/{tag}/values
+        status: stub
+    language_features:
+      traceql: subset_pending_phase_3
+  grafana:
+    native_datasources: pending_phase_4
+    custom_plugin: out_of_scope
+storage_fidelity:
+  classic_histogram: preserved
+  summary: preserved
+  exponential_histogram: unsupported_feature
+  span_links: phase_3_gap
+  instrumentation_scope_columns: phase_3_gap
+errors:
+  unsupported_feature:
+    code: unsupported_feature
+    http_status: 501
+  unauthorized:
+    http_status: 401
+  forbidden:
+    http_status: 403
+limits:
+  max_query_range_seconds: 86400
+  max_series: 10000
+  max_response_bytes: 16777216
+  max_labels_per_series: 40
+  query_timeout_seconds: 30
+auth:
+  bearer: softprobe_api_key
+  loki_scope_header: X-Scope-OrgID
+  tempo_scope_header: X-Scope-OrgID
+  scope_header_must_match_tenant: true

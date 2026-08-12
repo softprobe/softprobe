@@ -38,23 +38,7 @@ pub(super) fn ensure_variant_column_types(
     if expected.is_empty() {
         return Ok(());
     }
-    let sql = format!("DESCRIBE {qualified_table};");
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let dtype: String = row.get(1)?;
-            Ok((name, dtype))
-        })
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
-
-    let mut found: HashMap<String, String> = HashMap::new();
-    for row in rows {
-        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
-        found.insert(name, dtype);
-    }
+    let found = describe_columns(conn, qualified_table)?;
 
     for col in expected {
         let Some(dtype) = found.get(*col) else {
@@ -73,6 +57,66 @@ pub(super) fn ensure_variant_column_types(
         }
     }
     Ok(())
+}
+
+/// Canonical metrics fidelity columns (Phase 0 classic histogram/summary).
+/// Added with `ALTER TABLE … ADD COLUMN IF NOT EXISTS` so existing catalogs keep ingesting.
+pub(super) const METRICS_FIDELITY_COLUMNS: &[(&str, &str)] = &[
+    ("count", "UBIGINT"),
+    ("sum", "DOUBLE"),
+    ("bucket_counts", "UBIGINT[]"),
+    ("explicit_bounds", "DOUBLE[]"),
+    ("quantiles", "STRUCT(quantile DOUBLE, value DOUBLE)[]"),
+    ("aggregation_temporality", "VARCHAR"),
+    ("exemplars_json", "VARCHAR"),
+];
+
+/// Widen existing `metrics` tables with nullable fidelity columns before INSERT BY NAME.
+pub(super) fn ensure_metrics_fidelity_columns(
+    conn: &Connection,
+    qualified_table: &str,
+) -> Result<()> {
+    let found = describe_columns(conn, qualified_table)?;
+    let mut ddls = Vec::new();
+    for (name, sql_type) in METRICS_FIDELITY_COLUMNS {
+        if !found.contains_key(*name) {
+            ddls.push(format!(
+                "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {name} {sql_type};"
+            ));
+        }
+    }
+    if ddls.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(&ddls.join("\n")).map_err(|e| {
+        anyhow!(
+            "failed to add metrics fidelity columns on {qualified_table}: {e}. \
+             Classic histogram/summary columns are required for Grafana/Prometheus compatibility; \
+             fix DDL permissions or rebuild the metrics table, then retry ingest."
+        )
+    })?;
+    Ok(())
+}
+
+fn describe_columns(conn: &Connection, qualified_table: &str) -> Result<HashMap<String, String>> {
+    let sql = format!("DESCRIBE {qualified_table};");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let name: String = row.get(0)?;
+            let dtype: String = row.get(1)?;
+            Ok((name, dtype))
+        })
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
+
+    let mut found: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
+        found.insert(name, dtype);
+    }
+    Ok(found)
 }
 
 pub(super) fn quote_duckdb_ident(input: &str) -> String {

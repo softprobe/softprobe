@@ -5,6 +5,7 @@ mod test_support;
 pub mod api;
 pub mod authn;
 pub mod catalog;
+pub mod compat;
 pub mod compaction;
 pub mod config;
 pub mod control_plane;

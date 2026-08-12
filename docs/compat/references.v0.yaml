@@ -1,0 +1,24 @@
+version: compat.v0
+# Pinned reference images for Phase 5 differential harness.
+# Versions are intentionally conservative; bump with an explicit PR + matrix note.
+references:
+  prometheus:
+    image: prom/prometheus
+    tag: "v2.54.1"
+    notes: Query API oracle for supported PromQL subset
+  loki:
+    image: grafana/loki
+    tag: "3.1.1"
+    notes: Query API oracle for supported LogQL subset
+  tempo:
+    image: grafana/tempo
+    tag: "2.6.1"
+    notes: Trace query/search oracle
+  grafana:
+    image: grafana/grafana
+    tag: "11.2.0"
+    notes: Datasource + Explore smoke (Phase 4)
+  otel_collector:
+    image: otel/opentelemetry-collector-contrib
+    tag: "0.111.0"
+    notes: Fixture generation / ingest path parity

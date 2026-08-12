@@ -3,48 +3,70 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use tracing::warn;
 
-/// Metric data model representing an OTLP metric data point
+/// Stable code logged when an exponential histogram datapoint is skipped.
+pub const UNSUPPORTED_EXPONENTIAL_HISTOGRAM: &str = "unsupported_feature";
+
+/// One summary quantile value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SummaryQuantile {
+    pub quantile: f64,
+    pub value: f64,
+}
+
+/// Metric data model representing an OTLP metric data point.
 ///
-/// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
-/// (legacy path; Arrow/DuckLake column order).
+/// Matches `OtlpMetricsTable` in `src/storage/schema/tables.rs`. Gauge/sum use
+/// `value`; classic histogram/summary also populate fidelity columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metric {
-    // Field 1-4: Metric identity
-    /// Name of the metric (e.g., "http.server.duration")
     pub metric_name: String,
-
-    /// Human-readable description of the metric
     pub description: String,
-
-    /// Unit of measurement (e.g., "ms", "bytes", "1")
     pub unit: String,
-
-    /// Type of metric: "gauge", "sum", "histogram", "summary"
+    /// "gauge", "sum", "histogram", or "summary"
     pub metric_type: String,
-
-    // Field 5-6: Timestamp and value
-    /// Timestamp when the metric was recorded
     pub timestamp: DateTime<Utc>,
-
-    /// Numeric value of the metric data point
+    /// Scalar for gauge/sum; for histogram/summary equals `sum` (SQL compat).
     pub value: f64,
-
-    // Field 7: Attributes MAP<STRING, STRING>
-    /// Additional attributes specific to this metric data point
-    /// (e.g., http.method, http.status_code, custom tags)
     pub attributes: HashMap<String, String>,
-
-    // Field 8: Resource attributes MAP<STRING, STRING>
-    /// Resource attributes identifying the metric source
-    /// (e.g., service.name, host.name, k8s.pod.name)
     pub resource_attributes: HashMap<String, String>,
-    // Field 13: record_date (partition key - computed, not stored in struct)
-    // Derived from timestamp at write time in arrow.rs
+    /// Histogram/summary population count.
+    pub count: Option<u64>,
+    /// Histogram/summary sum (also mirrored in `value`).
+    pub sum: Option<f64>,
+    pub bucket_counts: Option<Vec<u64>>,
+    pub explicit_bounds: Option<Vec<f64>>,
+    pub quantiles: Option<Vec<SummaryQuantile>>,
+    /// OTLP AggregationTemporality name: "DELTA" | "CUMULATIVE" | "UNSPECIFIED"
+    pub aggregation_temporality: Option<String>,
+    /// JSON array of exemplar objects (trace_id, span_id, value, time, attrs).
+    pub exemplars_json: Option<String>,
+}
+
+impl Default for Metric {
+    fn default() -> Self {
+        Self {
+            metric_name: String::new(),
+            description: String::new(),
+            unit: String::new(),
+            metric_type: String::new(),
+            timestamp: Utc::now(),
+            value: 0.0,
+            attributes: HashMap::new(),
+            resource_attributes: HashMap::new(),
+            count: None,
+            sum: None,
+            bucket_counts: None,
+            explicit_bounds: None,
+            quantiles: None,
+            aggregation_temporality: None,
+            exemplars_json: None,
+        }
+    }
 }
 
 impl Metric {
-    /// Convert a batch of Metrics to Arrow RecordBatch for DuckLake storage
     pub fn to_record_batch(
         metrics: &[Metric],
         schema: &arrow::datatypes::Schema,
@@ -52,8 +74,6 @@ impl Metric {
         crate::storage::schema::arrow::metrics_to_record_batch(metrics, schema)
     }
 
-    /// Create Metrics from an OTLP Metric and resource attributes
-    /// Returns a Vec because a single OTLP metric can contain multiple data points
     pub fn from_otlp(
         otlp_metric: &opentelemetry_proto::tonic::metrics::v1::Metric,
         resource_attributes: &HashMap<String, String>,
@@ -64,7 +84,6 @@ impl Metric {
         let description = otlp_metric.description.clone();
         let unit = otlp_metric.unit.clone();
 
-        // Determine metric type and extract data points
         use opentelemetry_proto::tonic::metrics::v1::metric::Data;
         if let Some(data) = &otlp_metric.data {
             match data {
@@ -77,12 +96,14 @@ impl Metric {
                             &unit,
                             "gauge",
                             resource_attributes,
+                            None,
                         ) {
                             metrics.push(metric);
                         }
                     }
                 }
                 Data::Sum(sum) => {
+                    let temporality = temporality_name(sum.aggregation_temporality);
                     for data_point in &sum.data_points {
                         if let Some(metric) = Self::from_number_data_point(
                             data_point,
@@ -91,12 +112,14 @@ impl Metric {
                             &unit,
                             "sum",
                             resource_attributes,
+                            Some(temporality),
                         ) {
                             metrics.push(metric);
                         }
                     }
                 }
                 Data::Histogram(histogram) => {
+                    let temporality = temporality_name(histogram.aggregation_temporality);
                     for data_point in &histogram.data_points {
                         if let Some(metric) = Self::from_histogram_data_point(
                             data_point,
@@ -104,6 +127,7 @@ impl Metric {
                             &description,
                             &unit,
                             resource_attributes,
+                            temporality,
                         ) {
                             metrics.push(metric);
                         }
@@ -123,8 +147,13 @@ impl Metric {
                     }
                 }
                 Data::ExponentialHistogram(_) => {
-                    // Simplified: skip exponential histograms
-                    tracing::warn!("ExponentialHistogram not fully supported, skipping");
+                    // Explicit unsupported: skip datapoints with stable code (do not
+                    // silently approximate as classic histogram).
+                    warn!(
+                        code = UNSUPPORTED_EXPONENTIAL_HISTOGRAM,
+                        metric = %metric_name,
+                        "ExponentialHistogram datapoints skipped (unsupported_feature)"
+                    );
                 }
             }
         }
@@ -132,7 +161,6 @@ impl Metric {
         Ok(metrics)
     }
 
-    /// Extract resource attributes from OTLP ResourceMetrics
     pub fn extract_resource_attributes(
         resource_metrics: &opentelemetry_proto::tonic::metrics::v1::ResourceMetrics,
     ) -> HashMap<String, String> {
@@ -141,26 +169,9 @@ impl Metric {
         if let Some(resource) = &resource_metrics.resource {
             for attr in &resource.attributes {
                 if let Some(value) = &attr.value {
-                    let value_str = match value.value.as_ref() {
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                s,
-                            ),
-                        ) => s.clone(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
-                        ) => i.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
-                                d,
-                            ),
-                        ) => d.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
-                        ) => b.to_string(),
-                        _ => continue,
-                    };
-                    attributes.insert(attr.key.clone(), value_str);
+                    if let Some(value_str) = any_value_to_string(value) {
+                        attributes.insert(attr.key.clone(), value_str);
+                    }
                 }
             }
         }
@@ -168,7 +179,6 @@ impl Metric {
         attributes
     }
 
-    /// Convert a NumberDataPoint to Metric
     fn from_number_data_point(
         data_point: &opentelemetry_proto::tonic::metrics::v1::NumberDataPoint,
         metric_name: &str,
@@ -176,19 +186,10 @@ impl Metric {
         unit: &str,
         metric_type: &str,
         resource_attributes: &HashMap<String, String>,
+        aggregation_temporality: Option<&str>,
     ) -> Option<Self> {
-        // Extract timestamp
-        let timestamp = if data_point.time_unix_nano > 0 {
-            chrono::DateTime::from_timestamp(
-                (data_point.time_unix_nano / 1_000_000_000) as i64,
-                (data_point.time_unix_nano % 1_000_000_000) as u32,
-            )
-            .unwrap_or_else(chrono::Utc::now)
-        } else {
-            chrono::Utc::now()
-        };
+        let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
 
-        // Extract value
         use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
         let value = match &data_point.value {
             Some(Value::AsDouble(v)) => *v,
@@ -196,8 +197,8 @@ impl Metric {
             None => return None,
         };
 
-        // Extract attributes
         let attributes = Self::extract_attributes(&data_point.attributes);
+        let exemplars_json = encode_number_exemplars(&data_point.exemplars);
 
         Some(Metric {
             metric_name: metric_name.to_string(),
@@ -208,36 +209,28 @@ impl Metric {
             value,
             attributes,
             resource_attributes: resource_attributes.clone(),
+            count: None,
+            sum: None,
+            bucket_counts: None,
+            explicit_bounds: None,
+            quantiles: None,
+            aggregation_temporality: aggregation_temporality.map(str::to_string),
+            exemplars_json,
         })
     }
 
-    /// Convert a HistogramDataPoint to Metric (using sum as value)
     fn from_histogram_data_point(
         data_point: &opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint,
         metric_name: &str,
         description: &str,
         unit: &str,
         resource_attributes: &HashMap<String, String>,
+        aggregation_temporality: &str,
     ) -> Option<Self> {
-        // Extract timestamp
-        let timestamp = if data_point.time_unix_nano > 0 {
-            chrono::DateTime::from_timestamp(
-                (data_point.time_unix_nano / 1_000_000_000) as i64,
-                (data_point.time_unix_nano % 1_000_000_000) as u32,
-            )
-            .unwrap_or_else(chrono::Utc::now)
-        } else {
-            chrono::Utc::now()
-        };
-
-        // Use sum as the value (default to 0.0 if None)
-        let value = data_point.sum.unwrap_or(0.0);
-
-        // Extract attributes
-        let mut attributes = Self::extract_attributes(&data_point.attributes);
-
-        // Add histogram-specific attributes
-        attributes.insert("count".to_string(), data_point.count.to_string());
+        let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
+        let sum = data_point.sum.unwrap_or(0.0);
+        let attributes = Self::extract_attributes(&data_point.attributes);
+        let exemplars_json = encode_histogram_exemplars(&data_point.exemplars);
 
         Some(Metric {
             metric_name: metric_name.to_string(),
@@ -245,13 +238,19 @@ impl Metric {
             unit: unit.to_string(),
             metric_type: "histogram".to_string(),
             timestamp,
-            value,
+            value: sum,
             attributes,
             resource_attributes: resource_attributes.clone(),
+            count: Some(data_point.count),
+            sum: Some(sum),
+            bucket_counts: Some(data_point.bucket_counts.clone()),
+            explicit_bounds: Some(data_point.explicit_bounds.clone()),
+            quantiles: None,
+            aggregation_temporality: Some(aggregation_temporality.to_string()),
+            exemplars_json,
         })
     }
 
-    /// Convert a SummaryDataPoint to Metric (using sum as value)
     fn from_summary_data_point(
         data_point: &opentelemetry_proto::tonic::metrics::v1::SummaryDataPoint,
         metric_name: &str,
@@ -259,25 +258,17 @@ impl Metric {
         unit: &str,
         resource_attributes: &HashMap<String, String>,
     ) -> Option<Self> {
-        // Extract timestamp
-        let timestamp = if data_point.time_unix_nano > 0 {
-            chrono::DateTime::from_timestamp(
-                (data_point.time_unix_nano / 1_000_000_000) as i64,
-                (data_point.time_unix_nano % 1_000_000_000) as u32,
-            )
-            .unwrap_or_else(chrono::Utc::now)
-        } else {
-            chrono::Utc::now()
-        };
-
-        // Use sum as the value
-        let value = data_point.sum;
-
-        // Extract attributes
-        let mut attributes = Self::extract_attributes(&data_point.attributes);
-
-        // Add summary-specific attributes
-        attributes.insert("count".to_string(), data_point.count.to_string());
+        let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
+        let sum = data_point.sum;
+        let attributes = Self::extract_attributes(&data_point.attributes);
+        let quantiles = data_point
+            .quantile_values
+            .iter()
+            .map(|q| SummaryQuantile {
+                quantile: q.quantile,
+                value: q.value,
+            })
+            .collect::<Vec<_>>();
 
         Some(Metric {
             metric_name: metric_name.to_string(),
@@ -285,42 +276,33 @@ impl Metric {
             unit: unit.to_string(),
             metric_type: "summary".to_string(),
             timestamp,
-            value,
+            value: sum,
             attributes,
             resource_attributes: resource_attributes.clone(),
+            count: Some(data_point.count),
+            sum: Some(sum),
+            bucket_counts: None,
+            explicit_bounds: None,
+            quantiles: Some(quantiles),
+            aggregation_temporality: None,
+            exemplars_json: None,
         })
     }
 
-    /// Extract attributes from OTLP KeyValue pairs
     fn extract_attributes(
         otlp_attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
     ) -> HashMap<String, String> {
         let mut attributes = HashMap::new();
         for attr in otlp_attributes {
             if let Some(attr_value) = &attr.value {
-                let value_str = match attr_value.value.as_ref() {
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
-                    ) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
-                        i.to_string()
-                    }
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
-                    ) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
-                        b,
-                    )) => b.to_string(),
-                    _ => continue,
-                };
-                attributes.insert(attr.key.clone(), value_str);
+                if let Some(value_str) = any_value_to_string(attr_value) {
+                    attributes.insert(attr.key.clone(), value_str);
+                }
             }
         }
         attributes
     }
-}
 
-impl Metric {
     pub fn partition_key(&self) -> chrono::NaiveDate {
         self.timestamp.date_naive()
     }
@@ -336,24 +318,103 @@ impl Metric {
     }
 }
 
+fn timestamp_from_unix_nano(time_unix_nano: u64) -> DateTime<Utc> {
+    if time_unix_nano > 0 {
+        chrono::DateTime::from_timestamp(
+            (time_unix_nano / 1_000_000_000) as i64,
+            (time_unix_nano % 1_000_000_000) as u32,
+        )
+        .unwrap_or_else(Utc::now)
+    } else {
+        Utc::now()
+    }
+}
+
+fn temporality_name(v: i32) -> &'static str {
+    match v {
+        1 => "DELTA",
+        2 => "CUMULATIVE",
+        _ => "UNSPECIFIED",
+    }
+}
+
+fn any_value_to_string(
+    value: &opentelemetry_proto::tonic::common::v1::AnyValue,
+) -> Option<String> {
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    match value.value.as_ref() {
+        Some(Value::StringValue(s)) => Some(s.clone()),
+        Some(Value::IntValue(i)) => Some(i.to_string()),
+        Some(Value::DoubleValue(d)) => Some(d.to_string()),
+        Some(Value::BoolValue(b)) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn encode_number_exemplars(
+    exemplars: &[opentelemetry_proto::tonic::metrics::v1::Exemplar],
+) -> Option<String> {
+    if exemplars.is_empty() {
+        return None;
+    }
+    let encoded: Vec<_> = exemplars
+        .iter()
+        .map(|e| {
+            let value = match e.value {
+                Some(
+                    opentelemetry_proto::tonic::metrics::v1::exemplar::Value::AsDouble(v),
+                ) => serde_json::json!(v),
+                Some(opentelemetry_proto::tonic::metrics::v1::exemplar::Value::AsInt(v)) => {
+                    serde_json::json!(v as f64)
+                }
+                None => serde_json::Value::Null,
+            };
+            serde_json::json!({
+                "time_unix_nano": e.time_unix_nano,
+                "value": value,
+                "span_id_hex": hex::encode(&e.span_id),
+                "trace_id_hex": hex::encode(&e.trace_id),
+            })
+        })
+        .collect();
+    serde_json::to_string(&encoded).ok()
+}
+
+fn encode_histogram_exemplars(
+    exemplars: &[opentelemetry_proto::tonic::metrics::v1::Exemplar],
+) -> Option<String> {
+    encode_number_exemplars(exemplars)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Datelike, TimeZone};
+    use opentelemetry_proto::tonic::metrics::v1::{
+        metric::Data, ExponentialHistogram, Histogram, HistogramDataPoint, Metric as OtlpMetric,
+        Summary, SummaryDataPoint, summary_data_point::ValueAtQuantile,
+    };
+
+    fn base_metric(name: &str, metric_type: &str, value: f64, ts: DateTime<Utc>) -> Metric {
+        Metric {
+            metric_name: name.to_string(),
+            description: String::new(),
+            unit: String::new(),
+            metric_type: metric_type.to_string(),
+            timestamp: ts,
+            value,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_metric_partition_key() {
-        let metric = Metric {
-            metric_name: "http.server.duration".to_string(),
-            description: "HTTP request duration".to_string(),
-            unit: "ms".to_string(),
-            metric_type: "histogram".to_string(),
-            timestamp: Utc.with_ymd_and_hms(2025, 1, 15, 10, 30, 0).unwrap(),
-            value: 123.45,
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-        };
-
+        let metric = base_metric(
+            "http.server.duration",
+            "histogram",
+            123.45,
+            Utc.with_ymd_and_hms(2025, 1, 15, 10, 30, 0).unwrap(),
+        );
         let partition = metric.partition_key();
         assert_eq!(partition.year(), 2025);
         assert_eq!(partition.month(), 1);
@@ -362,62 +423,119 @@ mod tests {
 
     #[test]
     fn test_metric_grouping_key() {
-        let metric = Metric {
-            metric_name: "cpu.usage".to_string(),
-            description: "CPU usage percentage".to_string(),
-            unit: "%".to_string(),
-            metric_type: "gauge".to_string(),
-            timestamp: Utc::now(),
-            value: 75.5,
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
-        };
-
+        let metric = base_metric("cpu.usage", "gauge", 75.5, Utc::now());
         assert_eq!(metric.grouping_key(), "cpu.usage");
     }
 
     #[test]
     fn test_metric_sort_order() {
-        let metric1 = Metric {
-            metric_name: "aaa".to_string(),
-            description: "".to_string(),
-            unit: "".to_string(),
-            metric_type: "gauge".to_string(),
-            timestamp: Utc.with_ymd_and_hms(2025, 1, 15, 10, 0, 0).unwrap(),
-            value: 1.0,
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
+        let metric1 = base_metric(
+            "aaa",
+            "gauge",
+            1.0,
+            Utc.with_ymd_and_hms(2025, 1, 15, 10, 0, 0).unwrap(),
+        );
+        let metric2 = base_metric(
+            "aaa",
+            "gauge",
+            2.0,
+            Utc.with_ymd_and_hms(2025, 1, 15, 11, 0, 0).unwrap(),
+        );
+        let metric3 = base_metric(
+            "bbb",
+            "gauge",
+            3.0,
+            Utc.with_ymd_and_hms(2025, 1, 15, 9, 0, 0).unwrap(),
+        );
+        assert!(metric1.compare_for_sort(&metric2) == Ordering::Less);
+        assert!(metric3.compare_for_sort(&metric1) == Ordering::Greater);
+    }
+
+    #[test]
+    fn classic_histogram_preserves_buckets() {
+        let otlp = OtlpMetric {
+            name: "http.server.duration".into(),
+            description: "latency".into(),
+            unit: "ms".into(),
+            data: Some(Data::Histogram(Histogram {
+                data_points: vec![HistogramDataPoint {
+                    attributes: vec![],
+                    start_time_unix_nano: 0,
+                    time_unix_nano: 1_640_995_200_000_000_000,
+                    count: 10,
+                    sum: Some(100.0),
+                    bucket_counts: vec![2, 5, 3],
+                    explicit_bounds: vec![10.0, 50.0],
+                    exemplars: vec![],
+                    flags: 0,
+                    min: Some(1.0),
+                    max: Some(80.0),
+                }],
+                aggregation_temporality: 2, // CUMULATIVE
+            })),
+            metadata: vec![],
         };
+        let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let m = &rows[0];
+        assert_eq!(m.metric_type, "histogram");
+        assert_eq!(m.count, Some(10));
+        assert_eq!(m.sum, Some(100.0));
+        assert_eq!(m.value, 100.0);
+        assert_eq!(m.bucket_counts.as_deref(), Some(&[2, 5, 3][..]));
+        assert_eq!(m.explicit_bounds.as_deref(), Some(&[10.0, 50.0][..]));
+        assert_eq!(m.aggregation_temporality.as_deref(), Some("CUMULATIVE"));
+    }
 
-        let metric2 = Metric {
-            metric_name: "aaa".to_string(),
-            description: "".to_string(),
-            unit: "".to_string(),
-            metric_type: "gauge".to_string(),
-            timestamp: Utc.with_ymd_and_hms(2025, 1, 15, 11, 0, 0).unwrap(),
-            value: 2.0,
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
+    #[test]
+    fn summary_preserves_quantiles() {
+        let otlp = OtlpMetric {
+            name: "rpc.latency".into(),
+            description: "".into(),
+            unit: "ms".into(),
+            data: Some(Data::Summary(Summary {
+                data_points: vec![SummaryDataPoint {
+                    attributes: vec![],
+                    start_time_unix_nano: 0,
+                    time_unix_nano: 1_640_995_200_000_000_000,
+                    count: 100,
+                    sum: 500.0,
+                    quantile_values: vec![
+                        ValueAtQuantile {
+                            quantile: 0.5,
+                            value: 4.0,
+                        },
+                        ValueAtQuantile {
+                            quantile: 0.99,
+                            value: 20.0,
+                        },
+                    ],
+                    flags: 0,
+                }],
+            })),
+            metadata: vec![],
         };
+        let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let q = rows[0].quantiles.as_ref().unwrap();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].quantile, 0.5);
+        assert_eq!(q[1].value, 20.0);
+    }
 
-        let metric3 = Metric {
-            metric_name: "bbb".to_string(),
-            description: "".to_string(),
-            unit: "".to_string(),
-            metric_type: "gauge".to_string(),
-            timestamp: Utc.with_ymd_and_hms(2025, 1, 15, 9, 0, 0).unwrap(),
-            value: 3.0,
-            attributes: HashMap::new(),
-            resource_attributes: HashMap::new(),
+    #[test]
+    fn exponential_histogram_yields_no_rows() {
+        let otlp = OtlpMetric {
+            name: "exp".into(),
+            description: "".into(),
+            unit: "".into(),
+            data: Some(Data::ExponentialHistogram(ExponentialHistogram {
+                data_points: vec![],
+                aggregation_temporality: 2,
+            })),
+            metadata: vec![],
         };
-
-        // metric1 < metric2 (same name, earlier timestamp)
-        assert_eq!(metric1.compare_for_sort(&metric2), Ordering::Less);
-
-        // metric1 < metric3 (different name, "aaa" < "bbb")
-        assert_eq!(metric1.compare_for_sort(&metric3), Ordering::Less);
-
-        // metric3 > metric2 (different name, "bbb" > "aaa")
-        assert_eq!(metric3.compare_for_sort(&metric2), Ordering::Greater);
+        let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
+        assert!(rows.is_empty());
     }
 }

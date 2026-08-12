@@ -119,6 +119,9 @@ The implementation provides:
   on subsequent ingest, using tenant-scoped PostgreSQL metadata in production
   or a local single-scope SQLite catalog;
 - open SQL access through DuckDB and DuckLake.
+- (in progress) Prometheus-, Loki-, and Tempo-compatible **query-only** APIs so
+  customers can point existing Grafana datasources at the lake while keeping
+  OTLP as the sole write path — see [compat/matrix.md](compat/matrix.md).
 
 These are real implementation properties. They are not, by themselves,
 evidence of lower total cost or faster queries than another platform.

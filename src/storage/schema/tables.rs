@@ -214,6 +214,10 @@ impl OtlpMetricsTable {
     }
 
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
+        let quantile_element = DataType::Struct(Fields::from(vec![
+            req("quantile", DataType::Float64),
+            req("value", DataType::Float64),
+        ]));
         let mut fields = vec![
             req("metric_name", utf8()),
             req("description", utf8()),
@@ -223,6 +227,23 @@ impl OtlpMetricsTable {
             req("value", DataType::Float64),
             opt_hot_variant("metrics", "attributes"),
             opt_hot_variant("metrics", "resource_attributes"),
+            // Classic histogram / summary fidelity (nullable for gauge/sum).
+            opt("count", DataType::UInt64),
+            opt("sum", DataType::Float64),
+            opt(
+                "bucket_counts",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+            ),
+            opt(
+                "explicit_bounds",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            ),
+            opt(
+                "quantiles",
+                DataType::List(Arc::new(Field::new("item", quantile_element, true))),
+            ),
+            opt("aggregation_temporality", utf8()),
+            opt("exemplars_json", utf8()),
             req("record_date", DataType::Date32),
         ];
         fields.extend(promoted_fields(columns));
