@@ -128,19 +128,9 @@ impl MetricsFidelityBackend for PostgresBackend {
         let table = self.metrics_table();
         conn.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS softprobe.{schema};
-             CREATE TABLE {table} (
-                metric_name VARCHAR,
-                description VARCHAR,
-                unit VARCHAR,
-                metric_type VARCHAR,
-                timestamp TIMESTAMPTZ,
-                value DOUBLE,
-                attributes VARIANT,
-                resource_attributes VARIANT,
-                record_date DATE
-            );",
+             {ddl}",
             schema = self.metadata_schema,
-            table = table,
+            ddl = crate::util::metrics_fidelity_contract::legacy_metrics_create_ddl(&table),
         ))
         .expect("legacy create on postgres ducklake");
     }

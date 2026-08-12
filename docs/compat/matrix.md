@@ -89,7 +89,7 @@ No custom Grafana datasource plugin in initial scope.
 | Signal | Supported now (Phase 0) | Explicit unsupported |
 |--------|-------------------------|----------------------|
 | Metrics gauge/sum | Full scalar + attributes | — |
-| Classic histogram | count, sum, bucket_counts, explicit_bounds, temporality, exemplars | — |
+| Classic histogram | count, sum, bucket_counts, explicit_bounds, temporality, exemplars | Absent OTLP `sum` stores SQL NULL (scalar `value` stays `0.0` for backward SQL). |
 | Summary | count, sum, quantiles | — |
 | Exponential / native histogram | Datapoint skipped with `unsupported_feature` log | Ingest of exponential hist datapoints |
 

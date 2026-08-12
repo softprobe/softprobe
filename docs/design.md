@@ -148,8 +148,16 @@ the same row shape (gauge/sum leave them `NULL`):
 - `aggregation_temporality`
 - `exemplars_json`
 
+When OTLP omits histogram `sum` (valid for negative observations), the fidelity
+`sum` column is stored as SQL `NULL`. The scalar `value` column still uses
+`0.0` in that case for backward SQL compatibility — adapters reconstructing
+Prometheus `_sum` must read the fidelity `sum` column, not `value`.
+
 Existing DuckLake `metrics` tables are widened on write with
 `ALTER TABLE … ADD COLUMN IF NOT EXISTS` (`ensure_metrics_fidelity_columns`).
+If a fidelity name already exists with an incompatible type (e.g. a leftover
+promotion column), widen fails loud rather than writing into the wrong type.
+Column names and SQL types are owned by `src/metrics_fidelity.rs`.
 Exponential / native histograms are not stored; those datapoints are skipped
 with a stable `unsupported_feature` log.
 

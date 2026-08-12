@@ -11,6 +11,7 @@ pub mod config;
 pub mod control_plane;
 pub mod grpc_otlp;
 pub mod ingest_engine;
+pub mod metrics_fidelity;
 pub mod models;
 pub mod promotion;
 pub mod query;

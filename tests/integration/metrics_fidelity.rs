@@ -325,12 +325,57 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
 }
 
 #[tokio::test]
+async fn classic_histogram_absent_sum_persists_null_in_ducklake() {
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let data_path = config.ducklake.data_path.clone();
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+
+    let histogram = MetricRow {
+        metric_name: "http.server.duration".into(),
+        description: "latency".into(),
+        unit: "ms".into(),
+        metric_type: "histogram".into(),
+        timestamp: Utc::now(),
+        // Scalar `value` stays 0.0 when OTLP sum is absent; fidelity `sum` must be NULL.
+        value: 0.0,
+        count: Some(3),
+        sum: None,
+        bucket_counts: Some(vec![1, 2]),
+        explicit_bounds: Some(vec![10.0]),
+        aggregation_temporality: Some("CUMULATIVE".into()),
+        ..Default::default()
+    };
+
+    pipeline
+        .write_metric_batches(vec![vec![histogram]])
+        .await
+        .expect("write histogram without sum");
+
+    let conn = attach(&metadata_path, &data_path);
+    let (value, sum): (f64, Option<f64>) = conn
+        .query_row(
+            "SELECT value, sum FROM softprobe.metrics WHERE metric_name = 'http.server.duration'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query absent-sum histogram");
+    assert_eq!(value, 0.0);
+    assert_eq!(
+        sum, None,
+        "absent OTLP histogram sum must persist as SQL NULL"
+    );
+}
+
+#[tokio::test]
 async fn legacy_metrics_table_widens_on_gauge_ingest() {
     use async_trait::async_trait;
     use softprobe_runtime::ingest_engine::IngestPipeline;
 
     use crate::util::metrics_fidelity_contract::{
-        contract_legacy_metrics_table_widens_on_gauge_ingest, MetricsFidelityBackend,
+        contract_legacy_metrics_table_widens_on_gauge_ingest, legacy_metrics_create_ddl,
+        MetricsFidelityBackend,
     };
 
     struct SqliteBackend {
@@ -355,20 +400,8 @@ async fn legacy_metrics_table_widens_on_gauge_ingest() {
 
         fn create_legacy_metrics_table(&self) {
             let conn = self.attach();
-            conn.execute_batch(
-                "CREATE TABLE softprobe.metrics (
-                    metric_name VARCHAR,
-                    description VARCHAR,
-                    unit VARCHAR,
-                    metric_type VARCHAR,
-                    timestamp TIMESTAMPTZ,
-                    value DOUBLE,
-                    attributes VARIANT,
-                    resource_attributes VARIANT,
-                    record_date DATE
-                );",
-            )
-            .expect("legacy create");
+            conn.execute_batch(&legacy_metrics_create_ddl(&self.metrics_table()))
+                .expect("legacy create");
         }
     }
 

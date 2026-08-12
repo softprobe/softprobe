@@ -570,7 +570,7 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "value",
             "attributes",
             "resource_attributes",
-            // Phase 0 classic histogram / summary fidelity columns.
+            // Phase 0 fidelity — names owned by `crate::metrics_fidelity` (see unit test).
             "count",
             "sum",
             "bucket_counts",
@@ -1534,7 +1534,11 @@ fn validate_identifier(path: &str, value: &str) -> Result<(), PromotionValidatio
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_promotion_manifest, PromotionManifest};
+    use super::{
+        ensure_promoted_columns_not_reserved, parse_promotion_manifest,
+        reserved_telemetry_column_names, PromotionColumn, PromotionDataType, PromotionManifest,
+        PromotionSource, TelemetryTable,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -1968,15 +1972,7 @@ columns:
 
     #[test]
     fn metrics_fidelity_column_names_are_reserved_from_promotion() {
-        for name in [
-            "count",
-            "sum",
-            "bucket_counts",
-            "explicit_bounds",
-            "quantiles",
-            "aggregation_temporality",
-            "exemplars_json",
-        ] {
+        for name in crate::metrics_fidelity::metrics_fidelity_column_names() {
             let manifest = parse_promotion_manifest(&format!(
                 r#"
 specVersion: softprobe.promotion.v1
@@ -1999,6 +1995,33 @@ columns:
             let err = super::validate_telemetry_column_additive(&spec)
                 .expect_err("fidelity column must be reserved");
             assert_eq!(err.code(), "column_already_exists", "name={name}");
+        }
+    }
+
+    #[test]
+    fn active_metrics_promotion_colliding_with_fidelity_fails_loud() {
+        let columns = vec![PromotionColumn {
+            name: "count".to_string(),
+            data_type: PromotionDataType::Double,
+            nullable: true,
+            source: PromotionSource::Attribute {
+                key: "legacy.count".to_string(),
+            },
+        }];
+        let err = ensure_promoted_columns_not_reserved(TelemetryTable::Metrics, &columns)
+            .expect_err("active fidelity collision must fail");
+        assert_eq!(err.code(), "column_already_exists");
+        assert!(err.to_string().contains("count"), "err={err}");
+    }
+
+    #[test]
+    fn reserved_metrics_names_include_fidelity_inventory() {
+        let reserved = reserved_telemetry_column_names(&TelemetryTable::Metrics);
+        for name in crate::metrics_fidelity::metrics_fidelity_column_names() {
+            assert!(
+                reserved.contains(&name),
+                "reserved metrics list missing fidelity column {name}"
+            );
         }
     }
 

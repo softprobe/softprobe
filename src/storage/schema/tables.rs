@@ -327,4 +327,14 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn metrics_schema_includes_fidelity_inventory_names() {
+        let schema = OtlpMetricsTable::schema();
+        for name in crate::metrics_fidelity::metrics_fidelity_column_names() {
+            schema
+                .field_with_name(name)
+                .unwrap_or_else(|_| panic!("metrics schema missing fidelity column {name}"));
+        }
+    }
 }

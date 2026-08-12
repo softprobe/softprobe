@@ -7,6 +7,23 @@ use async_trait::async_trait;
 use chrono::Utc;
 use softprobe_runtime::models::Metric;
 
+/// Pre-Phase-0 metrics DDL (no fidelity columns). `{table}` is fully qualified.
+pub fn legacy_metrics_create_ddl(qualified_table: &str) -> String {
+    format!(
+        "CREATE TABLE {qualified_table} (
+            metric_name VARCHAR,
+            description VARCHAR,
+            unit VARCHAR,
+            metric_type VARCHAR,
+            timestamp TIMESTAMPTZ,
+            value DOUBLE,
+            attributes VARIANT,
+            resource_attributes VARIANT,
+            record_date DATE
+        );"
+    )
+}
+
 #[async_trait]
 pub trait MetricsFidelityBackend: Send + Sync {
     /// Fully qualified metrics table the writer will hit (`softprobe.metrics` or
@@ -56,15 +73,7 @@ pub async fn contract_legacy_metrics_table_widens_on_gauge_ingest(
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    for required in [
-        "count",
-        "sum",
-        "bucket_counts",
-        "explicit_bounds",
-        "quantiles",
-        "aggregation_temporality",
-        "exemplars_json",
-    ] {
+    for required in softprobe_runtime::metrics_fidelity::metrics_fidelity_column_names() {
         assert!(
             names.iter().any(|n| n == required),
             "expected fidelity column '{required}' after widen, got {names:?}"

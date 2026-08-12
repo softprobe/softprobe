@@ -27,8 +27,8 @@ handlers. Handlers call typed backends that already apply these policies.
 |--------|------------|
 | Metric name | `__name__` (sanitized) |
 | Resource + datapoint attributes | Labels; keys sanitized to Prometheus label regex |
-| `service.name` | Prefer `job` alias when `job` absent |
-| `service.instance.id` / `host.name` | Prefer `instance` alias when `instance` absent |
+| `service.name` | Prefer `job` alias when `job` absent; datapoint attributes win over resource on collision (same as flat label rule) |
+| `service.instance.id` / `host.name` | Prefer `instance` alias when `instance` absent; datapoint over resource |
 | Histogram / summary | Classic Prom naming (`_bucket`, `_sum`, `_count`, `_quantile`) applied in Phase 1 adapters from canonical columns |
 
 Invalid Prometheus label characters are replaced with `_`. Names starting with
