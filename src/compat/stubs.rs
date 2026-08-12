@@ -8,20 +8,31 @@ use crate::authn::TenantInfo;
 use crate::compat::errors::CompatError;
 use crate::compat::tenant::{
     scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
+    TEMPO_SCOPE_HEADER,
 };
 use axum::extract::Extension;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+fn stub_unsupported(
+    tenant: TenantInfo,
+    protocol: ProtocolScope,
+    scope_header: Option<&str>,
+    feature: &'static str,
+) -> Result<Json<Value>, CompatError> {
+    let _ctx =
+        TenantContext::from_authenticated(tenant, protocol, scope_header, QueryLimits::default())?;
+    Err(CompatError::unsupported(feature))
+}
+
 async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Result<Json<Value>, CompatError> {
-    let _ctx = TenantContext::from_authenticated(
+    stub_unsupported(
         tenant.0.clone(),
         ProtocolScope::Prometheus,
         None,
-        QueryLimits::default(),
-    )?;
-    Err(CompatError::unsupported("prometheus_api"))
+        "prometheus_api",
+    )
 }
 
 async fn stub_loki(
@@ -29,27 +40,15 @@ async fn stub_loki(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, CompatError> {
     let scope = scope_header_value(&headers, LOKI_SCOPE_HEADER);
-    let _ctx = TenantContext::from_authenticated(
-        tenant.0.clone(),
-        ProtocolScope::Loki,
-        scope,
-        QueryLimits::default(),
-    )?;
-    Err(CompatError::unsupported("loki_api"))
+    stub_unsupported(tenant.0.clone(), ProtocolScope::Loki, scope, "loki_api")
 }
 
 async fn stub_tempo(
     tenant: Extension<TenantInfo>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, CompatError> {
-    let scope = scope_header_value(&headers, LOKI_SCOPE_HEADER);
-    let _ctx = TenantContext::from_authenticated(
-        tenant.0.clone(),
-        ProtocolScope::Tempo,
-        scope,
-        QueryLimits::default(),
-    )?;
-    Err(CompatError::unsupported("tempo_api"))
+    let scope = scope_header_value(&headers, TEMPO_SCOPE_HEADER);
+    stub_unsupported(tenant.0.clone(), ProtocolScope::Tempo, scope, "tempo_api")
 }
 
 /// Routes that return `501 unsupported_feature` after auth + scope checks.

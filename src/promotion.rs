@@ -570,6 +570,14 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "value",
             "attributes",
             "resource_attributes",
+            // Phase 0 classic histogram / summary fidelity columns.
+            "count",
+            "sum",
+            "bucket_counts",
+            "explicit_bounds",
+            "quantiles",
+            "aggregation_temporality",
+            "exemplars_json",
             "record_date",
         ],
     }
@@ -947,6 +955,29 @@ pub fn validate_telemetry_column_additive(
                     format!("column {} is already defined on {:?}", col.name, table),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fail loud when an already-active promotion collides with canonical columns
+/// (e.g. a pre-Phase-0 metrics promotion named `count` after fidelity widen).
+pub fn ensure_promoted_columns_not_reserved(
+    table: TelemetryTable,
+    columns: &[PromotionColumn],
+) -> Result<(), PromotionValidationError> {
+    let reserved = reserved_telemetry_column_names(&table);
+    for col in columns {
+        if reserved.contains(&col.name.as_str()) {
+            return Err(PromotionValidationError::new(
+                "column_already_exists",
+                format!("active_promotion.{}", col.name),
+                format!(
+                    "active promotion column '{}' collides with canonical {:?} columns; \
+                     deactivate or rebuild the promotion manifest before ingesting",
+                    col.name, table
+                ),
+            ));
         }
     }
     Ok(())
@@ -1933,6 +1964,42 @@ columns:
 
         assert_eq!(err.code(), "column_already_exists");
         assert_eq!(err.path(), "columns[0].name");
+    }
+
+    #[test]
+    fn metrics_fidelity_column_names_are_reserved_from_promotion() {
+        for name in [
+            "count",
+            "sum",
+            "bucket_counts",
+            "explicit_bounds",
+            "quantiles",
+            "aggregation_temporality",
+            "exemplars_json",
+        ] {
+            let manifest = parse_promotion_manifest(&format!(
+                r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [metrics]
+columns:
+  - name: {name}
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: custom.{name}
+"#
+            ))
+            .expect("parse");
+            let PromotionManifest::TelemetryColumns(spec) = manifest else {
+                panic!("expected telemetry");
+            };
+            let err = super::validate_telemetry_column_additive(&spec)
+                .expect_err("fidelity column must be reserved");
+            assert_eq!(err.code(), "column_already_exists", "name={name}");
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod metrics_fidelity_contract;
 pub mod otlp;
 pub mod promotion_contract;
 pub mod sp_llm_manifests;

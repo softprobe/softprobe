@@ -326,62 +326,62 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
 
 #[tokio::test]
 async fn legacy_metrics_table_widens_on_gauge_ingest() {
+    use async_trait::async_trait;
+    use softprobe_runtime::ingest_engine::IngestPipeline;
+
+    use crate::util::metrics_fidelity_contract::{
+        contract_legacy_metrics_table_widens_on_gauge_ingest, MetricsFidelityBackend,
+    };
+
+    struct SqliteBackend {
+        _temp: TempDir,
+        pipeline: IngestPipeline,
+        metadata_path: String,
+        data_path: String,
+    }
+
+    #[async_trait]
+    impl MetricsFidelityBackend for SqliteBackend {
+        fn attach(&self) -> duckdb::Connection {
+            attach(&self.metadata_path, &self.data_path)
+        }
+
+        async fn write_metric_batches(
+            &self,
+            batches: Vec<Vec<softprobe_runtime::models::Metric>>,
+        ) -> anyhow::Result<()> {
+            self.pipeline.write_metric_batches(batches).await
+        }
+
+        fn create_legacy_metrics_table(&self) {
+            let conn = self.attach();
+            conn.execute_batch(
+                "CREATE TABLE softprobe.metrics (
+                    metric_name VARCHAR,
+                    description VARCHAR,
+                    unit VARCHAR,
+                    metric_type VARCHAR,
+                    timestamp TIMESTAMPTZ,
+                    value DOUBLE,
+                    attributes VARIANT,
+                    resource_attributes VARIANT,
+                    record_date DATE
+                );",
+            )
+            .expect("legacy create");
+        }
+    }
+
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
     let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
-
-    {
-        let conn = attach(&metadata_path, &data_path);
-        conn.execute_batch(
-            "CREATE TABLE softprobe.metrics (
-                metric_name VARCHAR,
-                description VARCHAR,
-                unit VARCHAR,
-                metric_type VARCHAR,
-                timestamp TIMESTAMPTZ,
-                value DOUBLE,
-                attributes VARIANT,
-                resource_attributes VARIANT,
-                record_date DATE
-            );",
-        )
-        .expect("legacy create");
-    }
-
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let gauge = MetricRow {
-        metric_name: "cpu.usage".into(),
-        description: "".into(),
-        unit: "%".into(),
-        metric_type: "gauge".into(),
-        timestamp: Utc::now(),
-        value: 55.0,
-        ..Default::default()
+    let backend = SqliteBackend {
+        _temp: temp,
+        pipeline,
+        metadata_path,
+        data_path,
     };
-    pipeline
-        .write_metric_batches(vec![vec![gauge]])
-        .await
-        .expect("gauge ingest after widen must succeed");
-
-    let conn = attach(&metadata_path, &data_path);
-    let value: f64 = conn
-        .query_row(
-            "SELECT value FROM softprobe.metrics WHERE metric_name = 'cpu.usage'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read gauge");
-    assert_eq!(value, 55.0);
-
-    let mut stmt = conn.prepare("DESCRIBE softprobe.metrics").unwrap();
-    let names: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    assert!(
-        names.iter().any(|n| n == "count"),
-        "expected count column after widen, got {names:?}"
-    );
+    contract_legacy_metrics_table_widens_on_gauge_ingest(&backend).await;
 }

@@ -1,7 +1,7 @@
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
-    extract_telemetry_promoted_value, PromotionColumn, TelemetryColumnsManifest,
-    TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
+    ensure_promoted_columns_not_reserved, extract_telemetry_promoted_value, PromotionColumn,
+    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::schema::arrow;
@@ -275,6 +275,8 @@ impl DuckLakeWriter {
             return Ok(());
         }
         let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Metrics);
+        ensure_promoted_columns_not_reserved(TelemetryTable::Metrics, &columns)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Self::apply_metric_promotions(&mut metrics, &columns)?;
         let schema = Arc::new(OtlpMetricsTable::schema_with_promoted_columns(&columns));
         let dk = self.effective_ducklake(scope);

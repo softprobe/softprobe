@@ -45,17 +45,17 @@ pub fn project_prometheus_labels(
         merged.insert(sanitize_label_name(k), v.clone());
     }
 
-    if let Some(svc) = resource
+    if let Some(svc) = datapoint
         .get("service.name")
-        .or_else(|| datapoint.get("service.name"))
+        .or_else(|| resource.get("service.name"))
     {
         merged.entry("job".into()).or_insert_with(|| svc.clone());
     }
-    if let Some(inst) = resource
+    if let Some(inst) = datapoint
         .get("service.instance.id")
-        .or_else(|| resource.get("host.name"))
-        .or_else(|| datapoint.get("service.instance.id"))
         .or_else(|| datapoint.get("host.name"))
+        .or_else(|| resource.get("service.instance.id"))
+        .or_else(|| resource.get("host.name"))
     {
         merged
             .entry("instance".into())
@@ -119,5 +119,28 @@ mod tests {
         let labels = project_prometheus_labels("m", &resource, &dp, 5);
         assert!(labels.len() <= 5);
         assert!(labels.contains_key("__name__"));
+    }
+
+    #[test]
+    fn job_and_instance_aliases_prefer_datapoint_over_resource() {
+        let mut resource = HashMap::new();
+        resource.insert("service.name".into(), "from-resource".into());
+        resource.insert("service.instance.id".into(), "res-instance".into());
+        let mut dp = HashMap::new();
+        dp.insert("service.name".into(), "from-datapoint".into());
+        dp.insert("service.instance.id".into(), "dp-instance".into());
+        let labels = project_prometheus_labels("http_requests", &resource, &dp, 40);
+        assert_eq!(
+            labels.get("job").map(String::as_str),
+            Some("from-datapoint")
+        );
+        assert_eq!(
+            labels.get("instance").map(String::as_str),
+            Some("dp-instance")
+        );
+        assert_eq!(
+            labels.get("service_name").map(String::as_str),
+            Some("from-datapoint")
+        );
     }
 }

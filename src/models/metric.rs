@@ -228,7 +228,9 @@ impl Metric {
         aggregation_temporality: &str,
     ) -> Option<Self> {
         let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
-        let sum = data_point.sum.unwrap_or(0.0);
+        // Keep absent OTLP histogram sum as NULL (valid when observations may be negative).
+        // `value` mirrors sum when present, else 0.0 for backward SQL scalar compatibility.
+        let sum = data_point.sum;
         let attributes = Self::extract_attributes(&data_point.attributes);
         let exemplars_json = encode_histogram_exemplars(&data_point.exemplars);
 
@@ -238,11 +240,11 @@ impl Metric {
             unit: unit.to_string(),
             metric_type: "histogram".to_string(),
             timestamp,
-            value: sum,
+            value: sum.unwrap_or(0.0),
             attributes,
             resource_attributes: resource_attributes.clone(),
             count: Some(data_point.count),
-            sum: Some(sum),
+            sum,
             bucket_counts: Some(data_point.bucket_counts.clone()),
             explicit_bounds: Some(data_point.explicit_bounds.clone()),
             quantiles: None,
@@ -367,11 +369,20 @@ fn encode_number_exemplars(
                 }
                 None => serde_json::Value::Null,
             };
+            let filtered_attributes: serde_json::Map<String, serde_json::Value> = e
+                .filtered_attributes
+                .iter()
+                .filter_map(|kv| {
+                    let v = kv.value.as_ref().and_then(any_value_to_string)?;
+                    Some((kv.key.clone(), serde_json::Value::String(v)))
+                })
+                .collect();
             serde_json::json!({
                 "time_unix_nano": e.time_unix_nano,
                 "value": value,
                 "span_id_hex": hex::encode(&e.span_id),
                 "trace_id_hex": hex::encode(&e.trace_id),
+                "filtered_attributes": filtered_attributes,
             })
         })
         .collect();
@@ -483,6 +494,82 @@ mod tests {
         assert_eq!(m.bucket_counts.as_deref(), Some(&[2, 5, 3][..]));
         assert_eq!(m.explicit_bounds.as_deref(), Some(&[10.0, 50.0][..]));
         assert_eq!(m.aggregation_temporality.as_deref(), Some("CUMULATIVE"));
+    }
+
+    #[test]
+    fn classic_histogram_absent_sum_stays_null() {
+        let otlp = OtlpMetric {
+            name: "http.server.duration".into(),
+            description: "latency".into(),
+            unit: "ms".into(),
+            data: Some(Data::Histogram(Histogram {
+                data_points: vec![HistogramDataPoint {
+                    attributes: vec![],
+                    start_time_unix_nano: 0,
+                    time_unix_nano: 1_640_995_200_000_000_000,
+                    count: 3,
+                    sum: None,
+                    bucket_counts: vec![1, 1, 1],
+                    explicit_bounds: vec![10.0, 50.0],
+                    exemplars: vec![],
+                    flags: 0,
+                    min: None,
+                    max: None,
+                }],
+                aggregation_temporality: 1, // DELTA
+            })),
+            metadata: vec![],
+        };
+        let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sum, None);
+        assert_eq!(rows[0].value, 0.0); // scalar fallback only
+        assert_eq!(rows[0].count, Some(3));
+    }
+
+    #[test]
+    fn histogram_exemplars_preserve_filtered_attributes() {
+        use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
+        use opentelemetry_proto::tonic::metrics::v1::{exemplar, Exemplar};
+
+        let otlp = OtlpMetric {
+            name: "http.server.duration".into(),
+            description: "".into(),
+            unit: "ms".into(),
+            data: Some(Data::Histogram(Histogram {
+                data_points: vec![HistogramDataPoint {
+                    attributes: vec![],
+                    start_time_unix_nano: 0,
+                    time_unix_nano: 1_640_995_200_000_000_000,
+                    count: 1,
+                    sum: Some(12.0),
+                    bucket_counts: vec![1],
+                    explicit_bounds: vec![],
+                    exemplars: vec![Exemplar {
+                        filtered_attributes: vec![KeyValue {
+                            key: "http.status_code".into(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::IntValue(500)),
+                            }),
+                        }],
+                        time_unix_nano: 1_640_995_200_000_000_000,
+                        value: Some(exemplar::Value::AsDouble(12.0)),
+                        span_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                        trace_id: vec![9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
+                    }],
+                    flags: 0,
+                    min: None,
+                    max: None,
+                }],
+                aggregation_temporality: 2,
+            })),
+            metadata: vec![],
+        };
+        let rows = Metric::from_otlp(&otlp, &HashMap::new()).unwrap();
+        let json = rows[0].exemplars_json.as_deref().expect("exemplars");
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed[0]["filtered_attributes"]["http.status_code"], "500");
+        assert_eq!(parsed[0]["value"], 12.0);
     }
 
     #[test]
