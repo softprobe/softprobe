@@ -247,6 +247,10 @@ fn instant_vector_at(series: &[MetricSeries], eval_ms: i64) -> VectorResult {
     let mut samples = Vec::new();
     for s in series {
         if let Some(sample) = latest_sample_in_window(&s.samples, eval_ms - lookback, eval_ms) {
+            // Prometheus omits series whose latest lookback sample is stale/NaN.
+            if sample.value.is_nan() {
+                continue;
+            }
             samples.push(InstantSample {
                 labels: s.labels.clone(),
                 timestamp_ms: eval_ms,
@@ -275,6 +279,7 @@ async fn eval_call(
         let arg = call.args.args.first().ok_or_else(|| {
             CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
         })?;
+        let (range_start_ms, range_end_ms) = matrix_window_bounds(arg, eval_ms)?;
         let matrix = match Box::pin(eval_expr(backend, ctx, arg, eval_ms, None)).await? {
             EvalResult::Matrix(m) => m,
             _ => {
@@ -288,17 +293,21 @@ async fn eval_call(
         let mut samples = Vec::new();
         for s in matrix.series {
             if let Some(v) = match name.as_str() {
-                "rate" => counter_rate(&s.samples, false),
-                "irate" => counter_rate(&s.samples, true),
-                "increase" => counter_increase(&s.samples),
-                "delta" => gauge_delta(&s.samples),
+                "rate" => extrapolated_rate(&s.samples, range_start_ms, range_end_ms, true, true),
+                "irate" => counter_irate(&s.samples),
+                "increase" => {
+                    extrapolated_rate(&s.samples, range_start_ms, range_end_ms, true, false)
+                }
+                "delta" => {
+                    extrapolated_rate(&s.samples, range_start_ms, range_end_ms, false, false)
+                }
                 "idelta" => gauge_idelta(&s.samples),
                 "sum_over_time" => over_time_sum(&s.samples),
                 "avg_over_time" => over_time_avg(&s.samples),
                 "min_over_time" => over_time_min(&s.samples),
                 "max_over_time" => over_time_max(&s.samples),
                 "count_over_time" => Some(s.samples.len() as f64),
-                "last_over_time" => s.samples.last().map(|x| x.value),
+                "last_over_time" => s.samples.last().map(|x| x.value).filter(|v| !v.is_nan()),
                 _ => None,
             } {
                 let mut labels = s.labels;
@@ -330,20 +339,27 @@ async fn eval_call(
     Err(CompatError::unsupported(format!("promql: function {name}")))
 }
 
-fn gauge_delta(samples: &[Sample]) -> Option<f64> {
-    if samples.len() < 2 {
-        return None;
+fn unwrap_expr_parens(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(p) => unwrap_expr_parens(&p.expr),
+        other => other,
     }
-    Some(samples.last()?.value - samples.first()?.value)
 }
 
-fn gauge_idelta(samples: &[Sample]) -> Option<f64> {
-    if samples.len() < 2 {
-        return None;
+/// Range selector window `[rangeStart, rangeEnd]` after applying `offset`.
+fn matrix_window_bounds(arg: &Expr, eval_ms: i64) -> Result<(i64, i64), CompatError> {
+    match unwrap_expr_parens(arg) {
+        Expr::MatrixSelector(ms) => {
+            let off = offset_shift_ms(&ms.vs.offset);
+            let range_end_ms = eval_ms - off;
+            let range_ms = matrix_range(ms).as_millis() as i64;
+            Ok((range_end_ms - range_ms.max(1), range_end_ms))
+        }
+        _ => Err(CompatError::new(
+            CompatErrorCode::BadRequest,
+            "range vector function requires a matrix selector",
+        )),
     }
-    let a = &samples[samples.len() - 2];
-    let b = samples.last()?;
-    Some(b.value - a.value)
 }
 
 fn over_time_sum(samples: &[Sample]) -> Option<f64> {
@@ -354,8 +370,8 @@ fn over_time_sum(samples: &[Sample]) -> Option<f64> {
 }
 
 fn over_time_avg(samples: &[Sample]) -> Option<f64> {
-    // Prometheus avg_over_time includes NaNs (NaN poisons the mean). OTLP/OpenMetrics
-    // ingest drops NaNs before storage, so lake fixtures usually never see them.
+    // Prometheus avg_over_time includes NaNs (NaN poisons the mean).
+    // OTLP `NO_RECORDED_VALUE` is stored as NaN; OpenMetrics export still drops NaNs.
     if samples.is_empty() {
         return None;
     }
@@ -483,34 +499,100 @@ fn adjusted_delta(samples: &[Sample]) -> Option<(f64, i64)> {
     Some((total, last_ts - first_ts))
 }
 
-fn counter_increase(samples: &[Sample]) -> Option<f64> {
-    adjusted_delta(samples).map(|(d, _)| d)
-}
-
-fn counter_rate(samples: &[Sample], irate: bool) -> Option<f64> {
-    if irate {
-        if samples.len() < 2 {
-            return None;
-        }
-        let a = &samples[samples.len() - 2];
-        let b = samples.last()?;
-        let dt = (b.timestamp_ms - a.timestamp_ms) as f64 / 1000.0;
-        if dt <= 0.0 {
-            return None;
-        }
-        let delta = if b.value < a.value {
-            b.value
-        } else {
-            b.value - a.value
-        };
-        return Some(delta / dt);
-    }
-    let (delta, range_ms) = adjusted_delta(samples)?;
-    let secs = range_ms as f64 / 1000.0;
-    if secs <= 0.0 {
+/// Prometheus `extrapolatedRate` (v2.54.1) for rate/increase/delta.
+fn extrapolated_rate(
+    samples: &[Sample],
+    range_start_ms: i64,
+    range_end_ms: i64,
+    is_counter: bool,
+    is_rate: bool,
+) -> Option<f64> {
+    // Stale/NaN points are not part of rate/increase/delta sample math.
+    let samples: Vec<&Sample> = samples.iter().filter(|s| !s.value.is_nan()).collect();
+    if samples.len() < 2 {
         return None;
     }
-    Some(delta / secs)
+    let first = samples.first()?;
+    let last = samples.last()?;
+    let first_t = first.timestamp_ms;
+    let last_t = last.timestamp_ms;
+    if last_t <= first_t {
+        return None;
+    }
+    let owned: Vec<Sample> = samples.iter().map(|s| (*s).clone()).collect();
+    let mut result = if is_counter {
+        adjusted_delta(&owned)?.0
+    } else {
+        last.value - first.value
+    };
+    let duration_to_start = (first_t - range_start_ms) as f64 / 1000.0;
+    let duration_to_end = (range_end_ms - last_t) as f64 / 1000.0;
+    let sampled_interval = (last_t - first_t) as f64 / 1000.0;
+    if sampled_interval <= 0.0 {
+        return None;
+    }
+    let num_samples_minus_one = (samples.len() - 1) as f64;
+    let average_duration_between_samples = sampled_interval / num_samples_minus_one;
+    let extrapolation_threshold = average_duration_between_samples * 1.1;
+    let mut extrapolate_to_interval = sampled_interval;
+
+    let mut duration_to_start = duration_to_start;
+    if duration_to_start >= extrapolation_threshold {
+        duration_to_start = average_duration_between_samples / 2.0;
+    }
+    if is_counter && result > 0.0 && first.value >= 0.0 {
+        let duration_to_zero = sampled_interval * (first.value / result);
+        if duration_to_zero < duration_to_start {
+            duration_to_start = duration_to_zero;
+        }
+    }
+    extrapolate_to_interval += duration_to_start;
+
+    let mut duration_to_end = duration_to_end;
+    if duration_to_end >= extrapolation_threshold {
+        duration_to_end = average_duration_between_samples / 2.0;
+    }
+    extrapolate_to_interval += duration_to_end;
+
+    let mut factor = extrapolate_to_interval / sampled_interval;
+    if is_rate {
+        let range_seconds = (range_end_ms - range_start_ms) as f64 / 1000.0;
+        if range_seconds <= 0.0 {
+            return None;
+        }
+        factor /= range_seconds;
+    }
+    result *= factor;
+    Some(result)
+}
+
+fn counter_irate(samples: &[Sample]) -> Option<f64> {
+    let samples: Vec<&Sample> = samples.iter().filter(|s| !s.value.is_nan()).collect();
+    if samples.len() < 2 {
+        return None;
+    }
+    let a = samples[samples.len() - 2];
+    let b = *samples.last()?;
+    let dt = (b.timestamp_ms - a.timestamp_ms) as f64 / 1000.0;
+    if dt <= 0.0 {
+        return None;
+    }
+    let delta = if b.value < a.value {
+        b.value
+    } else {
+        b.value - a.value
+    };
+    Some(delta / dt)
+}
+
+fn gauge_idelta(samples: &[Sample]) -> Option<f64> {
+    let samples: Vec<&Sample> = samples.iter().filter(|s| !s.value.is_nan()).collect();
+    if samples.len() < 2 {
+        return None;
+    }
+    let a = samples[samples.len() - 2];
+    let b = *samples.last()?;
+    Some(b.value - a.value)
 }
 
 fn aggregate(
@@ -1055,14 +1137,81 @@ mod tests {
                 ],
             }],
         };
-        let expr = parse_promql("rate(c[5m])").unwrap();
+        let expr = parse_promql("rate(c[3s])").unwrap();
         let result = eval_instant(&backend, &ctx(), &expr, 3_000).await.unwrap();
         match result {
             EvalResult::Vector(v) => {
                 assert_eq!(v.samples.len(), 1);
-                // deltas: +10, +5 (reset), +3 = 18 over 3s → 6.0
+                // Window matches sample span exactly → extrapolated factor 1 → 18/3s = 6.0
                 assert!((v.samples[0].value - 6.0).abs() < 1e-9);
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_extrapolates_sparse_window() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "c".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![
+                    Sample {
+                        timestamp_ms: 0,
+                        value: 0.0,
+                    },
+                    Sample {
+                        timestamp_ms: 60_000,
+                        value: 60.0,
+                    },
+                ],
+            }],
+        };
+        // Two points 1m apart inside a 1h range → Prom extrapolates toward window edges.
+        let expr = parse_promql("rate(c[1h])").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 3_600_000)
+            .await
+            .unwrap();
+        match result {
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                // sampledInterval=60, avg=60, threshold=66
+                // durationToStart=3540 → half avg=30; durationToEnd=0
+                // extrapolate=60+30+0=90; factor=(90/60)/3600; result=60*factor=0.025
+                assert!(
+                    (v.samples[0].value - 0.025).abs() < 1e-9,
+                    "got {}",
+                    v.samples[0].value
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn instant_omits_nan_stale_sample() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "up".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![
+                    Sample {
+                        timestamp_ms: 500,
+                        value: 1.0,
+                    },
+                    Sample {
+                        timestamp_ms: 1_000,
+                        value: f64::NAN,
+                    },
+                ],
+            }],
+        };
+        let expr = parse_promql("up").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
+        match result {
+            EvalResult::Vector(v) => assert!(v.samples.is_empty()),
             other => panic!("unexpected {other:?}"),
         }
     }

@@ -85,6 +85,7 @@ pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] 
         ("GET", "/api/v1/query"),
         ("POST", "/api/v1/query"),
         ("GET", "/api/v1/query_range"),
+        ("POST", "/api/v1/query_range"),
         ("GET", "/api/v1/labels"),
         ("GET", "/api/v1/label/job/values"),
         ("GET", "/api/v1/series"),

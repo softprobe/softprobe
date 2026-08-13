@@ -9,7 +9,10 @@ use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use crate::compat_support::prometheus::{encode_query_pairs, gauge_otlp, get_json, ingest_metrics};
+use crate::compat_support::prometheus::{
+    encode_query_pairs, gauge_otlp, gauge_series_otlp_with_flags, get_json, ingest_metrics,
+    post_form_json, post_form_json_as,
+};
 use crate::util::config::file_backed_test_config;
 use crate::util::tenant::inject_local_sqlite_tenant;
 
@@ -101,6 +104,82 @@ async fn ingest_then_labels_series_and_query() {
     let result = query["data"]["result"].as_array().expect("result");
     assert_eq!(result.len(), 1, "query={query}");
     assert_eq!(result[0]["value"][1], "42.0");
+}
+
+#[tokio::test]
+async fn post_form_query_matches_get() {
+    let (router, _temp) = build_tenant_router().await;
+    let ts_nano = 1_700_000_000_000_000_000u64;
+    ingest_metrics(
+        &router,
+        gauge_otlp("http.requests", "checkout", 42.0, ts_nano),
+    )
+    .await;
+    let eval_s = (ts_nano / 1_000_000_000) as i64;
+    let time = eval_s.to_string();
+    let params = [
+        ("query", r#"http_requests{job="checkout"}"#),
+        ("time", time.as_str()),
+    ];
+    let form = encode_query(&params);
+    let (get_status, get_body) = get_json(&router, &format!("/api/v1/query?{form}")).await;
+    let (post_status, post_body) = post_form_json(&router, "/api/v1/query", &form).await;
+    assert_eq!(get_status, post_status, "get={get_body} post={post_body}");
+    assert_eq!(get_body, post_body);
+
+    let start = (eval_s - 60).to_string();
+    let end = eval_s.to_string();
+    let range_params = [
+        ("query", r#"http_requests{job="checkout"}"#),
+        ("start", start.as_str()),
+        ("end", end.as_str()),
+        ("step", "30"),
+    ];
+    let range_form = encode_query(&range_params);
+    let (get_status, get_body) =
+        get_json(&router, &format!("/api/v1/query_range?{range_form}")).await;
+    let (post_status, post_body) =
+        post_form_json(&router, "/api/v1/query_range", &range_form).await;
+    assert_eq!(get_status, post_status, "get={get_body} post={post_body}");
+    assert_eq!(get_body, post_body);
+}
+
+#[tokio::test]
+async fn post_query_without_form_content_type_ignores_body() {
+    let (router, _temp) = build_tenant_router().await;
+    let form = encode_query(&[("query", "up")]);
+    let (status, body) = post_form_json_as(&router, "/api/v1/query", &form, None, false).await;
+    // Body ignored → missing query → bad_data (not success with "up").
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["errorType"], "bad_data");
+}
+
+#[tokio::test]
+async fn otlp_no_recorded_value_omitted_from_instant_query() {
+    let (router, _temp) = build_tenant_router().await;
+    let ts_nano = 1_700_000_000_000_000_000u64;
+    // flags=1 → DATA_POINT_FLAGS_NO_RECORDED_VALUE (stale/NaN).
+    let body = gauge_series_otlp_with_flags(
+        "http.requests",
+        "checkout",
+        &[(ts_nano - 60_000_000_000, 42.0, 0), (ts_nano, 0.0, 1)],
+    );
+    ingest_metrics(&router, body).await;
+    let eval_s = (ts_nano / 1_000_000_000) as i64;
+    let time = eval_s.to_string();
+    let q = encode_query(&[
+        ("query", r#"http_requests{job="checkout"}"#),
+        ("time", time.as_str()),
+    ]);
+    let (status, body) = get_json(&router, &format!("/api/v1/query?{q}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "success");
+    let result = body["data"]["result"].as_array().expect("result");
+    assert!(
+        result.is_empty(),
+        "stale/NaN latest sample must omit series, got {body}"
+    );
 }
 
 #[tokio::test]

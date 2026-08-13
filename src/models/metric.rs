@@ -181,11 +181,17 @@ impl Metric {
     ) -> Option<Self> {
         let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
 
+        // OTLP NO_RECORDED_VALUE is the Prom staleness marker equivalent → store as NaN.
+        const NO_RECORDED_VALUE: u32 = 1;
         use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
-        let value = match &data_point.value {
-            Some(Value::AsDouble(v)) => *v,
-            Some(Value::AsInt(v)) => *v as f64,
-            None => return None,
+        let value = if data_point.flags & NO_RECORDED_VALUE != 0 {
+            f64::NAN
+        } else {
+            match &data_point.value {
+                Some(Value::AsDouble(v)) => *v,
+                Some(Value::AsInt(v)) => *v as f64,
+                None => return None,
+            }
         };
 
         let attributes = Self::extract_attributes(&data_point.attributes);

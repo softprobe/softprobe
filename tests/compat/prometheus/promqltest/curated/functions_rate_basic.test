@@ -1,6 +1,6 @@
 # Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
 # Copyright The Prometheus Authors — Apache-2.0
-# Dense rate + counter-reset increase (no sparse extrapolation cases).
+# Dense rate + counter-reset increase (extrapolation factor ≈ 1 when samples fill the window).
 # softprobe: counter
 
 load 1m

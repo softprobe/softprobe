@@ -18,6 +18,51 @@ pub fn gauge_otlp(metric_name: &str, job: &str, value: f64, time_unix_nano: u64)
     gauge_series_otlp(metric_name, job, &[(time_unix_nano, value)])
 }
 
+/// Gauge series with explicit OTLP datapoint flags (e.g. NO_RECORDED_VALUE = 1).
+pub fn gauge_series_otlp_with_flags(
+    metric_name: &str,
+    job: &str,
+    samples: &[(u64, f64, u32)],
+) -> Vec<u8> {
+    let data_points: Vec<NumberDataPoint> = samples
+        .iter()
+        .map(|(ts, value, flags)| NumberDataPoint {
+            attributes: vec![],
+            start_time_unix_nano: 0,
+            time_unix_nano: *ts,
+            exemplars: vec![],
+            flags: *flags,
+            value: Some(number_data_point::Value::AsDouble(*value)),
+        })
+        .collect();
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue(job.into())),
+                    }),
+                }],
+                dropped_attributes_count: 0,
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics: vec![Metric {
+                    name: metric_name.into(),
+                    description: "test gauge".into(),
+                    unit: "1".into(),
+                    data: Some(Data::Gauge(Gauge { data_points })),
+                    metadata: vec![],
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+    req.encode_to_vec()
+}
+
 /// Build a gauge with multiple timestamped samples (same series).
 pub fn gauge_series_otlp(metric_name: &str, job: &str, samples: &[(u64, f64)]) -> Vec<u8> {
     let data_points: Vec<NumberDataPoint> = samples
@@ -220,13 +265,93 @@ pub async fn get_json_as(
     path: &str,
     tenant_id: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
-    let mut builder = Request::builder().method("GET").uri(path);
+    request_json(router, "GET", path, Body::empty(), tenant_id, None, None).await
+}
+
+/// GET with `Authorization: Bearer …` (Grafana datasource style).
+pub async fn get_json_bearer(
+    router: &Router,
+    path: &str,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
+    request_json(router, "GET", path, Body::empty(), None, Some(bearer), None).await
+}
+
+/// POST `application/x-www-form-urlencoded` body to a Prometheus API path (Grafana-style).
+pub async fn post_form_json(
+    router: &Router,
+    path: &str,
+    form_body: &str,
+) -> (StatusCode, serde_json::Value) {
+    post_form_json_as(router, path, form_body, None, true).await
+}
+
+/// POST form with optional Bearer auth.
+pub async fn post_form_json_bearer(
+    router: &Router,
+    path: &str,
+    form_body: &str,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
+    request_json(
+        router,
+        "POST",
+        path,
+        Body::from(form_body.to_string()),
+        None,
+        Some(bearer),
+        Some("application/x-www-form-urlencoded"),
+    )
+    .await
+}
+
+/// POST form body; when `urlencoded` is false, omits the content-type (body ignored by handlers).
+pub async fn post_form_json_as(
+    router: &Router,
+    path: &str,
+    form_body: &str,
+    tenant_id: Option<&str>,
+    urlencoded: bool,
+) -> (StatusCode, serde_json::Value) {
+    let ct = if urlencoded {
+        Some("application/x-www-form-urlencoded")
+    } else {
+        None
+    };
+    request_json(
+        router,
+        "POST",
+        path,
+        Body::from(form_body.to_string()),
+        tenant_id,
+        None,
+        ct,
+    )
+    .await
+}
+
+async fn request_json(
+    router: &Router,
+    method: &str,
+    path: &str,
+    body: Body,
+    tenant_id: Option<&str>,
+    bearer: Option<&str>,
+    content_type: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
     if let Some(tid) = tenant_id {
         builder = builder.header("x-test-tenant-id", tid);
     }
+    if let Some(token) = bearer {
+        builder = builder.header("Authorization", format!("Bearer {token}"));
+    }
     let resp = router
         .clone()
-        .oneshot(builder.body(Body::empty()).unwrap())
+        .oneshot(builder.body(body).unwrap())
         .await
         .unwrap();
     let status = resp.status();

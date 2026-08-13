@@ -1,7 +1,7 @@
 # Read-after-write and queryability guarantees
 
 **Status:** Phase 0 contract  
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-13
 
 ## Ingest commit boundary
 
@@ -28,7 +28,8 @@ tier that delays visibility after a successful ingest response.
 | Out-of-order timestamps within a batch | Stored as-is; query adapters sort deterministically for protocol responses |
 | Duplicate timestamps for the same series | Both samples retained; PromQL-style "last sample wins" is an adapter concern |
 | Counter resets | Preserved as raw samples; PromQL `rate`/`irate`/`increase` treat a downward step as a reset (add previous value) |
-| `rate` / `increase` / `delta` window math | Phase 1 uses first→last sample span within the selected range vector (no Prometheus range-boundary extrapolation). Dense series match the pinned oracle in `make test-prom-diff` / `test-promqltest`; sparse-series extrapolation parity is deferred |
+| `rate` / `increase` / `delta` window math | Matches Prometheus v2.54.1 `extrapolatedRate` (range-boundary extrapolation from average sample interval × 1.1). Covered by dense + sparse curated `promqltest` vs pinned oracle. `irate`/`idelta` remain last-two-sample (no extrapolate). |
+| Stale / NaN samples | Instant lookback omits series whose latest sample is NaN. OTLP `DATA_POINT_FLAGS_NO_RECORDED_VALUE` is stored as NaN (Prom staleness equivalent). Full gap-injection StaleNaN bit semantics beyond NaN omit are out of scope. |
 | Late-arriving records (older than recent ingest) | Accepted and stored; no reject-by-staleness gate in Phase 0 |
 
 ## Empty / invalid tenant

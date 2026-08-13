@@ -1,22 +1,22 @@
-# Verification — Grafana PromQL pack (option C)
+# Verification — Phase 1 leftovers + Grafana Prom smoke
 
 **Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`  
-**PR:** https://github.com/softprobe/thelake/pull/35
+**PR:** https://github.com/softprobe/thelake/pull/35  
+**Issues:** #30 leftovers, #27 Prom-only smoke
 
-## New supported surface
+## Delivered
 
-`sum|avg|min|max|count|last_over_time`, `and`/`or`/`unless` (default matching, ignore `__name__`), `topk`/`bottomk`, `delta`/`idelta`, `abs`/`ceil`/`floor`/`round`, `offset`.
+- POST `query`/`query_range` GET parity + content-type negative
+- Seeded no-panic `parse_promql` property test
+- Prom `extrapolatedRate` for rate/increase/delta + sparse curated fixture
+- Instant NaN/stale omit; OTLP `NO_RECORDED_VALUE` → NaN preserved through DuckDB JSON (`"NaN"` string) → Prom omit
+- Grafana Prom provisioning (`${SOFTPROBE_URL}` / `${SOFTPROBE_API_KEY}`) + Bearer smoke (POST range + `rate()`)
 
-Still unsupported: `@`, subquery, `on()`/`ignoring()`, `group_*`, full catalog, hist funcs.
-
-## Gates (2026-08-13)
+## Gates
 
 ```text
 make check-fmt && make lint && make test   # green
-make test-prom-diff                        # green
-make test-promqltest                       # green — 100 curated oracle evals
+make test-prom-compat                      # green
 ```
 
-End-to-end proof: curated fixtures under `tests/compat/prometheus/promqltest/curated/` (Apache-2.0 excerpts from Prometheus v2.54.1) load into Softprobe + pinned `prom/prometheus:v2.54.1`; responses normalized then `assert_eq!` on `resultType` + `result`.
-
-Senior-review blocking items fixed in-turn: Prom `round` half-ties, parenthesized range-vector args, `avg_over_time` NaN poisoning, range+offset oracle, shared `funcs` allowlist.
+Senior-review blockers (NaN→0.0, Grafana env syntax, smoke gaps) fixed in-turn.

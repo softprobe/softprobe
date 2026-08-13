@@ -89,7 +89,7 @@ protocols:
     language_features:
       traceql: subset_pending_phase_3
   grafana:
-    native_datasources: pending_phase_4
+    native_datasources: prom_smoke_phase_4
     custom_plugin: out_of_scope
 storage_fidelity:
   classic_histogram: preserved

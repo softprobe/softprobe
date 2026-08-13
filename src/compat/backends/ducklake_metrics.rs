@@ -588,7 +588,13 @@ fn cell_u64(row: &[Value], idx: usize) -> Option<u64> {
 fn cell_f64(row: &[Value], idx: usize) -> Option<f64> {
     match row.get(idx)? {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
+        Value::String(s) => match s.as_str() {
+            "NaN" | "nan" => Some(f64::NAN),
+            "+Inf" | "Inf" | "+inf" | "inf" => Some(f64::INFINITY),
+            "-Inf" | "-inf" => Some(f64::NEG_INFINITY),
+            other => other.parse().ok(),
+        },
+        Value::Null => None,
         _ => None,
     }
 }

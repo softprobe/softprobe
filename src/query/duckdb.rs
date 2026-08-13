@@ -817,6 +817,23 @@ impl DuckDBCore {
     }
 }
 
+/// Preserve NaN/Inf through JSON (serde_json::Number rejects non-finite → Null otherwise).
+fn finite_or_special_float(v: f64) -> Value {
+    if v.is_nan() {
+        Value::String("NaN".into())
+    } else if v.is_infinite() {
+        Value::String(if v.is_sign_negative() {
+            "-Inf".into()
+        } else {
+            "+Inf".into()
+        })
+    } else {
+        serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
+    }
+}
+
 fn duck_value_to_json(value: DuckValue) -> Value {
     match value {
         DuckValue::Null => Value::Null,
@@ -830,12 +847,8 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         DuckValue::USmallInt(v) => Value::Number(v.into()),
         DuckValue::UInt(v) => Value::Number(v.into()),
         DuckValue::UBigInt(v) => Value::Number(v.into()),
-        DuckValue::Float(v) => serde_json::Number::from_f64(v as f64)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        DuckValue::Double(v) => serde_json::Number::from_f64(v)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
+        DuckValue::Float(v) => finite_or_special_float(v as f64),
+        DuckValue::Double(v) => finite_or_special_float(v),
         DuckValue::Decimal(v) => Value::String(v.to_string()),
         DuckValue::Timestamp(unit, value) => Value::String(format!("{:?}:{}", unit, value)),
         // Keep VARCHAR/JSON-as-text as strings. Call sites that need objects
@@ -954,6 +967,22 @@ mod tests {
     fn duck_value_keeps_plain_text() {
         let value = duck_value_to_json(DuckValue::Text("plain".to_string()));
         assert_eq!(value, Value::String("plain".to_string()));
+    }
+
+    #[test]
+    fn duck_value_preserves_nan_and_inf_as_strings() {
+        assert_eq!(
+            duck_value_to_json(DuckValue::Double(f64::NAN)),
+            Value::String("NaN".into())
+        );
+        assert_eq!(
+            duck_value_to_json(DuckValue::Double(f64::INFINITY)),
+            Value::String("+Inf".into())
+        );
+        assert_eq!(
+            duck_value_to_json(DuckValue::Double(f64::NEG_INFINITY)),
+            Value::String("-Inf".into())
+        );
     }
 
     #[test]

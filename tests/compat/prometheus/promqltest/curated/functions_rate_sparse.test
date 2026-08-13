@@ -1,0 +1,13 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Sparse counter inside a long range — exercises extrapolatedRate.
+# softprobe: counter
+
+load 5m
+  http_requests{job="api"} 0 50
+
+eval instant at 1h rate(http_requests[1h])
+  {job="api"} 0.020833333333333332
+
+eval instant at 1h increase(http_requests[1h])
+  {job="api"} 75

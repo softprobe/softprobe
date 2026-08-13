@@ -303,6 +303,10 @@ test-promqltest: ensure-cache
 test-prom-compat: test-prom-diff test-promqltest
 	@echo "prometheus compatibility gates green"
 
+# Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).
+test-grafana-prom-smoke: ensure-cache
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::grafana_prom_smoke -- --nocapture
+
 test-e2e: ensure-cache check-infra
 	@set -e; \
 	backend="$(E2E_BACKEND)"; \

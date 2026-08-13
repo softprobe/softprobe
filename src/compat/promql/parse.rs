@@ -350,4 +350,40 @@ mod tests {
         let err = parse_promql(r#"a + on(job) b"#).unwrap_err();
         assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
     }
+
+    #[test]
+    fn parse_promql_never_panics_on_garbage() {
+        let curated = [
+            "",
+            "{",
+            "{{{{",
+            "((((((",
+            "up[",
+            "rate(",
+            "\0\0",
+            "sum by (",
+            "a + on(",
+            &"x".repeat(10_000),
+            "1e308 * 1e308",
+            "{job=~\"(\"}",
+        ];
+        for s in curated {
+            let r = std::panic::catch_unwind(|| parse_promql(s));
+            assert!(r.is_ok(), "parse_promql panicked on {s:?}");
+            let _ = r.unwrap();
+        }
+        // Seeded pseudo-random printable ASCII.
+        let mut state: u64 = 0xC0FFEE;
+        for _ in 0..200 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let len = (state % 64) as usize;
+            let mut s = String::with_capacity(len);
+            for i in 0..len {
+                let b = ((state.wrapping_add(i as u64 * 17)) % 95) as u8 + 32;
+                s.push(b as char);
+            }
+            let r = std::panic::catch_unwind(|| parse_promql(&s));
+            assert!(r.is_ok(), "parse_promql panicked on {s:?}");
+        }
+    }
 }

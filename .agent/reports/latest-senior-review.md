@@ -1,4 +1,4 @@
-# Senior engineer review — Grafana PromQL pack (option C)
+# Senior engineer review — Phase 1 leftovers + Grafana Prom smoke
 
 **Branch:** `feat/compat-phase1-prometheus`  
 **Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`  
@@ -10,22 +10,16 @@
 
 | # | Finding | Disposition |
 |---|---------|-------------|
-| 1 | `round()` half-ties used Rust `.round()` (away from 0); Prom uses `Floor(v/nearest+0.5)` | **Fixed** — Prom formula; unit + `functions_math.test` cover `round(-1.5)→-1` |
-| 2 | Parenthesized range args (`rate((m[5m]))`) rejected at parse | **Fixed** — `unwrap_parens` in `validate_call` + parse unit test |
-| 3 | `avg_over_time` skipped NaNs (comment claimed Prom parity) | **Fixed** — include NaNs (poison mean); MemBackend unit test; comment notes OTLP drops NaNs |
-| 4 | Offset oracle instant-only | **Fixed** — `sum_over_time(...[10m] offset 5m)` in `selectors_offset.test` |
-| 5 | DRY allowlists duplicated parse/eval | **Fixed** — `src/compat/promql/funcs.rs` |
-| 6 | Docs “default matching” omitted `__name__` ignore | **Fixed** — matrix + phase1 wording |
-| 7–9 | topk ties / NaN skip DRY / matrix date | Accepted / minor; date bumped |
+| 1 | DuckLake NaN/stale → JSON Null → `unwrap_or(0.0)` | **Fixed** — `finite_or_special_float` emits `"NaN"`/`±Inf` strings; `cell_f64` parses them; OTLP flag integration test |
+| 2 | Grafana `${VAR:-default}` invalid for pin 11.2 | **Fixed** — `${SOFTPROBE_URL}` / `${SOFTPROBE_API_KEY}` only + README |
+| 3 | Smoke missing POST range + `rate()` | **Fixed** |
+| 4 | `irate`/`idelta` skipped NaN filter | **Fixed** |
+| 5 | DRY authenticated_router | Accepted for this slice (smoke mirrors phase0; fold later) |
+| 6–7 | Docs / hist flags | avg_over_time comment fixed; hist NO_RECORDED deferred |
 
-## Accepted risks
-
-- No range-boundary extrapolation for `rate`/`increase`/`delta` (documented in `queryability.md`).
-- Explicit unsupported: `on`/`ignoring`/`group_*`/`@`/subquery/full catalog.
-
-## Verification (post-disposition)
+## Verification
 
 ```text
 make check-fmt && make lint && make test   # green
-make test-promqltest                       # green — 100 curated oracle evals
+make test-prom-compat                      # green (incl. sparse rate fixture)
 ```

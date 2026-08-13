@@ -1,4 +1,5 @@
 pub mod authn_contract;
+pub mod grafana_prom_smoke;
 pub mod http_api;
 pub mod metrics_fidelity;
 #[cfg(feature = "integration-e2e")]
