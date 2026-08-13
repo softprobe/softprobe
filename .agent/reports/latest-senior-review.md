@@ -1,26 +1,31 @@
-# Senior engineer review — Phase 1 gap-close + PR #35 comments
+# Senior engineer review — Grafana PromQL pack (option C)
 
 **Branch:** `feat/compat-phase1-prometheus`  
 **Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`  
+**PR:** https://github.com/softprobe/thelake/pull/35  
 **Initial verdict:** REQUEST_CHANGES  
 **After disposition:** APPROVE_WITH_FIXES
 
 ## Findings → disposition
 
-| Finding | Disposition |
-|---------|-------------|
-| ATTRIBUTION still taught silent skip | Fixed |
-| parse accept ≠ eval (string / OR matchers) | Fixed in `validate_supported` |
-| rate×arith missing | Fixed — `operators_rate_arith.test` |
-| Classic hist Prom path | Accepted via existing `metrics_fidelity::http_otlp_histogram_ingest_then_sql_and_prom_query` |
-| Metadata Prom type vocabulary | Fixed — `project_prometheus_metric_type` |
-| Missing-table → empty | Documented as approved empty-tenant contract |
-| drop_name DRY | Fixed — `drops_metric_name` helper |
-| PR #35 Codex: `__name__` / metadata / overflow / deadline | Fixed + tests |
+| # | Finding | Disposition |
+|---|---------|-------------|
+| 1 | `round()` half-ties used Rust `.round()` (away from 0); Prom uses `Floor(v/nearest+0.5)` | **Fixed** — Prom formula; unit + `functions_math.test` cover `round(-1.5)→-1` |
+| 2 | Parenthesized range args (`rate((m[5m]))`) rejected at parse | **Fixed** — `unwrap_parens` in `validate_call` + parse unit test |
+| 3 | `avg_over_time` skipped NaNs (comment claimed Prom parity) | **Fixed** — include NaNs (poison mean); MemBackend unit test; comment notes OTLP drops NaNs |
+| 4 | Offset oracle instant-only | **Fixed** — `sum_over_time(...[10m] offset 5m)` in `selectors_offset.test` |
+| 5 | DRY allowlists duplicated parse/eval | **Fixed** — `src/compat/promql/funcs.rs` |
+| 6 | Docs “default matching” omitted `__name__` ignore | **Fixed** — matrix + phase1 wording |
+| 7–9 | topk ties / NaN skip DRY / matrix date | Accepted / minor; date bumped |
 
-## Verification
+## Accepted risks
+
+- No range-boundary extrapolation for `rate`/`increase`/`delta` (documented in `queryability.md`).
+- Explicit unsupported: `on`/`ignoring`/`group_*`/`@`/subquery/full catalog.
+
+## Verification (post-disposition)
 
 ```text
 make check-fmt && make lint && make test   # green
-make test-prom-compat                      # green — 71 curated evals
+make test-promqltest                       # green — 100 curated oracle evals
 ```

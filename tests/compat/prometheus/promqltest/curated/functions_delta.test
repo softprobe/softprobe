@@ -1,0 +1,20 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
+# Copyright The Prometheus Authors — Apache-2.0
+
+load 5m
+  http_requests{path="/foo"} 0 50 100 150 200
+  http_requests{path="/bar"} 200 150 100 50 0
+
+eval instant at 20m delta(http_requests[20m])
+  {path="/foo"} 200
+  {path="/bar"} -200
+
+clear
+
+load 5m
+  http_requests{path="/foo"} 0 50 100 150
+  http_requests{path="/bar"} 0 50 100 50
+
+eval instant at 20m idelta(http_requests[20m])
+  {path="/foo"} 50
+  {path="/bar"} -50

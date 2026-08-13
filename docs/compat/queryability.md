@@ -28,7 +28,7 @@ tier that delays visibility after a successful ingest response.
 | Out-of-order timestamps within a batch | Stored as-is; query adapters sort deterministically for protocol responses |
 | Duplicate timestamps for the same series | Both samples retained; PromQL-style "last sample wins" is an adapter concern |
 | Counter resets | Preserved as raw samples; PromQL `rate`/`irate`/`increase` treat a downward step as a reset (add previous value) |
-| `rate` / `increase` window math | Phase 1 uses first→last sample span within the selected range vector (no Prometheus range-boundary extrapolation). Dense series match the pinned oracle in `make test-prom-diff`; sparse-series extrapolation parity is deferred |
+| `rate` / `increase` / `delta` window math | Phase 1 uses first→last sample span within the selected range vector (no Prometheus range-boundary extrapolation). Dense series match the pinned oracle in `make test-prom-diff` / `test-promqltest`; sparse-series extrapolation parity is deferred |
 | Late-arriving records (older than recent ingest) | Accepted and stored; no reject-by-staleness gate in Phase 0 |
 
 ## Empty / invalid tenant

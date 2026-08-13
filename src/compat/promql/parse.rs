@@ -4,8 +4,8 @@ use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use promql_parser::label::{MatchOp, Matcher, METRIC_NAME};
 use promql_parser::parser::token::{
-    T_ADD, T_AVG, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LAND, T_LOR, T_LSS, T_LTE, T_LUNLESS,
-    T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM,
+    T_ADD, T_AVG, T_BOTTOMK, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LAND, T_LOR, T_LSS, T_LTE,
+    T_LUNLESS, T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM, T_TOPK,
 };
 use promql_parser::parser::{
     self, AggregateExpr, BinaryExpr, Call, Expr, MatrixSelector, VectorMatchCardinality,
@@ -28,7 +28,14 @@ pub fn parse_match_selector(input: &str) -> Result<ParsedSelector, CompatError> 
         )
     })?;
     match expr {
-        Expr::VectorSelector(vs) => lower_vector_selector(&vs),
+        Expr::VectorSelector(vs) => {
+            if vs.offset.is_some() {
+                return Err(CompatError::unsupported(
+                    "promql: offset is not allowed in match[]",
+                ));
+            }
+            lower_vector_selector(&vs)
+        }
         other => Err(CompatError::unsupported(format!(
             "match[] must be a vector selector, got {}",
             expr_kind(&other)
@@ -51,9 +58,7 @@ fn validate_supported(expr: &Expr) -> Result<(), CompatError> {
             if vs.at.is_some() {
                 return Err(CompatError::unsupported("promql: @ modifier"));
             }
-            if vs.offset.is_some() {
-                return Err(CompatError::unsupported("promql: offset modifier"));
-            }
+            // offset is supported in Phase 1 common-Grafana pack.
             if !vs.matchers.or_matchers.is_empty() {
                 return Err(CompatError::unsupported("promql: OR matchers"));
             }
@@ -104,25 +109,34 @@ fn validate_binary_op(b: &BinaryExpr) -> Result<(), CompatError> {
         x if x == T_EQLC || x == T_NEQ || x == T_GTR || x == T_GTE || x == T_LSS || x == T_LTE
     );
     let set_ops = matches!(id, x if x == T_LAND || x == T_LOR || x == T_LUNLESS);
-    if set_ops {
-        return Err(CompatError::unsupported("promql: set operators"));
-    }
-    if !(arithmetic || comparison) {
+    if !(arithmetic || comparison || set_ops) {
         return Err(CompatError::unsupported(format!(
             "promql: binary operator {}",
             b.op
         )));
     }
     if let Some(m) = &b.modifier {
-        if !matches!(m.card, VectorMatchCardinality::OneToOne) {
-            return Err(CompatError::unsupported("promql: group_left/group_right"));
-        }
-        if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
-            return Err(CompatError::unsupported("promql: fill modifiers"));
-        }
-        // Eval matches on all labels except __name__; do not silently ignore on()/ignoring().
-        if m.matching.is_some() {
-            return Err(CompatError::unsupported("promql: on()/ignoring() matching"));
+        if set_ops {
+            // Set ops use many-to-many matching; still reject on()/ignoring()/group_*.
+            if m.matching.is_some() {
+                return Err(CompatError::unsupported("promql: on()/ignoring() matching"));
+            }
+            if !matches!(
+                m.card,
+                VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany
+            ) {
+                return Err(CompatError::unsupported("promql: group_left/group_right"));
+            }
+        } else {
+            if !matches!(m.card, VectorMatchCardinality::OneToOne) {
+                return Err(CompatError::unsupported("promql: group_left/group_right"));
+            }
+            if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
+                return Err(CompatError::unsupported("promql: fill modifiers"));
+            }
+            if m.matching.is_some() {
+                return Err(CompatError::unsupported("promql: on()/ignoring() matching"));
+            }
         }
     }
     Ok(())
@@ -130,46 +144,73 @@ fn validate_binary_op(b: &BinaryExpr) -> Result<(), CompatError> {
 
 fn validate_aggregate(a: &AggregateExpr) -> Result<(), CompatError> {
     let id = a.op.id();
-    if !(id == T_SUM || id == T_MIN || id == T_MAX || id == T_AVG || id == T_COUNT) {
-        return Err(CompatError::unsupported(format!(
-            "promql: aggregation {}",
-            a.op
-        )));
+    if id == T_SUM || id == T_MIN || id == T_MAX || id == T_AVG || id == T_COUNT {
+        return Ok(());
     }
-    Ok(())
+    if id == T_TOPK || id == T_BOTTOMK {
+        if a.param.is_none() {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                format!("{}() requires a parameter", a.op),
+            ));
+        }
+        return Ok(());
+    }
+    Err(CompatError::unsupported(format!(
+        "promql: aggregation {}",
+        a.op
+    )))
+}
+
+fn unwrap_parens(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(p) => unwrap_parens(&p.expr),
+        other => other,
+    }
 }
 
 fn validate_call(c: &Call) -> Result<(), CompatError> {
     let name = c.func.name.to_ascii_lowercase();
-    match name.as_str() {
-        "rate" | "irate" | "increase" => {
-            if c.args.args.len() != 1 {
+    if super::funcs::is_range_vector_fn(&name) {
+        if c.args.args.len() != 1 {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                format!("{name}() expects 1 argument"),
+            ));
+        }
+        return match unwrap_parens(c.args.args[0].as_ref()) {
+            Expr::MatrixSelector(_) => Ok(()),
+            _ => Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                format!("{name}() requires a range vector"),
+            )),
+        };
+    }
+    if super::funcs::is_math_fn(&name) {
+        if name == "round" {
+            if !(1..=2).contains(&c.args.args.len()) {
                 return Err(CompatError::new(
                     CompatErrorCode::BadRequest,
-                    format!("{name}() expects 1 argument"),
+                    "round() expects 1 or 2 arguments",
                 ));
             }
-            match c.args.args[0].as_ref() {
-                Expr::MatrixSelector(_) => Ok(()),
-                _ => Err(CompatError::new(
-                    CompatErrorCode::BadRequest,
-                    format!("{name}() requires a range vector"),
-                )),
-            }
+        } else if c.args.args.len() != 1 {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                format!("{name}() expects 1 argument"),
+            ));
         }
-        other => Err(CompatError::unsupported(format!(
-            "promql: function {other}"
-        ))),
+        return Ok(());
     }
+    Err(CompatError::unsupported(format!("promql: function {name}")))
 }
 
 fn lower_vector_selector(vs: &VectorSelector) -> Result<ParsedSelector, CompatError> {
     if vs.at.is_some() {
         return Err(CompatError::unsupported("promql: @ modifier"));
     }
-    if vs.offset.is_some() {
-        return Err(CompatError::unsupported("promql: offset modifier"));
-    }
+    // Discovery match[] must not carry offset (time-shifted series match is query-only).
+    // Full PromQL allows offset via validate_supported + eval.
     let mut matchers = Vec::new();
     if let Some(name) = &vs.name {
         matchers.push(LabelMatcher {
@@ -182,7 +223,6 @@ fn lower_vector_selector(vs: &VectorSelector) -> Result<ParsedSelector, CompatEr
         matchers.push(convert_matcher(m)?);
     }
     for group in &vs.matchers.or_matchers {
-        // Phase 1: OR-of-matchers inside one selector is unsupported; use multiple match[].
         if !group.is_empty() {
             return Err(CompatError::unsupported(
                 "promql: or-matchers inside a single selector",
@@ -285,9 +325,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_offset_on_query_and_match() {
-        let err = parse_promql("up offset 5m").unwrap_err();
-        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+    fn accepts_offset_on_query() {
+        parse_promql("up offset 5m").unwrap();
+        parse_promql(r#"sum_over_time(up[5m])"#).unwrap();
+        parse_promql(r#"http_requests and up"#).unwrap();
+        parse_promql(r#"topk(3, up)"#).unwrap();
+        parse_promql(r#"abs(up)"#).unwrap();
+    }
+
+    #[test]
+    fn accepts_parenthesized_range_vector_arg() {
+        parse_promql("sum_over_time((http_requests[5m]))").unwrap();
+        parse_promql("rate((up[1m]))").unwrap();
+    }
+
+    #[test]
+    fn rejects_offset_on_match_selector() {
         let err = parse_match_selector("up offset 5m").unwrap_err();
         assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
     }

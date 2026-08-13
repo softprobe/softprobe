@@ -79,6 +79,7 @@ pub fn parse_promqltest(input: &str) -> Result<Vec<Command>, ParseError> {
                 }
                 if t.starts_with("load ")
                     || t.starts_with("eval ")
+                    || t.starts_with("eval_ordered ")
                     || t.starts_with("clear")
                     || t.starts_with("expect ")
                 {
@@ -93,8 +94,9 @@ pub fn parse_promqltest(input: &str) -> Result<Vec<Command>, ParseError> {
             out.push(Command::Load { interval, series });
             continue;
         }
-        if trimmed.starts_with("eval instant") {
-            let (at, query) = parse_eval_instant(trimmed).map_err(|m| ParseError::Message {
+        if trimmed.starts_with("eval instant") || trimmed.starts_with("eval_ordered instant") {
+            let normalized = trimmed.replacen("eval_ordered instant", "eval instant", 1);
+            let (at, query) = parse_eval_instant(&normalized).map_err(|m| ParseError::Message {
                 line: line_no,
                 message: m,
             })?;
@@ -161,6 +163,7 @@ fn collect_expected(lines: &[&str], mut i: usize) -> (Vec<String>, usize) {
         }
         if t.starts_with("load ")
             || t.starts_with("eval ")
+            || t.starts_with("eval_ordered ")
             || t.starts_with("clear")
             || t.starts_with("expect ")
         {

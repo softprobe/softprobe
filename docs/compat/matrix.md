@@ -2,7 +2,7 @@
 
 **Status:** Approved for Phase 0  
 **Version:** `compat.v0`  
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-13
 
 OpenTelemetry is the **canonical write path**. Prometheus, Loki, and Tempo
 compatibility is **query-only**. Write, push, remote_write, tail, alerting, and
@@ -54,10 +54,12 @@ a declared PromQL subset; see [`phase1-prometheus.md`](phase1-prometheus.md).
 | Supported | Explicit unsupported |
 |-----------|----------------------|
 | Vector selectors + matchers `=` `!=` `=~` `!~` | Native/exponential histogram functions |
-| Instant + range vectors | Subqueries, `@` modifier, `offset` modifier |
-| Aggregations `sum`/`min`/`max`/`avg`/`count` + `by`/`without` | Other aggregations (`topk`, `quantile`, …) |
-| Arithmetic + comparison (filtering) | Set operators (`and`/`or`/`unless`); `on()`/`ignoring()`; `group_left`/`group_right` |
-| `rate`, `irate`, `increase` (counter reset documented in queryability) | Set operators; `on()`/`ignoring()`; `group_left`/`group_right`; full function catalog; recording rules / alerts |
+| Instant + range vectors; `offset` modifier | Subqueries, `@` modifier |
+| Aggregations `sum`/`min`/`max`/`avg`/`count`/`topk`/`bottomk` + `by`/`without` | Other aggregations (`quantile`, `stddev`, …) |
+| Arithmetic + comparison (filtering) + set ops `and`/`or`/`unless` (default matching = all labels except `__name__`, matching Prometheus `signatureFunc`) | Explicit `on()`/`ignoring()`; `group_left`/`group_right` |
+| `rate`, `irate`, `increase`, `delta`, `idelta` | Full function catalog; recording rules / alerts |
+| `sum|avg|min|max|count|last_over_time` | |
+| `abs`, `ceil`, `floor`, `round` | |
 
 Classic histogram fidelity columns are exposed as `_bucket`/`_sum`/`_count` series for selectors; histogram *functions* stay unsupported. Summary series expose `_sum`/`_count` plus the base name; per-quantile `_quantile{quantile=…}` expansion is **not** implemented in Phase 1 (documented unsupported).
 

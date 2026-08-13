@@ -30,14 +30,18 @@ protocols:
         - label_matchers
         - instant_and_range_vectors
         - aggregations_sum_min_max_avg_count_by_without
+        - aggregations_topk_bottomk
         - arithmetic_and_comparison
+        - set_operators_and_or_unless
         - rate_irate_increase
+        - delta_idelta
+        - over_time_sum_avg_min_max_count_last
+        - math_abs_ceil_floor_round
+        - offset_modifier
       promql_unsupported:
         - native_histogram_functions
         - subqueries
         - at_modifier
-        - offset_modifier
-        - set_operators
         - on_ignoring_matching
         - group_left_group_right
         - summary_quantile_series_expansion

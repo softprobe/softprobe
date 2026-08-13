@@ -43,9 +43,9 @@ Wiring: `api/mod.rs` merges `prometheus_routes()`; Loki/Tempo remain stubs.
 
 ## Declared PromQL subset
 
-See matrix + capability. Supported: selectors/matchers, instant+range, `sum|min|max|avg|count` with `by`/`without`, arithmetic/comparison, `rate`/`irate`/`increase`.
+See matrix + capability. Supported: selectors/matchers, instant+range, `sum|min|max|avg|count|topk|bottomk` with `by`/`without`, arithmetic/comparison, set ops `and`/`or`/`unless` (default matching ignores `__name__` like Prometheus), `rate`/`irate`/`increase`/`delta`/`idelta`, `*_over_time` (`sum|avg|min|max|count|last`), `abs`/`ceil`/`floor`/`round`, `offset`.
 
-Explicit unsupported (non-exhaustive): `@`, `offset`, subqueries, set ops, `group_left`/`group_right`, histogram functions, summary `_quantile` expansion, recording rules/alerts.
+Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `group_left`/`group_right`, histogram functions, summary `_quantile` expansion, recording rules/alerts, full function catalog.
 
 ---
 
@@ -83,7 +83,7 @@ Explicit unsupported (non-exhaustive): `@`, `offset`, subqueries, set ops, `grou
 - Fixtures: `tests/compat/prometheus/promqltest/curated/` (Apache-2.0 excerpts from Prometheus `v2.54.1`)
 - Attribution: `tests/compat/prometheus/promqltest/ATTRIBUTION.md`
 - Runner loads the same series into lake + pinned Prom, executes supported `eval`s, compares normalized JSON
-- Curated set covers range evals, irate/rate/increase (dense), compare/`bool`, by(job), `%`/`^`, literals, selector edges
+- Curated set covers range evals, irate/rate/increase (dense), compare/`bool`, by(job), `%`/`^`, literals, selector edges, `*_over_time`, set ops, topk/bottomk, delta/idelta, offset
 - Unsupported AST in curated fixtures **fails** (no silent skip)
 - Timeline: samples and eval times are shifted from unix-0 to a fixed base so OTLP ingest does not treat timestamp 0 as “now”
 - Run: `make test-promqltest` or `make test-prom-compat`

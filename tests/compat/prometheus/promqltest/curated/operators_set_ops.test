@@ -1,0 +1,35 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/operators.test + aggregators.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Default label matching only (no on()/ignoring()).
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"} 0+30x10
+  http_requests{job="api-server", instance="1", group="canary"} 0+40x10
+  http_requests{job="app-server", instance="0", group="production"} 0+50x10
+  http_requests{job="app-server", instance="1", group="production"} 0+60x10
+  http_requests{job="app-server", instance="0", group="canary"} 0+70x10
+  http_requests{job="app-server", instance="1", group="canary"} 0+80x10
+
+eval instant at 50m http_requests{group="canary"} and http_requests{instance="0"}
+  http_requests{group="canary", instance="0", job="api-server"} 300
+  http_requests{group="canary", instance="0", job="app-server"} 700
+
+eval instant at 50m http_requests{group="canary"} or http_requests{group="production"}
+  http_requests{group="canary", instance="0", job="api-server"} 300
+  http_requests{group="canary", instance="0", job="app-server"} 700
+  http_requests{group="canary", instance="1", job="api-server"} 400
+  http_requests{group="canary", instance="1", job="app-server"} 800
+  http_requests{group="production", instance="0", job="api-server"} 100
+  http_requests{group="production", instance="0", job="app-server"} 500
+  http_requests{group="production", instance="1", job="api-server"} 200
+  http_requests{group="production", instance="1", job="app-server"} 600
+
+eval instant at 50m http_requests{group="canary"} unless http_requests{instance="0"}
+  http_requests{group="canary", instance="1", job="api-server"} 400
+  http_requests{group="canary", instance="1", job="app-server"} 800
+
+eval instant at 50m abs(-1 * http_requests{group="production",job="api-server"})
+  {group="production", instance="0", job="api-server"} 100
+  {group="production", instance="1", job="api-server"} 200

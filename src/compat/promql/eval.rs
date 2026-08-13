@@ -7,10 +7,10 @@ use crate::compat::backends::metrics::{
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::tenant::TenantContext;
 use promql_parser::parser::token::{
-    T_ADD, T_AVG, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LSS, T_LTE, T_MAX, T_MIN, T_MOD, T_MUL,
-    T_NEQ, T_POW, T_SUB, T_SUM,
+    T_ADD, T_AVG, T_BOTTOMK, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LAND, T_LOR, T_LSS, T_LTE,
+    T_LUNLESS, T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM, T_TOPK,
 };
-use promql_parser::parser::{Expr, LabelModifier};
+use promql_parser::parser::{Expr, LabelModifier, Offset};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,33 +135,62 @@ async fn eval_expr(
         Expr::StringLiteral(_) => Err(CompatError::unsupported("promql: string literal")),
         Expr::VectorSelector(vs) => {
             let matchers = extract_selector_matchers(vs)?;
+            let off = offset_shift_ms(&vs.offset);
+            let data_ms = eval_ms - off;
             let series =
-                fetch_series(backend, ctx, &matchers, eval_ms, default_lookback_ms()).await?;
-            Ok(EvalResult::Vector(instant_vector_at(&series, eval_ms)))
+                fetch_series(backend, ctx, &matchers, data_ms, default_lookback_ms()).await?;
+            let mut vector = instant_vector_at(&series, data_ms);
+            for s in &mut vector.samples {
+                s.timestamp_ms = eval_ms;
+            }
+            Ok(EvalResult::Vector(vector))
         }
         Expr::MatrixSelector(ms) => {
             let matchers = extract_selector_matchers(&ms.vs)?;
+            let off = offset_shift_ms(&ms.vs.offset);
+            let data_ms = eval_ms - off;
             let range_ms = matrix_range(ms).as_millis() as i64;
-            let series = fetch_series(backend, ctx, &matchers, eval_ms, range_ms.max(1)).await?;
+            let series = fetch_series(backend, ctx, &matchers, data_ms, range_ms.max(1)).await?;
             Ok(EvalResult::Matrix(MatrixResult {
-                series: truncate_to_window(series, eval_ms - range_ms, eval_ms),
+                series: truncate_to_window(series, data_ms - range_ms, data_ms),
             }))
         }
         Expr::Call(c) => eval_call(backend, ctx, c, eval_ms).await,
         Expr::Aggregate(a) => {
             let inner = Box::pin(eval_expr(backend, ctx, &a.expr, eval_ms, None)).await?;
             let vector = expect_vector(inner)?;
-            Ok(EvalResult::Vector(aggregate(
-                a.op.id(),
-                &a.modifier,
-                vector,
-                eval_ms,
-            )?))
+            let op = a.op.id();
+            if op == T_TOPK || op == T_BOTTOMK {
+                let param = a.param.as_ref().ok_or_else(|| {
+                    CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
+                })?;
+                let k_val = Box::pin(eval_expr(backend, ctx, param, eval_ms, None)).await?;
+                let k = expect_scalar_k(k_val)?;
+                Ok(EvalResult::Vector(aggregate_topk(
+                    k,
+                    op == T_BOTTOMK,
+                    &a.modifier,
+                    vector,
+                    eval_ms,
+                )?))
+            } else {
+                Ok(EvalResult::Vector(aggregate(
+                    op,
+                    &a.modifier,
+                    vector,
+                    eval_ms,
+                )?))
+            }
         }
         Expr::Binary(b) => {
             let lhs = Box::pin(eval_expr(backend, ctx, &b.lhs, eval_ms, None)).await?;
             let rhs = Box::pin(eval_expr(backend, ctx, &b.rhs, eval_ms, None)).await?;
-            eval_binary(b.op.id(), b.return_bool(), lhs, rhs, eval_ms)
+            let id = b.op.id();
+            if id == T_LAND || id == T_LOR || id == T_LUNLESS {
+                eval_set_op(id, lhs, rhs, eval_ms)
+            } else {
+                eval_binary(id, b.return_bool(), lhs, rhs, eval_ms)
+            }
         }
         Expr::Subquery(_) => Err(CompatError::unsupported("promql: subquery")),
         Expr::Extension(_) => Err(CompatError::unsupported("promql: extension")),
@@ -170,6 +199,15 @@ async fn eval_expr(
 
 fn default_lookback_ms() -> i64 {
     5 * 60 * 1000
+}
+
+/// Prometheus `offset` shifts the data timestamp: `metric offset 5m` reads data from 5m earlier.
+fn offset_shift_ms(offset: &Option<Offset>) -> i64 {
+    match offset {
+        None => 0,
+        Some(Offset::Pos(d)) => d.as_millis() as i64,
+        Some(Offset::Neg(d)) => -(d.as_millis() as i64),
+    }
 }
 
 async fn fetch_series(
@@ -233,43 +271,192 @@ async fn eval_call(
     eval_ms: i64,
 ) -> Result<EvalResult, CompatError> {
     let name = call.func.name.to_ascii_lowercase();
-    match name.as_str() {
-        "rate" | "irate" | "increase" => {
-            let arg = call.args.args.first().ok_or_else(|| {
-                CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
-            })?;
-            let matrix = match Box::pin(eval_expr(backend, ctx, arg, eval_ms, None)).await? {
-                EvalResult::Matrix(m) => m,
-                _ => {
-                    return Err(CompatError::new(
-                        CompatErrorCode::BadRequest,
-                        format!("{name}() requires range vector"),
-                    ))
-                }
-            };
-            let mut samples = Vec::new();
-            for s in matrix.series {
-                if let Some(v) = match name.as_str() {
-                    "rate" => counter_rate(&s.samples, false),
-                    "irate" => counter_rate(&s.samples, true),
-                    "increase" => counter_increase(&s.samples),
-                    _ => None,
-                } {
-                    let mut labels = s.labels;
+    if super::funcs::is_range_vector_fn(&name) {
+        let arg = call.args.args.first().ok_or_else(|| {
+            CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
+        })?;
+        let matrix = match Box::pin(eval_expr(backend, ctx, arg, eval_ms, None)).await? {
+            EvalResult::Matrix(m) => m,
+            _ => {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    format!("{name}() requires range vector"),
+                ))
+            }
+        };
+        let keep_name = name == "last_over_time";
+        let mut samples = Vec::new();
+        for s in matrix.series {
+            if let Some(v) = match name.as_str() {
+                "rate" => counter_rate(&s.samples, false),
+                "irate" => counter_rate(&s.samples, true),
+                "increase" => counter_increase(&s.samples),
+                "delta" => gauge_delta(&s.samples),
+                "idelta" => gauge_idelta(&s.samples),
+                "sum_over_time" => over_time_sum(&s.samples),
+                "avg_over_time" => over_time_avg(&s.samples),
+                "min_over_time" => over_time_min(&s.samples),
+                "max_over_time" => over_time_max(&s.samples),
+                "count_over_time" => Some(s.samples.len() as f64),
+                "last_over_time" => s.samples.last().map(|x| x.value),
+                _ => None,
+            } {
+                let mut labels = s.labels;
+                if !keep_name {
                     labels.remove("__name__");
-                    samples.push(InstantSample {
-                        labels,
-                        timestamp_ms: eval_ms,
-                        value: v,
-                    });
+                }
+                samples.push(InstantSample {
+                    labels,
+                    timestamp_ms: eval_ms,
+                    value: v,
+                });
+            }
+        }
+        return Ok(EvalResult::Vector(VectorResult { samples }));
+    }
+    if super::funcs::is_math_fn(&name) {
+        let arg = call.args.args.first().ok_or_else(|| {
+            CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
+        })?;
+        let to_nearest = if name == "round" && call.args.args.len() == 2 {
+            let n = Box::pin(eval_expr(backend, ctx, &call.args.args[1], eval_ms, None)).await?;
+            Some(expect_scalar_value(n)?)
+        } else {
+            None
+        };
+        let inner = Box::pin(eval_expr(backend, ctx, arg, eval_ms, None)).await?;
+        return apply_math_fn(&name, inner, to_nearest, eval_ms);
+    }
+    Err(CompatError::unsupported(format!("promql: function {name}")))
+}
+
+fn gauge_delta(samples: &[Sample]) -> Option<f64> {
+    if samples.len() < 2 {
+        return None;
+    }
+    Some(samples.last()?.value - samples.first()?.value)
+}
+
+fn gauge_idelta(samples: &[Sample]) -> Option<f64> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let a = &samples[samples.len() - 2];
+    let b = samples.last()?;
+    Some(b.value - a.value)
+}
+
+fn over_time_sum(samples: &[Sample]) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    Some(samples.iter().map(|s| s.value).sum())
+}
+
+fn over_time_avg(samples: &[Sample]) -> Option<f64> {
+    // Prometheus avg_over_time includes NaNs (NaN poisons the mean). OTLP/OpenMetrics
+    // ingest drops NaNs before storage, so lake fixtures usually never see them.
+    if samples.is_empty() {
+        return None;
+    }
+    Some(samples.iter().map(|s| s.value).sum::<f64>() / samples.len() as f64)
+}
+
+fn over_time_min(samples: &[Sample]) -> Option<f64> {
+    let mut out: Option<f64> = None;
+    for s in samples {
+        if s.value.is_nan() {
+            continue;
+        }
+        out = Some(match out {
+            None => s.value,
+            Some(m) => m.min(s.value),
+        });
+    }
+    out.or_else(|| samples.last().map(|s| s.value))
+}
+
+fn over_time_max(samples: &[Sample]) -> Option<f64> {
+    let mut out: Option<f64> = None;
+    for s in samples {
+        if s.value.is_nan() {
+            continue;
+        }
+        out = Some(match out {
+            None => s.value,
+            Some(m) => m.max(s.value),
+        });
+    }
+    out.or_else(|| samples.last().map(|s| s.value))
+}
+
+fn apply_math_fn(
+    name: &str,
+    value: EvalResult,
+    to_nearest: Option<f64>,
+    eval_ms: i64,
+) -> Result<EvalResult, CompatError> {
+    let map_one = |v: f64| -> f64 {
+        match name {
+            "abs" => v.abs(),
+            "ceil" => v.ceil(),
+            "floor" => v.floor(),
+            "round" => {
+                // Match Prometheus: math.Floor(v/nearest + 0.5) * nearest (ties toward +∞).
+                let nearest = to_nearest.unwrap_or(1.0);
+                if nearest == 0.0 {
+                    v
+                } else {
+                    (v / nearest + 0.5).floor() * nearest
                 }
             }
-            Ok(EvalResult::Vector(VectorResult { samples }))
+            _ => v,
         }
-        other => Err(CompatError::unsupported(format!(
-            "promql: function {other}"
+    };
+    match value {
+        EvalResult::Scalar { value, .. } => Ok(EvalResult::Scalar {
+            timestamp_ms: eval_ms,
+            value: map_one(value),
+        }),
+        EvalResult::Vector(v) => Ok(EvalResult::Vector(VectorResult {
+            samples: v
+                .samples
+                .into_iter()
+                .map(|mut s| {
+                    s.value = map_one(s.value);
+                    s.timestamp_ms = eval_ms;
+                    // Math funcs drop __name__.
+                    s.labels.remove("__name__");
+                    s
+                })
+                .collect(),
+        })),
+        EvalResult::Matrix(_) => Err(CompatError::unsupported(format!(
+            "promql: {name}() on matrix"
         ))),
     }
+}
+
+fn expect_scalar_value(value: EvalResult) -> Result<f64, CompatError> {
+    match value {
+        EvalResult::Scalar { value, .. } => Ok(value),
+        EvalResult::Vector(v) if v.samples.len() == 1 => Ok(v.samples[0].value),
+        _ => Err(CompatError::new(
+            CompatErrorCode::BadRequest,
+            "expected scalar",
+        )),
+    }
+}
+
+fn expect_scalar_k(value: EvalResult) -> Result<usize, CompatError> {
+    let v = expect_scalar_value(value)?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(CompatError::new(
+            CompatErrorCode::BadRequest,
+            "topk/bottomk k must be a non-negative finite number",
+        ));
+    }
+    Ok(v.floor() as usize)
 }
 
 /// Counter reset: treat decreases as resets (non-decreasing then drop).
@@ -363,6 +550,119 @@ fn aggregate(
         });
     }
     Ok(VectorResult { samples })
+}
+
+fn aggregate_topk(
+    k: usize,
+    bottom: bool,
+    modifier: &Option<LabelModifier>,
+    vector: VectorResult,
+    eval_ms: i64,
+) -> Result<VectorResult, CompatError> {
+    if k == 0 {
+        return Ok(VectorResult { samples: vec![] });
+    }
+    let mut groups: BTreeMap<BTreeMap<String, String>, Vec<InstantSample>> = BTreeMap::new();
+    for s in vector.samples {
+        let key = group_labels(&s.labels, modifier);
+        groups.entry(key).or_default().push(s);
+    }
+    let mut out = Vec::new();
+    for (_g, mut samples) in groups {
+        samples.sort_by(|a, b| {
+            // NaNs sort after all finite values for both topk and bottomk.
+            match (a.value.is_nan(), b.value.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => {
+                    if bottom {
+                        a.value.total_cmp(&b.value)
+                    } else {
+                        b.value.total_cmp(&a.value)
+                    }
+                }
+            }
+        });
+        samples.truncate(k.min(samples.len()));
+        for mut s in samples {
+            s.timestamp_ms = eval_ms;
+            out.push(s);
+        }
+    }
+    Ok(VectorResult { samples: out })
+}
+
+fn eval_set_op(
+    op: u16,
+    lhs: EvalResult,
+    rhs: EvalResult,
+    eval_ms: i64,
+) -> Result<EvalResult, CompatError> {
+    // PromQL set ops require instant vectors — do not promote scalars.
+    let lv = match lhs {
+        EvalResult::Vector(v) => v,
+        _ => {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "promql: set operators require instant vectors",
+            ))
+        }
+    };
+    let rv = match rhs {
+        EvalResult::Vector(v) => v,
+        _ => {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "promql: set operators require instant vectors",
+            ))
+        }
+    };
+    let rhs_keys: BTreeSet<_> = rv.samples.iter().map(|s| matching_key(&s.labels)).collect();
+    let mut out = Vec::new();
+    match op {
+        x if x == T_LAND => {
+            for s in lv.samples {
+                if rhs_keys.contains(&matching_key(&s.labels)) {
+                    let mut s = s;
+                    s.timestamp_ms = eval_ms;
+                    out.push(s);
+                }
+            }
+        }
+        x if x == T_LOR => {
+            let mut seen: BTreeSet<_> = BTreeSet::new();
+            for s in lv.samples {
+                seen.insert(matching_key(&s.labels));
+                let mut s = s;
+                s.timestamp_ms = eval_ms;
+                out.push(s);
+            }
+            for s in rv.samples {
+                let key = matching_key(&s.labels);
+                if !seen.contains(&key) {
+                    let mut s = s;
+                    s.timestamp_ms = eval_ms;
+                    out.push(s);
+                }
+            }
+        }
+        x if x == T_LUNLESS => {
+            for s in lv.samples {
+                if !rhs_keys.contains(&matching_key(&s.labels)) {
+                    let mut s = s;
+                    s.timestamp_ms = eval_ms;
+                    out.push(s);
+                }
+            }
+        }
+        _ => {
+            return Err(CompatError::unsupported(format!(
+                "promql: set operator token {op}"
+            )))
+        }
+    }
+    Ok(EvalResult::Vector(VectorResult { samples: out }))
 }
 
 fn group_labels(
@@ -1004,6 +1304,191 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn set_ops_reject_scalar_operands() {
+        // Literal `1 and …` fails at the PromQL parser; guard the eval path directly.
+        let lhs = EvalResult::Scalar {
+            timestamp_ms: 1_000,
+            value: 1.0,
+        };
+        let rhs = EvalResult::Vector(VectorResult { samples: vec![] });
+        let err = eval_set_op(T_LAND, lhs, rhs, 1_000).unwrap_err();
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
+        assert!(
+            err.message.contains("vector"),
+            "unexpected message: {}",
+            err.message
+        );
+
+        let err = eval_set_op(
+            T_LOR,
+            EvalResult::Vector(VectorResult { samples: vec![] }),
+            EvalResult::Scalar {
+                timestamp_ms: 1_000,
+                value: 2.0,
+            },
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
+        assert!(err.message.contains("vector"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn sum_over_time_and_topk_and_offset() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "http_requests".into());
+        labels.insert("job".into(), "api".into());
+        let mut labels_b = BTreeMap::new();
+        labels_b.insert("__name__".into(), "http_requests".into());
+        labels_b.insert("job".into(), "app".into());
+        let backend = MemBackend {
+            series: vec![
+                MetricSeries {
+                    labels,
+                    samples: vec![
+                        Sample {
+                            timestamp_ms: 0,
+                            value: 1.0,
+                        },
+                        Sample {
+                            timestamp_ms: 60_000,
+                            value: 2.0,
+                        },
+                        Sample {
+                            timestamp_ms: 120_000,
+                            value: 3.0,
+                        },
+                    ],
+                },
+                MetricSeries {
+                    labels: labels_b,
+                    samples: vec![
+                        Sample {
+                            timestamp_ms: 0,
+                            value: 10.0,
+                        },
+                        Sample {
+                            timestamp_ms: 60_000,
+                            value: 20.0,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let over = parse_promql("sum_over_time(http_requests[2m])").unwrap();
+        let EvalResult::Vector(v) = eval_instant(&backend, &ctx(), &over, 120_000)
+            .await
+            .unwrap()
+        else {
+            panic!("vector");
+        };
+        assert_eq!(v.samples.len(), 2);
+        let mut by_job: BTreeMap<String, f64> = BTreeMap::new();
+        for s in &v.samples {
+            by_job.insert(s.labels.get("job").unwrap().clone(), s.value);
+        }
+        assert_eq!(by_job.get("api"), Some(&6.0));
+        assert_eq!(by_job.get("app"), Some(&30.0));
+
+        let top = parse_promql("topk(1, http_requests)").unwrap();
+        let EvalResult::Vector(tv) = eval_instant(&backend, &ctx(), &top, 120_000).await.unwrap()
+        else {
+            panic!("vector");
+        };
+        assert_eq!(tv.samples.len(), 1);
+        assert_eq!(
+            tv.samples[0].labels.get("job").map(String::as_str),
+            Some("app")
+        );
+        assert!((tv.samples[0].value - 20.0).abs() < 1e-9);
+
+        let off = parse_promql("http_requests offset 1m").unwrap();
+        let EvalResult::Vector(ov) = eval_instant(&backend, &ctx(), &off, 120_000).await.unwrap()
+        else {
+            panic!("vector");
+        };
+        let api = ov
+            .samples
+            .iter()
+            .find(|s| s.labels.get("job").map(String::as_str) == Some("api"))
+            .unwrap();
+        assert!((api.value - 2.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn avg_over_time_nan_poisons_mean() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "x".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![
+                    Sample {
+                        timestamp_ms: 0,
+                        value: 1.0,
+                    },
+                    Sample {
+                        timestamp_ms: 60_000,
+                        value: f64::NAN,
+                    },
+                    Sample {
+                        timestamp_ms: 120_000,
+                        value: 3.0,
+                    },
+                ],
+            }],
+        };
+        let expr = parse_promql("avg_over_time(x[2m])").unwrap();
+        let EvalResult::Vector(v) = eval_instant(&backend, &ctx(), &expr, 120_000)
+            .await
+            .unwrap()
+        else {
+            panic!("vector");
+        };
+        assert_eq!(v.samples.len(), 1);
+        assert!(
+            v.samples[0].value.is_nan(),
+            "expected NaN mean, got {}",
+            v.samples[0].value
+        );
+    }
+
+    #[tokio::test]
+    async fn abs_ceil_floor_round_unit() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "x".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![Sample {
+                    timestamp_ms: 1_000,
+                    value: -1.5,
+                }],
+            }],
+        };
+        for (q, expect) in [
+            ("abs(x)", 1.5),
+            ("ceil(x)", -1.0),
+            ("floor(x)", -2.0),
+            // Prometheus round ties toward +∞: Floor(v + 0.5) → -1 for -1.5
+            ("round(x)", -1.0),
+        ] {
+            let expr = parse_promql(q).unwrap();
+            let EvalResult::Vector(v) = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap()
+            else {
+                panic!("vector for {q}");
+            };
+            assert_eq!(v.samples.len(), 1);
+            assert!(
+                (v.samples[0].value - expect).abs() < 1e-9,
+                "{q}: got {} want {expect}",
+                v.samples[0].value
+            );
+        }
     }
 
     #[tokio::test]

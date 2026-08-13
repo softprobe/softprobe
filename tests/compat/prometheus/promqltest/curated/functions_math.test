@@ -1,0 +1,25 @@
+# Derived from prometheus v2.54.1 style math function coverage
+# Copyright Softprobe — exercises abs/ceil/floor/round vs pinned Prom.
+
+load 5m
+  http_requests{job="api", instance="0"} -1.2 -0.5 1.5 2.7
+  half_tie{job="api"} -1.5
+
+eval instant at 15m abs(http_requests)
+  {job="api", instance="0"} 2.7
+
+eval instant at 15m ceil(http_requests)
+  {job="api", instance="0"} 3
+
+eval instant at 15m floor(http_requests)
+  {job="api", instance="0"} 2
+
+eval instant at 15m round(http_requests)
+  {job="api", instance="0"} 3
+
+eval instant at 15m round(http_requests, 0.5)
+  {job="api", instance="0"} 2.5
+
+# Prometheus Floor(v + 0.5): round(-1.5) → -1 (tie toward +∞)
+eval instant at 0 round(half_tie)
+  {job="api"} -1
