@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(k6_http_reqs[5m]))",
+          "expr": "sum by (job) (rate(k6_iterations[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "rate(k6_http_reqs[5m])",
+      "title": "rate(k6_iterations[5m])",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (irate(k6_http_reqs[5m]))",
+          "expr": "sum by (job) (irate(k6_iterations[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "irate(k6_http_reqs[5m])",
+      "title": "irate(k6_iterations[5m])",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (increase(k6_http_reqs[5m]))",
+          "expr": "sum by (job) (increase(k6_iterations[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "increase(k6_http_reqs[5m])",
+      "title": "increase(k6_iterations[5m])",
       "type": "timeseries"
     },
     {

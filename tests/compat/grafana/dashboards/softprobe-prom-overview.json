@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Live OpenTelemetry Demo traffic through Softprobe Prom API.",
+  "description": "Live OpenTelemetry Demo traffic. Prefer gauges / low-cardinality series for readable shapes.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(k6_http_reqs[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "k6_vus",
+          "legendFormat": "vus",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "load-generator HTTP reqs/s",
+      "title": "k6 VUs (gauge)",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "sum(rate(k6_iterations[5m]))",
+          "legendFormat": "iterations/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 virtual users",
+      "title": "k6 iterations rate",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "demo_ad_served_total",
+          "expr": "sum by (category) (rate(demo_ad_served_total[5m]))",
           "legendFormat": "{{category}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "ad served total",
+      "title": "ad served rate",
       "type": "timeseries"
     },
     {
@@ -221,7 +221,7 @@
           "refId": "A"
         }
       ],
-      "title": "HTTP server request duration count rate",
+      "title": "HTTP server duration count rate",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, sum by (job) (container_cpu_utilization))",
-          "legendFormat": "{{job}}",
+          "expr": "topk(5, sum by (container_name) (container_cpu_utilization))",
+          "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk container CPU",
+      "title": "topk container CPU by container_name",
       "type": "timeseries"
     }
   ],
@@ -285,5 +285,5 @@
   "timezone": "browser",
   "title": "Softprobe \u00b7 Overview (Astronomy Shop)",
   "uid": "softprobe-prom-overview",
-  "version": 1
+  "version": 2
 }
