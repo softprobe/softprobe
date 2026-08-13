@@ -100,7 +100,6 @@ Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `gr
 | Suite | Coverage |
 |-------|----------|
 | `tests/compat/prometheus/` | Auth / envelope fixtures |
-| `tests/integration/prometheus_phase1.rs` | Ingest → labels/series/query; two-tenant isolation; unsupported PromQL |
-| `tests/integration/prometheus_diff.rs` | Mini-diff vs pinned Prometheus (`#[ignore]` + `make test-prom-diff`) |
-| `tests/integration/prometheus_promqltest.rs` | Curated upstream promqltest vs pinned Prometheus (`make test-promqltest`) |
+| `tests/integration/prometheus/promqltest.rs` | Lake HTTP API contracts; curated upstream promqltest vs pinned Prometheus (`make test-promqltest`) |
+| `tests/integration/prometheus/diff.rs` | Mini-diff vs pinned Prometheus (`#[ignore]` + `make test-prom-diff`) |
 | Unit | matcher regex fail-loud, PromQL reject table, evaluator |

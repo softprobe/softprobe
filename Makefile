@@ -293,13 +293,13 @@ test: ensure-cache
 test-prom-diff: ensure-cache
 	@echo "prometheus mini-diff vs pinned prom/prometheus:v2.54.1 (Docker)..."
 	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-prom-diff"; exit 1)
-	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus_diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
 
 # Curated upstream promqltest subset vs pinned Prometheus (requires Docker).
 test-promqltest: ensure-cache
 	@echo "curated promqltest vs pinned prom/prometheus:v2.54.1 (Docker)..."
 	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-promqltest"; exit 1)
-	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus_promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
 
 # All Prometheus differential gates (mini-diff + curated promqltest).
 test-prom-compat: test-prom-diff test-promqltest
