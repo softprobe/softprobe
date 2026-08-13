@@ -1,5 +1,6 @@
-//! Phase 0 stub HTTP handlers for declared compatibility routes.
+//! Phase 0 stub HTTP handlers for declared Loki/Tempo compatibility routes.
 //!
+//! Prometheus routes live in [`crate::compat::prometheus`].
 //! Auth is enforced by [`crate::runtime_api::runtime_auth_middleware`].
 //! Scope-header mismatch is checked here after `TenantInfo` is available.
 //! Error bodies use protocol-native envelopes (see [`crate::compat::envelopes`]).
@@ -31,15 +32,6 @@ fn stub_unsupported(
     }
 }
 
-async fn stub_prometheus(tenant: Extension<TenantInfo>) -> Response {
-    stub_unsupported(
-        tenant.0.clone(),
-        ProtocolScope::Prometheus,
-        None,
-        "prometheus_api",
-    )
-}
-
 async fn stub_loki(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMap) -> Response {
     let scope = scope_header_value(&headers, LOKI_SCOPE_HEADER);
     stub_unsupported(tenant.0.clone(), ProtocolScope::Loki, scope, "loki_api")
@@ -50,18 +42,9 @@ async fn stub_tempo(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMa
     stub_unsupported(tenant.0.clone(), ProtocolScope::Tempo, scope, "tempo_api")
 }
 
-/// Routes that return `501 unsupported_feature` after auth + scope checks.
+/// Loki + Tempo routes that return `501 unsupported_feature` after auth + scope checks.
 pub fn compat_stub_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/v1/query", get(stub_prometheus).post(stub_prometheus))
-        .route(
-            "/api/v1/query_range",
-            get(stub_prometheus).post(stub_prometheus),
-        )
-        .route("/api/v1/labels", get(stub_prometheus))
-        .route("/api/v1/label/{name}/values", get(stub_prometheus))
-        .route("/api/v1/series", get(stub_prometheus))
-        .route("/api/v1/metadata", get(stub_prometheus))
         .route("/loki/api/v1/query", get(stub_loki))
         .route("/loki/api/v1/query_range", get(stub_loki))
         .route("/loki/api/v1/labels", get(stub_loki))

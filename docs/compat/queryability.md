@@ -27,7 +27,8 @@ tier that delays visibility after a successful ingest response.
 |------|----------|
 | Out-of-order timestamps within a batch | Stored as-is; query adapters sort deterministically for protocol responses |
 | Duplicate timestamps for the same series | Both samples retained; PromQL-style "last sample wins" is an adapter concern |
-| Counter resets | Preserved as raw samples; rate/increase semantics belong to PromQL evaluation |
+| Counter resets | Preserved as raw samples; PromQL `rate`/`irate`/`increase` treat a downward step as a reset (add previous value) |
+| `rate` / `increase` window math | Phase 1 uses first→last sample span within the selected range vector (no Prometheus range-boundary extrapolation). Dense series match the pinned oracle in `make test-prom-diff`; sparse-series extrapolation parity is deferred |
 | Late-arriving records (older than recent ingest) | Accepted and stored; no reject-by-staleness gate in Phase 0 |
 
 ## Empty / invalid tenant
@@ -40,6 +41,14 @@ tier that delays visibility after a successful ingest response.
 
 ## Limits (defaults)
 
-See `capability.v0.yaml` `limits` for maximum query range, series, and response
-size. Exceeding limits returns a stable limit-exceeded error class (implemented
-with adapters in later phases; Phase 0 documents the numbers).
+See `capability.v0.yaml` `limits` for defaults. Phase 1 Prometheus adapters enforce:
+
+| Limit | Behavior |
+|-------|----------|
+| `max_query_range_seconds` | `limit_exceeded` / Prom `bad_data` when both start and end are present and the span is too large |
+| `max_series` | Hard fail when series identities or distinct label values exceed the cap |
+| scan_cap (`max(max_series*10, 10000)`) | Full-window scan with `LIMIT scan_cap+1`; overrun → `limit_exceeded` (narrow the time window). Matchers are applied after the scan and do not reduce SQL load |
+| `query_timeout_seconds` | Deadline on `TenantContext`; overrun → `limit_exceeded` |
+| `max_response_bytes` | Enforced when encoding Prometheus success envelopes; overrun → `limit_exceeded` |
+
+Exceeding enforced limits returns a stable `limit_exceeded` Softprobe code (Prometheus `errorType: bad_data`).

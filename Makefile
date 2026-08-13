@@ -287,6 +287,11 @@ test: ensure-cache
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
 
+# Phase 1 mini differential vs pinned Prometheus (requires Docker).
+test-prom-diff: ensure-cache
+	@echo "prometheus mini-diff vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus_diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+
 test-e2e: ensure-cache check-infra
 	@set -e; \
 	backend="$(E2E_BACKEND)"; \

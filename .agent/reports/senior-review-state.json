@@ -1,0 +1,23 @@
+{
+  "status": "completed",
+  "needs_rereview": false,
+  "conversation_id": "615825ed-06b5-495e-beb4-9279e91140b0",
+  "verdict_initial": "REQUEST_CHANGES",
+  "verdict_after_disposition": "APPROVE_WITH_FIXES",
+  "blocking_fixed": [
+    "vector_vector_many_to_one_fail_loud",
+    "scan_cap_error_message_honesty",
+    "scan_and_distinct_cap_unit_tests",
+    "queryability_limits_phase1",
+    "variant_json_to_string_map_dry",
+    "handler_prepare_dry",
+    "url_encode_helper_fold",
+    "utf8_form_body_fail_loud",
+    "max_response_bytes_enforced"
+  ],
+  "advisory_deferred": [
+    "matcher_sql_pushdown",
+    "rate_increase_extrapolation"
+  ],
+  "artifact": ".agent/reports/latest-senior-review.md"
+}

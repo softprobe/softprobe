@@ -1,5 +1,7 @@
 //! Shared helpers for compatibility contract tests.
 
+pub mod prometheus;
+
 use softprobe_runtime::compat::capability::{
     parse_capability_yaml, CapabilityManifest, EMBEDDED_CAPABILITY_V0,
 };

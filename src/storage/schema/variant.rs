@@ -69,6 +69,30 @@ pub fn parse_projected_json_value(value: Value) -> Value {
     }
 }
 
+/// Flatten a JSON object (or JSON-text object) into string map entries for label projection.
+///
+/// Empty keys and JSON null values are dropped. Non-object input yields an empty map.
+pub fn variant_json_to_string_map(value: &Value) -> HashMap<String, String> {
+    let parsed = parse_projected_json_value(value.clone());
+    let map = match parsed {
+        Value::Object(map) => map,
+        _ => return HashMap::new(),
+    };
+    map.iter()
+        .filter_map(|(k, v)| {
+            if k.is_empty() {
+                return None;
+            }
+            let s = match v {
+                Value::Null => return None,
+                Value::String(t) => t.clone(),
+                other => other.to_string(),
+            };
+            Some((k.clone(), s))
+        })
+        .collect()
+}
+
 /// DuckLake SELECT list that casts staged JSON columns to VARIANT.
 ///
 /// Example: `SELECT * REPLACE (attributes::JSON::VARIANT AS attributes) FROM ...`

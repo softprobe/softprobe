@@ -45,6 +45,35 @@ impl Default for QueryLimits {
     }
 }
 
+impl QueryLimits {
+    /// Shared start/end window checks for Prom discovery + query handlers and backends.
+    pub fn validate_time_range_ms(
+        &self,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> Result<(), CompatError> {
+        if let (Some(start), Some(end)) = (start_ms, end_ms) {
+            if end < start {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "end must be >= start",
+                ));
+            }
+            let range_secs = ((end - start) / 1000).max(0) as u64;
+            if range_secs > self.max_query_range_seconds {
+                return Err(CompatError::new(
+                    CompatErrorCode::LimitExceeded,
+                    format!(
+                        "query range {range_secs}s exceeds max_query_range_seconds {}",
+                        self.max_query_range_seconds
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Tenant-bound request context. Handlers must not accept tenant ids from
 /// query parameters or bodies — only from this type.
 #[derive(Debug, Clone)]
