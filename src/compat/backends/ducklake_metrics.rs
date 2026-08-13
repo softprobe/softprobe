@@ -1,7 +1,7 @@
 //! DuckLake-backed Prometheus metrics discovery + sample fetch.
 
 use crate::compat::backends::metrics::{
-    labels_match, labels_match_any, LabelMatcher, MetricMetadata, MetricSeries,
+    labels_match, labels_match_any, LabelMatcher, MatcherOp, MetricMetadata, MetricSeries,
     MetricsDiscoveryRequest, MetricsQueryBackend, MetricsQueryRequest, Sample,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
@@ -106,6 +106,7 @@ impl DuckLakeMetricsBackend {
         start_ms: Option<i64>,
         end_ms: Option<i64>,
         include_fidelity: bool,
+        matchers: &[LabelMatcher],
     ) -> Result<Vec<RawMetricRow>, CompatError> {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
@@ -113,6 +114,7 @@ impl DuckLakeMetricsBackend {
         // Fetch one past the cap so we can fail loud instead of silently truncating.
         let fetch_limit = cap.saturating_add(1);
         let time = Self::time_predicates(start_ms, end_ms);
+        let matcher_sql = Self::matcher_predicates(matchers);
         let fidelity = if include_fidelity {
             ", metric_type, count, sum, bucket_counts, explicit_bounds, quantiles"
         } else {
@@ -125,7 +127,7 @@ impl DuckLakeMetricsBackend {
              CAST((epoch(timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
              value{fidelity} \
              FROM union_metrics \
-             WHERE 1=1{time} \
+             WHERE 1=1{time}{matcher_sql} \
              ORDER BY timestamp DESC \
              LIMIT {fetch_limit}"
         );
@@ -135,6 +137,46 @@ impl DuckLakeMetricsBackend {
             return Err(scan_cap_exceeded(cap));
         }
         Ok(parse_raw_rows(&result))
+    }
+
+    /// Push common equality matchers into SQL to avoid full-window table scans.
+    ///
+    /// Only `__name__` and `job` (OTel `service.name`) — other matchers still
+    /// filter after Prometheus projection in Rust.
+    ///
+    /// Classic histogram/summary selectors use expanded Prometheus names
+    /// (`{base}_bucket` / `_sum` / `_count`) while DuckLake stores the OTel
+    /// base `metric_name`. Strip those suffixes before comparing so pushdown
+    /// does not empty the scan.
+    fn matcher_predicates(matchers: &[LabelMatcher]) -> String {
+        let mut parts = Vec::new();
+        for m in matchers {
+            if m.op != MatcherOp::Eq {
+                continue;
+            }
+            if m.name == "__name__" {
+                let storage_name = classic_base_metric_name(&m.value);
+                let lit = sql_string_literal(storage_name);
+                // sanitize_label_name replaces non [A-Za-z0-9_] with '_'; digit-leading names get a '_'.
+                parts.push(format!(
+                    "(metric_name = {lit} OR regexp_replace(metric_name, '[^A-Za-z0-9_]', '_', 'g') = {lit} \
+                     OR ('_' || regexp_replace(metric_name, '[^A-Za-z0-9_]', '_', 'g')) = {lit})"
+                ));
+            } else if m.name == "job" {
+                let lit = sql_string_literal(&m.value);
+                parts.push(format!(
+                    "(json_extract_string(CAST(resource_attributes AS JSON), '$.\"service.name\"') = {lit} \
+                     OR json_extract_string(CAST(attributes AS JSON), '$.\"service.name\"') = {lit} \
+                     OR json_extract_string(CAST(attributes AS JSON), '$.job') = {lit} \
+                     OR json_extract_string(CAST(resource_attributes AS JSON), '$.job') = {lit})"
+                ));
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", parts.join(" AND "))
+        }
     }
 
     fn project_row(&self, ctx: &TenantContext, row: &RawMetricRow) -> BTreeMap<String, String> {
@@ -227,7 +269,13 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         request: MetricsQueryRequest,
     ) -> Result<Vec<MetricSeries>, CompatError> {
         let rows = self
-            .scan_rows(ctx, request.start_ms, request.end_ms, true)
+            .scan_rows(
+                ctx,
+                request.start_ms,
+                request.end_ms,
+                true,
+                &request.matchers,
+            )
             .await?;
         self.expand_series(ctx, &rows, &request.matchers)
     }
@@ -237,7 +285,16 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         ctx: &TenantContext,
         req: &MetricsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
-        let rows = self.scan_rows(ctx, req.start_ms, req.end_ms, true).await?;
+        // Discovery may OR across match[] groups — pull the time window without
+        // over-filtering in SQL; matcher groups still apply in Rust.
+        let flat: Vec<LabelMatcher> = if req.matchers.len() == 1 {
+            req.matchers[0].clone()
+        } else {
+            Vec::new()
+        };
+        let rows = self
+            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .await?;
         let mut names = BTreeSet::new();
         let mut any = false;
         for row in &rows {
@@ -264,7 +321,14 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         name: &str,
         req: &MetricsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
-        let rows = self.scan_rows(ctx, req.start_ms, req.end_ms, true).await?;
+        let flat: Vec<LabelMatcher> = if req.matchers.len() == 1 {
+            req.matchers[0].clone()
+        } else {
+            Vec::new()
+        };
+        let rows = self
+            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .await?;
         let mut values = BTreeSet::new();
         for row in &rows {
             let expansions = expand_classic_series(row, &self.project_row(ctx, row));
@@ -287,7 +351,14 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         ctx: &TenantContext,
         req: &MetricsDiscoveryRequest,
     ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
-        let rows = self.scan_rows(ctx, req.start_ms, req.end_ms, true).await?;
+        let flat: Vec<LabelMatcher> = if req.matchers.len() == 1 {
+            req.matchers[0].clone()
+        } else {
+            Vec::new()
+        };
+        let rows = self
+            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .await?;
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
         for row in &rows {
@@ -551,6 +622,23 @@ fn scan_cap_exceeded(cap: usize) -> CompatError {
     )
 }
 
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Map a Prometheus `__name__` matcher to the DuckLake storage `metric_name`
+/// identity used for SQL pushdown (classic histogram/summary suffixes removed).
+fn classic_base_metric_name(prom_name: &str) -> &str {
+    for suffix in ["_bucket", "_sum", "_count"] {
+        if let Some(base) = prom_name.strip_suffix(suffix) {
+            if !base.is_empty() {
+                return base;
+            }
+        }
+    }
+    prom_name
+}
+
 fn enforce_distinct_cap(count: usize, max: usize, what: &str) -> Result<(), CompatError> {
     if count > max {
         return Err(CompatError::new(
@@ -659,6 +747,53 @@ fn parse_f64_list(value: &Value) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matcher_predicates_push_name_and_job() {
+        let sql = DuckLakeMetricsBackend::matcher_predicates(&[
+            LabelMatcher {
+                name: "__name__".into(),
+                op: MatcherOp::Eq,
+                value: "http_requests".into(),
+            },
+            LabelMatcher {
+                name: "job".into(),
+                op: MatcherOp::Eq,
+                value: "checkout".into(),
+            },
+            LabelMatcher {
+                name: "instance".into(),
+                op: MatcherOp::Re,
+                value: ".*".into(),
+            },
+        ]);
+        assert!(sql.contains("regexp_replace(metric_name"));
+        assert!(sql.contains("service.name"));
+        assert!(sql.contains("'checkout'"));
+        assert!(!sql.contains("instance"));
+    }
+
+    #[test]
+    fn matcher_predicates_strip_classic_histogram_suffix() {
+        let sql = DuckLakeMetricsBackend::matcher_predicates(&[LabelMatcher {
+            name: "__name__".into(),
+            op: MatcherOp::Eq,
+            value: "http_server_duration_bucket".into(),
+        }]);
+        assert!(
+            sql.contains("'http_server_duration'"),
+            "pushdown must use base storage name, got {sql}"
+        );
+        assert!(
+            !sql.contains("'http_server_duration_bucket'"),
+            "must not filter storage metric_name by expanded Prom name"
+        );
+        assert_eq!(
+            classic_base_metric_name("http_server_duration_sum"),
+            "http_server_duration"
+        );
+        assert_eq!(classic_base_metric_name("http_requests"), "http_requests");
+    }
 
     #[test]
     fn histogram_expansion_cumulative_and_inf() {

@@ -1,0 +1,46 @@
+# Manual Grafana inspection stack (Prom-only).
+# Prefer: make grafana-up / make grafana-down (builds Softprobe, seeds metrics).
+#
+# Softprobe runtime runs on the host at :8090 (SOFTPROBE_URL for Grafana).
+#
+# Direct compose (Softprobe already running):
+#   docker compose -f tests/compat/grafana/docker-compose.manual.yml up -d
+#   open http://127.0.0.1:3000  (admin / admin)
+
+services:
+  auth-mock:
+    image: wiremock/wiremock:3.9.2
+    container_name: thelake-grafana-auth-mock
+    command: ["--port", "8080", "--global-response-templating"]
+    volumes:
+      - ../../mocks/auth:/home/wiremock:ro
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: thelake-grafana-manual
+    depends_on:
+      auth-mock:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: light
+      GF_LOG_LEVEL: info
+      # Reach Softprobe on the host (Linux docker).
+      SOFTPROBE_URL: http://host.docker.internal:8090
+      SOFTPROBE_API_KEY: local-dev-key
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro

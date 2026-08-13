@@ -25,6 +25,10 @@ Rules:
 - SQL reads the rewritten `union_metrics` relation (not bare `metrics`).
 - Unsupported AST → `unsupported_feature` via `compat::envelopes`.
 - Scan / series / label-value caps fail loud (`limit_exceeded`); invalid matcher regex → `bad_data`.
+- **`query_range` / PromQL range eval:** one DuckDB fetch per unique selector
+  (window = `[start − lookback|range − offset, end − offset]`), then evaluate
+  every `step` in memory. Do **not** issue SQL per step (Grafana refresh was
+  O(steps) otherwise). Equality pushdown for `__name__` / `job` reduces scanned rows.
 
 ---
 
@@ -38,6 +42,7 @@ src/compat/backends/metrics.rs   # MetricsQueryBackend + matchers
 ```
 
 Wiring: `api/mod.rs` merges `prometheus_routes()`; Loki/Tempo remain stubs.
+Manual Grafana: `make grafana-up` (see `tests/compat/grafana/README.md`).
 
 ---
 
@@ -65,7 +70,7 @@ Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `gr
 |-------|----------|
 | `max_query_range_seconds` | `QueryLimits::validate_time_range_ms` (handlers + backend) |
 | `max_series` | Hard fail on series / distinct label values over cap |
-| scan_cap (`max(max_series*10, 10000)`) | `LIMIT scan_cap+1` over the time window (or full table if unbounded); if overrun → `limit_exceeded`. Success means the scan returned every row in scope (matchers applied in-memory after a complete scan). |
+| scan_cap (`max(max_series*10, 10000)`) | `LIMIT scan_cap+1` over the time window (or full table if unbounded); equality `__name__` / `job` matchers are pushed into SQL (classic `_bucket`/`_sum`/`_count` stripped to base storage name). Remaining matchers apply in-memory after projection. Overrun → `limit_exceeded`. |
 | `query_timeout` | Deadline via `TenantContext::remaining()` |
 | `max_response_bytes` | Enforced on success envelope encode; overrun → `limit_exceeded` |
 

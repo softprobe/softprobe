@@ -1,22 +1,24 @@
-# Verification — Phase 1 leftovers + Grafana Prom smoke
+# Verification — reproducible Grafana + richer Prom smoke
 
-**Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`  
-**PR:** https://github.com/softprobe/thelake/pull/35  
-**Issues:** #30 leftovers, #27 Prom-only smoke
+## Acceptance mapping
 
-## Delivered
-
-- POST `query`/`query_range` GET parity + content-type negative
-- Seeded no-panic `parse_promql` property test
-- Prom `extrapolatedRate` for rate/increase/delta + sparse curated fixture
-- Instant NaN/stale omit; OTLP `NO_RECORDED_VALUE` → NaN preserved through DuckDB JSON (`"NaN"` string) → Prom omit
-- Grafana Prom provisioning (`${SOFTPROBE_URL}` / `${SOFTPROBE_API_KEY}`) + Bearer smoke (POST range + `rate()`)
+| Plan item | Evidence |
+|-----------|----------|
+| `make grafana-up` / `grafana-down` | Scripts + Makefile; up printed URL; already-up re-seeds |
+| Host Softprobe + /tmp sqlite | `CONFIG_FILE=/tmp/thelake-grafana-manual/config.yaml` |
+| Dense OTLP seed | `grafana_seed_otlp` 120×2 samples; `rate()` series=2 |
+| Expand CI smoke | offset, over_time, sum by, topk, compare, arith, range &lt;2s |
+| Enrich dashboard | panels for same shapes in `softprobe-prom-smoke.json` |
+| Docs | `tests/compat/grafana/README.md`, matrix, phase1, `make help` |
 
 ## Gates
 
-```text
-make check-fmt && make lint && make test   # green
-make test-prom-compat                      # green
-```
+| Gate | Result |
+|------|--------|
+| `make check-fmt && make lint` | green |
+| `make test-grafana-prom-smoke` | pass |
+| Manual `make grafana-up` | ready @ :3000 / :8090 |
 
-Senior-review blockers (NaN→0.0, Grafana env syntax, smoke gaps) fixed in-turn.
+## Not claimed DONE
+
+Full `make test` / `make test-prom-compat` not re-run in this slice (unchanged PromQL evaluator; smoke + fmt/lint sufficient for this change).

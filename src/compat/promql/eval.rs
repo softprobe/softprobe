@@ -2,10 +2,11 @@
 
 use super::parse::{extract_selector_matchers, matrix_range};
 use crate::compat::backends::metrics::{
-    MetricSeries, MetricsQueryBackend, MetricsQueryRequest, Sample,
+    labels_match, LabelMatcher, MetricSeries, MetricsQueryBackend, MetricsQueryRequest, Sample,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::tenant::TenantContext;
+use async_trait::async_trait;
 use promql_parser::parser::token::{
     T_ADD, T_AVG, T_BOTTOMK, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LAND, T_LOR, T_LSS, T_LTE,
     T_LUNLESS, T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM, T_TOPK,
@@ -49,6 +50,10 @@ pub async fn eval_instant(
 }
 
 /// Evaluate a range query from start..end at `step_ms`.
+///
+/// Fetches each selector once over `[start - lookback/range, end]` from DuckDB,
+/// then evaluates every step in memory. Grafana `query_range` uses many steps
+/// (e.g. 1h @ 15s ≈ 240); a per-step SQL scan made refreshes multi‑second.
 pub async fn eval_range(
     backend: &dyn MetricsQueryBackend,
     ctx: &TenantContext,
@@ -70,11 +75,13 @@ pub async fn eval_range(
         ));
     }
 
+    let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms).await?;
+
     // Matrix output: for each series identity, collect (ts, value) at each step.
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
     let mut t = start_ms;
     while t <= end_ms {
-        let instant = eval_expr(backend, ctx, expr, t, None).await?;
+        let instant = eval_expr(&prefetch, ctx, expr, t, None).await?;
         match instant {
             EvalResult::Vector(v) => {
                 for s in v.samples {
@@ -112,6 +119,191 @@ pub async fn eval_range(
             .map(|(labels, samples)| MetricSeries { labels, samples })
             .collect(),
     }))
+}
+
+/// One selector's storage window needed across a range evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectorNeed {
+    matchers: Vec<LabelMatcher>,
+    /// Samples needed before each eval timestamp (lookback or `[range]`).
+    window_ms: i64,
+    /// Prometheus `offset` shift applied to the eval timestamp before the window.
+    offset_ms: i64,
+}
+
+/// In-memory backend fed by a single DuckDB fetch per unique matcher set.
+struct PrefetchBackend {
+    /// Matcher list → series covering the full range window (samples may be wider
+    /// than a single step request; `query_range` truncates per call).
+    entries: Vec<(Vec<LabelMatcher>, Vec<MetricSeries>)>,
+}
+
+impl PrefetchBackend {
+    async fn load(
+        backend: &dyn MetricsQueryBackend,
+        ctx: &TenantContext,
+        expr: &Expr,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Self, CompatError> {
+        let mut needs = Vec::new();
+        collect_selector_needs(expr, &mut needs)?;
+
+        // Merge overlapping fetch windows for identical matcher sets.
+        let mut merged: Vec<(Vec<LabelMatcher>, i64, i64)> = Vec::new();
+        for need in needs {
+            let window = need.window_ms.max(1);
+            let fetch_start = start_ms
+                .saturating_sub(need.offset_ms)
+                .saturating_sub(window);
+            let fetch_end = end_ms.saturating_sub(need.offset_ms);
+            if let Some((_, s, e)) = merged.iter_mut().find(|(m, _, _)| m == &need.matchers) {
+                *s = (*s).min(fetch_start);
+                *e = (*e).max(fetch_end);
+            } else {
+                merged.push((need.matchers, fetch_start, fetch_end));
+            }
+        }
+
+        let mut entries = Vec::with_capacity(merged.len());
+        for (matchers, fetch_start, fetch_end) in merged {
+            let series = backend
+                .query_range(
+                    ctx,
+                    MetricsQueryRequest {
+                        start_ms: Some(fetch_start),
+                        end_ms: Some(fetch_end),
+                        matchers: matchers.clone(),
+                    },
+                )
+                .await?;
+            entries.push((matchers, series));
+        }
+
+        Ok(Self { entries })
+    }
+}
+
+#[async_trait]
+impl MetricsQueryBackend for PrefetchBackend {
+    async fn query_range(
+        &self,
+        _ctx: &TenantContext,
+        request: MetricsQueryRequest,
+    ) -> Result<Vec<MetricSeries>, CompatError> {
+        let Some((_, series)) = self.entries.iter().find(|(m, _)| m == &request.matchers) else {
+            // Prefetch collect must cover every selector; a miss is a bug, not an
+            // empty tenant (constitution fail-fast — do not reintroduce N× SQL).
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "promql range prefetch miss: selector was not prefetched",
+            ));
+        };
+        let start = request.start_ms.unwrap_or(i64::MIN);
+        let end = request.end_ms.unwrap_or(i64::MAX);
+        Ok(series
+            .iter()
+            .filter_map(|s| {
+                if !labels_match(&s.labels, &request.matchers).ok()? {
+                    return None;
+                }
+                let samples: Vec<Sample> = s
+                    .samples
+                    .iter()
+                    .filter(|sm| sm.timestamp_ms >= start && sm.timestamp_ms <= end)
+                    .cloned()
+                    .collect();
+                if samples.is_empty() {
+                    None
+                } else {
+                    Some(MetricSeries {
+                        labels: s.labels.clone(),
+                        samples,
+                    })
+                }
+            })
+            .collect())
+    }
+
+    async fn label_names(
+        &self,
+        _: &TenantContext,
+        _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+    ) -> Result<Vec<String>, CompatError> {
+        Err(CompatError::unsupported("prefetch: label_names"))
+    }
+
+    async fn label_values(
+        &self,
+        _: &TenantContext,
+        _: &str,
+        _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+    ) -> Result<Vec<String>, CompatError> {
+        Err(CompatError::unsupported("prefetch: label_values"))
+    }
+
+    async fn series(
+        &self,
+        _: &TenantContext,
+        _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+    ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+        Err(CompatError::unsupported("prefetch: series"))
+    }
+
+    async fn metadata(
+        &self,
+        _: &TenantContext,
+        _: Option<&str>,
+        _: Option<usize>,
+        _: Option<i64>,
+        _: Option<i64>,
+    ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError> {
+        Err(CompatError::unsupported("prefetch: metadata"))
+    }
+}
+
+fn collect_selector_needs(expr: &Expr, out: &mut Vec<SelectorNeed>) -> Result<(), CompatError> {
+    match expr {
+        Expr::Paren(p) => collect_selector_needs(&p.expr, out),
+        Expr::Unary(u) => collect_selector_needs(&u.expr, out),
+        Expr::NumberLiteral(_) | Expr::StringLiteral(_) => Ok(()),
+        Expr::VectorSelector(vs) => {
+            out.push(SelectorNeed {
+                matchers: extract_selector_matchers(vs)?,
+                window_ms: default_lookback_ms(),
+                offset_ms: offset_shift_ms(&vs.offset),
+            });
+            Ok(())
+        }
+        Expr::MatrixSelector(ms) => {
+            out.push(SelectorNeed {
+                matchers: extract_selector_matchers(&ms.vs)?,
+                window_ms: matrix_range(ms).as_millis() as i64,
+                offset_ms: offset_shift_ms(&ms.vs.offset),
+            });
+            Ok(())
+        }
+        Expr::Call(c) => {
+            for arg in &c.args.args {
+                collect_selector_needs(arg, out)?;
+            }
+            Ok(())
+        }
+        Expr::Aggregate(a) => {
+            collect_selector_needs(&a.expr, out)?;
+            if let Some(param) = &a.param {
+                collect_selector_needs(param, out)?;
+            }
+            Ok(())
+        }
+        Expr::Binary(b) => {
+            collect_selector_needs(&b.lhs, out)?;
+            collect_selector_needs(&b.rhs, out)?;
+            Ok(())
+        }
+        Expr::Subquery(_) => Err(CompatError::unsupported("promql: subquery")),
+        Expr::Extension(_) => Err(CompatError::unsupported("promql: extension")),
+    }
 }
 
 async fn eval_expr(
@@ -1077,6 +1269,172 @@ mod tests {
             QueryLimits::default(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn range_eval_fetches_storage_once_per_selector() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingBackend {
+            inner: MemBackend,
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CountingBackend {
+            async fn query_range(
+                &self,
+                ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.inner.query_range(ctx, request).await
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "http_requests".into());
+        labels.insert("job".into(), "checkout".into());
+        let mut samples = Vec::new();
+        for i in 0..120 {
+            samples.push(Sample {
+                timestamp_ms: i * 15_000,
+                value: i as f64,
+            });
+        }
+        let backend = CountingBackend {
+            inner: MemBackend {
+                series: vec![MetricSeries { labels, samples }],
+            },
+            calls: AtomicUsize::new(0),
+        };
+        let expr = parse_promql("rate(http_requests[5m])").unwrap();
+        // 240 steps — naive eval would call storage 240 times.
+        let result = eval_range(&backend, &ctx(), &expr, 0, 3_600_000, 15_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.calls.load(Ordering::Relaxed),
+            1,
+            "range eval must prefetch once, not per step"
+        );
+        match result {
+            EvalResult::Matrix(m) => assert!(!m.series.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn range_eval_with_offset_prefetches_shifted_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CaptureBackend {
+            calls: AtomicUsize,
+            last_start: std::sync::Mutex<Option<i64>>,
+            last_end: std::sync::Mutex<Option<i64>>,
+            series: Vec<MetricSeries>,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CaptureBackend {
+            async fn query_range(
+                &self,
+                _ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                *self.last_start.lock().unwrap() = request.start_ms;
+                *self.last_end.lock().unwrap() = request.end_ms;
+                Ok(self.series.clone())
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "http_requests".into());
+        let backend = CaptureBackend {
+            calls: AtomicUsize::new(0),
+            last_start: std::sync::Mutex::new(None),
+            last_end: std::sync::Mutex::new(None),
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![Sample {
+                    timestamp_ms: 0,
+                    value: 1.0,
+                }],
+            }],
+        };
+        let expr = parse_promql("http_requests offset 1m").unwrap();
+        // start=120_000, end=180_000, lookback=5m, offset=1m
+        // fetch_start = 120000 - 60000 - 300000 = -240000
+        // fetch_end = 180000 - 60000 = 120000
+        let _ = eval_range(&backend, &ctx(), &expr, 120_000, 180_000, 15_000)
+            .await
+            .unwrap();
+        assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(*backend.last_start.lock().unwrap(), Some(-240_000));
+        assert_eq!(*backend.last_end.lock().unwrap(), Some(120_000));
     }
 
     #[tokio::test]

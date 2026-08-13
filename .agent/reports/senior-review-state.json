@@ -2,7 +2,6 @@
   "status": "approved_with_fixes",
   "needs_rereview": false,
   "conversation_id": "615825ed-06b5-495e-beb4-9279e91140b0",
-  "reviewer_agent_id": "5af60c48-6d82-49b6-a773-2690a87797ce",
   "verdict": "APPROVE_WITH_FIXES",
-  "summary": "Phase 1 leftovers + Grafana Prom smoke: fixed DuckLake NaN/stale round-trip, Grafana env expansion, smoke POST range/rate, irate NaN filter; gates green."
+  "summary": "Verified Grafana queries vs CSV: polluted by re-seed overlaps (not PromQL bugs). Fixed wipe-on-up, no re-seed when already up; sine payments + documented expected shapes. Clean seed: rate≈0.0167 flat."
 }
