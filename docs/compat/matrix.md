@@ -2,7 +2,7 @@
 
 **Status:** Approved for Phase 0  
 **Version:** `compat.v0`  
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-13
 
 OpenTelemetry is the **canonical write path**. Prometheus, Loki, and Tempo
 compatibility is **query-only**. Write, push, remote_write, tail, alerting, and
@@ -29,43 +29,55 @@ Attribute projections: [`projections.md`](projections.md).
 
 ## Prometheus HTTP API (query-only)
 
-Base path: `/api/v1` (Prometheus-compatible). Phase 0 registers auth + stub;
-Phase 1 implements the supported subset.
+Base path: `/api/v1` (Prometheus-compatible). Phase 1 implements discovery and
+a declared PromQL subset; see [`phase1-prometheus.md`](phase1-prometheus.md).
 
-| Method | Path | Phase 0 | Phase 1 target |
-|--------|------|---------|----------------|
-| GET\|POST | `/api/v1/query` | stub `unsupported_feature` | supported subset |
-| GET\|POST | `/api/v1/query_range` | stub | supported subset |
-| GET | `/api/v1/labels` | stub | supported |
-| GET | `/api/v1/label/{name}/values` | stub | supported |
-| GET | `/api/v1/series` | stub | supported |
-| GET | `/api/v1/metadata` | stub | supported |
+| Method | Path | Phase 1 status |
+|--------|------|----------------|
+| GET\|POST | `/api/v1/query` | PromQL subset (Slice B) |
+| GET\|POST | `/api/v1/query_range` | PromQL subset (Slice B) |
+| GET | `/api/v1/labels` | **supported** |
+| GET | `/api/v1/label/{name}/values` | **supported** |
+| GET | `/api/v1/series` | **supported** |
+| GET | `/api/v1/metadata` | **supported** |
 
 **Out of scope:** remote write/read, admin, TSDB, alerts, rules, targets.
 
 **Headers:** `Authorization` required (`supported`). Optional Grafana org headers ignored for tenancy (`ignored`).
 
-**Error envelope (Phase 0):** `{ "status":"error", "errorType":"execution", "error":"unsupported_feature: ..." }` (`application/json`).  
-**Success envelope (Phase 1 target):** `{ "status":"success", "data": { "resultType", "result" } }` — see `tests/compat/fixtures/prometheus_success_minimal.json`.
+**Error envelope:** `{ "status":"error", "errorType":"execution"|"bad_data", "error":"unsupported_feature: ..." }`.  
+**Success (discovery):** `{ "status":"success", "data": ... }` (labels/values = string array; series = label objects; metadata = name → `[{type,help,unit}]`).  
+**Success (query):** `{ "status":"success", "data": { "resultType", "result" } }`.
+
+### PromQL subset (Phase 1)
+
+| Supported | Explicit unsupported |
+|-----------|----------------------|
+| Vector selectors + matchers `=` `!=` `=~` `!~` | Native/exponential histogram functions |
+| Instant + range vectors; `offset` modifier | Subqueries, `@` modifier |
+| Aggregations `sum`/`min`/`max`/`avg`/`count`/`topk`/`bottomk` + `by`/`without` | Other aggregations (`quantile`, `stddev`, …) |
+| Arithmetic + comparison (filtering) + set ops `and`/`or`/`unless` (default matching = all labels except `__name__`, matching Prometheus `signatureFunc`) | Explicit `on()`/`ignoring()`; `group_left`/`group_right` |
+| `rate`, `irate`, `increase`, `delta`, `idelta` | Full function catalog; recording rules / alerts |
+| `sum|avg|min|max|count|last_over_time` | |
+| `abs`, `ceil`, `floor`, `round` | |
+
+Classic histogram fidelity columns are exposed as `_bucket`/`_sum`/`_count` series for selectors; histogram *functions* stay unsupported. Summary series expose `_sum`/`_count` plus the base name; per-quantile `_quantile{quantile=…}` expansion is **not** implemented in Phase 1 (documented unsupported).
 
 ### Prometheus endpoint parameters
-
-Status values describe the **declared Phase N contract** (what adapters will do).
-Phase 0 stubs authenticate and return the error envelope without parsing these
-params (`ignored` at runtime today).
 
 Status legend: `supported` | `ignored` | `unsupported_feature` | `phase_1`.
 
 | Route | Param / field | In | Status | Notes |
 |-------|---------------|----|--------|-------|
-| `query` / `query_range` | `query` | query/body | `unsupported_feature` | PromQL; Phase 0 stubs ignore body |
-| `query` / `query_range` | `time` / `start` / `end` / `step` | query/body | `unsupported_feature` | |
+| `query` / `query_range` | `query` | query/body | `phase_1` | Declared PromQL subset |
+| `query` / `query_range` | `time` / `start` / `end` / `step` | query/body | `phase_1` | |
 | `query` / `query_range` | `timeout` | query/body | `ignored` | Server uses `limits.query_timeout_seconds` |
 | `query` / `query_range` | `tenant_id` | query/body | `ignored` | Must not change tenant scope |
-| `labels` / `label/{name}/values` / `series` | `match[]` / `start` / `end` | query | `unsupported_feature` | |
-| `metadata` | `metric` / `limit` | query | `unsupported_feature` | |
-| all | response `status`/`data` | out | `phase_1` | Stub returns error envelope only |
-| all | response `errorType`/`error` | out | `supported` | Phase 0 stub |
+| `labels` / `label/{name}/values` / `series` | `match[]` / `start` / `end` | query | `supported` | |
+| `metadata` | `metric` / `limit` | query | `supported` | |
+| discovery | response `status`/`data` | out | `supported` | |
+| query | response `resultType`/`result` | out | `phase_1` | |
+| all | response `errorType`/`error` | out | `supported` | |
 
 ## Loki HTTP API (query-only)
 
@@ -134,7 +146,11 @@ Phase 0 stubs do not parse path/query params beyond routing (declared Phase 3 co
 ## Grafana
 
 Phase 4 validates native Prometheus/Loki/Tempo datasources against the lake.
-Phase 0 only provisions placeholder docs under `tests/compat/grafana/`.
+**Prom-only smoke landed:** Grafana-shaped Bearer HTTP sequence in
+`tests/integration/grafana_prom_smoke.rs` plus provisioning YAML under
+`tests/compat/grafana/provisioning/datasources/prometheus.yaml` (pin
+`grafana/grafana:11.2.0`). Manual stack: `make grafana-up` / `make grafana-down`
+(see `tests/compat/grafana/README.md`). Loki/Tempo datasources and Explore UI remain pending.
 No custom Grafana datasource plugin in initial scope.
 
 ## Canonical data fidelity (storage)

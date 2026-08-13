@@ -1,0 +1,14 @@
+# TYPE http_requests gauge
+# HELP http_requests request count
+http_requests{job="checkout",service_name="checkout"} 10 1700000000
+http_requests{job="checkout",service_name="checkout"} 20 1700000060
+http_requests{job="checkout",service_name="checkout"} 40 1700000120
+http_requests{job="api",service_name="api"} 5 1700000000
+http_requests{job="api",service_name="api"} 15 1700000060
+http_requests{job="api",service_name="api"} 35 1700000120
+# TYPE demo_counter counter
+# HELP demo_counter monotonic counter
+demo_counter{job="checkout",service_name="checkout"} 100 1700000000
+demo_counter{job="checkout",service_name="checkout"} 160 1700000060
+demo_counter{job="checkout",service_name="checkout"} 220 1700000120
+# EOF

@@ -11,6 +11,8 @@ pub mod envelopes;
 pub mod errors;
 pub mod ordering;
 pub mod projection;
+pub mod prometheus;
+pub mod promql;
 pub mod stubs;
 pub mod tenant;
 

@@ -5,7 +5,9 @@ use crate::api::sql_support::{
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
-use crate::storage::schema::variant::{variant_as_json, variant_try_cast, variant_varchar};
+use crate::storage::schema::variant::{
+    variant_as_json, variant_json_to_string_map, variant_try_cast, variant_varchar,
+};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -1395,24 +1397,7 @@ fn parse_timestamp_text(text: &str) -> Option<DateTime<Utc>> {
 }
 
 fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
-    let map = match value {
-        Some(Value::Object(map)) => map.clone(),
-        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
-            Ok(Value::Object(map)) => map,
-            _ => return HashMap::new(),
-        },
-        _ => return HashMap::new(),
-    };
-    map.iter()
-        .filter_map(|(key, value)| {
-            let normalized = key.to_owned();
-            match value {
-                Value::Null => None,
-                Value::String(text) => Some((normalized, text.clone())),
-                other => Some((normalized, other.to_string())),
-            }
-        })
-        .collect()
+    value.map(variant_json_to_string_map).unwrap_or_default()
 }
 
 fn map_events(value: Option<&Value>) -> Vec<Value> {

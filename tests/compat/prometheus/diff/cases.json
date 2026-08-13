@@ -1,0 +1,27 @@
+[
+  {
+    "id": "selector_instant",
+    "path": "/api/v1/query",
+    "params": { "query": "http_requests{job=\"checkout\"}", "time": "1700000120" }
+  },
+  {
+    "id": "sum_by_job",
+    "path": "/api/v1/query",
+    "params": { "query": "sum by (job) (http_requests)", "time": "1700000120" }
+  },
+  {
+    "id": "rate_counter",
+    "path": "/api/v1/query",
+    "params": { "query": "rate(demo_counter[2m])", "time": "1700000120" }
+  },
+  {
+    "id": "range_selector",
+    "path": "/api/v1/query_range",
+    "params": {
+      "query": "http_requests{job=\"api\"}",
+      "start": "1700000000",
+      "end": "1700000120",
+      "step": "60"
+    }
+  }
+]

@@ -130,8 +130,8 @@ fn histogram_and_summary_otlp() -> ExportMetricsServiceRequest {
 }
 
 #[tokio::test]
-async fn http_otlp_histogram_ingest_then_sql_and_compat_stub() {
-    // End-to-end for Phase 0: HTTP OTLP → DuckLake fidelity columns → compat stub 501.
+async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
+    // End-to-end: HTTP OTLP → DuckLake fidelity columns → Prometheus query success.
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
     let metadata_path = config.ducklake.metadata_path.clone();
@@ -192,25 +192,21 @@ async fn http_otlp_histogram_ingest_then_sql_and_compat_stub() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/query")
+                .uri("/api/v1/query?query=up")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(stub.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(stub.status(), StatusCode::OK);
     let stub_json: serde_json::Value = serde_json::from_slice(
         &axum::body::to_bytes(stub.into_body(), usize::MAX)
             .await
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(stub_json["status"], "error");
-    assert_eq!(stub_json["errorType"], "execution");
-    assert!(stub_json["error"]
-        .as_str()
-        .unwrap_or("")
-        .starts_with("unsupported_feature:"));
+    assert_eq!(stub_json["status"], "success");
+    assert_eq!(stub_json["data"]["resultType"], "vector");
 }
 
 #[tokio::test]

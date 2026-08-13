@@ -23,7 +23,8 @@ SHELL := /bin/bash
 	lint fmt check-fmt \
 	test test-e2e test-perf ci release _release \
 	stress test-deploy \
-	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen
+	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
+	grafana-up grafana-down
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
@@ -89,6 +90,7 @@ help:
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
+	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke"
 	@echo ""
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
@@ -286,6 +288,36 @@ _export-minio-aws = \
 test: ensure-cache
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
+
+# Phase 1 mini differential vs pinned Prometheus (requires Docker).
+test-prom-diff: ensure-cache
+	@echo "prometheus mini-diff vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-prom-diff"; exit 1)
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+
+# Curated upstream promqltest subset vs pinned Prometheus (requires Docker).
+test-promqltest: ensure-cache
+	@echo "curated promqltest vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-promqltest"; exit 1)
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+
+# All Prometheus differential gates (mini-diff + curated promqltest).
+test-prom-compat: test-prom-diff test-promqltest
+	@echo "prometheus compatibility gates green"
+
+# Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).
+test-grafana-prom-smoke: ensure-cache
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::grafana_prom_smoke -- --nocapture
+
+# Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo metrics.
+# Open http://127.0.0.1:3000 (admin/admin) → Softprobe → Softprobe Prometheus smoke.
+grafana-up: ensure-cache
+	@chmod +x scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
+	./scripts/grafana-manual-up.sh
+
+grafana-down:
+	@chmod +x scripts/grafana-manual-down.sh
+	./scripts/grafana-manual-down.sh
 
 test-e2e: ensure-cache check-infra
 	@set -e; \

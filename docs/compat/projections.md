@@ -34,7 +34,7 @@ handlers. Handlers call typed backends that already apply these policies.
 | Resource + datapoint attributes | Labels; keys sanitized to Prometheus label regex |
 | `service.name` | Prefer `job` alias when `job` absent; datapoint attributes win over resource on collision (same as flat label rule) |
 | `service.instance.id` / `host.name` | Prefer `instance` alias when `instance` absent; datapoint over resource |
-| Histogram / summary | Classic Prom naming (`_bucket`, `_sum`, `_count`, `_quantile`) applied in Phase 1 adapters from canonical columns |
+| Histogram / summary | Classic Prom naming in Phase 1 adapters: histograms → `_bucket`/`_sum`/`_count`; summaries → `_sum`/`_count` + base name. Per-quantile `_quantile` series are **not** expanded in Phase 1 |
 
 Invalid Prometheus label characters are replaced with `_`. Names starting with
 a digit get a leading `_`.

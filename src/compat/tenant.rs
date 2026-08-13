@@ -45,6 +45,47 @@ impl Default for QueryLimits {
     }
 }
 
+impl QueryLimits {
+    /// Shared start/end window checks for Prom discovery + query handlers and backends.
+    pub fn validate_time_range_ms(
+        &self,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> Result<(), CompatError> {
+        if let (Some(start), Some(end)) = (start_ms, end_ms) {
+            if end < start {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "end must be >= start",
+                ));
+            }
+            // Use i128 so extreme timestamps (e.g. from 1e30 params) cannot overflow i64
+            // and bypass max_query_range_seconds via wraparound.
+            let range_ms = i128::from(end).saturating_sub(i128::from(start));
+            let range_secs = if range_ms <= 0 {
+                0u64
+            } else {
+                let secs = range_ms / 1000;
+                if secs > i128::from(u64::MAX) {
+                    u64::MAX
+                } else {
+                    secs as u64
+                }
+            };
+            if range_secs > self.max_query_range_seconds {
+                return Err(CompatError::new(
+                    CompatErrorCode::LimitExceeded,
+                    format!(
+                        "query range {range_secs}s exceeds max_query_range_seconds {}",
+                        self.max_query_range_seconds
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Tenant-bound request context. Handlers must not accept tenant ids from
 /// query parameters or bodies — only from this type.
 #[derive(Debug, Clone)]
@@ -180,5 +221,16 @@ mod tests {
         assert_eq!(limits, QueryLimits::from(&manifest.limits));
         assert_eq!(limits.max_labels_per_series, 40);
         assert_eq!(limits.query_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn validate_time_range_rejects_extreme_span_without_overflow() {
+        let limits = QueryLimits::default();
+        // Extreme i64 endpoints previously overflowed end-start and could bypass the cap.
+        let err = limits
+            .validate_time_range_ms(Some(i64::MIN / 2), Some(i64::MAX / 2))
+            .expect_err("must reject huge range");
+        assert_eq!(err.code, CompatErrorCode::LimitExceeded);
+        assert!(err.message.contains("max_query_range_seconds"));
     }
 }

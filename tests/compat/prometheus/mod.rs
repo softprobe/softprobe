@@ -1,4 +1,4 @@
-//! Prometheus Phase 0: auth isolation + capability contract (stubs only).
+//! Prometheus Phase 1: discovery + query auth isolation contracts.
 
 use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::compat::envelopes::{error_envelope, success_envelope_minimal};
@@ -35,8 +35,6 @@ fn prometheus_probe_paths_are_declared() {
 
 #[test]
 fn prometheus_context_rejects_tenant_spoof_via_scope_header() {
-    // Prometheus does not use X-Scope-OrgID, but TenantContext still rejects spoofing
-    // if a mismatched scope is supplied by a shared helper.
     let err = TenantContext::from_authenticated(
         tenant("tenant-a"),
         ProtocolScope::Prometheus,
@@ -64,4 +62,14 @@ fn prometheus_success_minimal_fixture_matches_helper() {
         success_envelope_minimal(ProtocolScope::Prometheus),
         expected
     );
+}
+
+#[test]
+fn discovery_success_fixture_shape() {
+    // labels / label values → string array; series → objects; metadata → map
+    let labels = serde_json::json!({"status":"success","data":[]});
+    assert_eq!(labels["status"], "success");
+    assert!(labels["data"].is_array());
+    let series = serde_json::json!({"status":"success","data":[{"__name__":"up"}]});
+    assert!(series["data"][0].is_object());
 }

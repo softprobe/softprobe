@@ -85,6 +85,18 @@ pub fn project_prometheus_labels(
     out
 }
 
+/// Map OTel metric type storage strings to Prometheus metadata vocabulary.
+pub fn project_prometheus_metric_type(otel_type: &str) -> &'static str {
+    match otel_type.to_ascii_lowercase().as_str() {
+        "sum" => "counter",
+        "gauge" => "gauge",
+        "histogram" => "histogram",
+        "summary" => "summary",
+        "exponentialhistogram" | "exponential_histogram" => "histogram",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +154,14 @@ mod tests {
             labels.get("service_name").map(String::as_str),
             Some("from-datapoint")
         );
+    }
+
+    #[test]
+    fn maps_otel_types_to_prometheus_metadata() {
+        assert_eq!(project_prometheus_metric_type("sum"), "counter");
+        assert_eq!(project_prometheus_metric_type("gauge"), "gauge");
+        assert_eq!(project_prometheus_metric_type("histogram"), "histogram");
+        assert_eq!(project_prometheus_metric_type("summary"), "summary");
+        assert_eq!(project_prometheus_metric_type("other"), "unknown");
     }
 }

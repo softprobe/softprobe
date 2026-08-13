@@ -1,0 +1,22 @@
+# Softprobe Prometheus datasource (Grafana native) — Phase 4 Prom-only smoke.
+# Pin: grafana/grafana:11.2.0 (docs/compat/references.v0.yaml)
+#
+# Grafana envFile / env expansion supports ${VAR} only (not shell ${VAR:-default}).
+# Provide SOFTPROBE_URL and SOFTPROBE_API_KEY in the Grafana environment.
+
+apiVersion: 1
+
+datasources:
+  - name: Softprobe Prometheus
+    type: prometheus
+    uid: softprobe-prom
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      httpHeaderName1: Authorization
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_API_KEY}"

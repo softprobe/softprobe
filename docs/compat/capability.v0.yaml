@@ -7,24 +7,46 @@ protocols:
     endpoints:
       - method: [GET, POST]
         path: /api/v1/query
-        status: stub
+        status: phase_1
       - method: [GET, POST]
         path: /api/v1/query_range
-        status: stub
+        status: phase_1
       - method: [GET]
         path: /api/v1/labels
-        status: stub
+        status: supported
       - method: [GET]
         path: /api/v1/label/{name}/values
-        status: stub
+        status: supported
       - method: [GET]
         path: /api/v1/series
-        status: stub
+        status: supported
       - method: [GET]
         path: /api/v1/metadata
-        status: stub
+        status: supported
     language_features:
-      promql: subset_pending_phase_1
+      promql: subset_phase_1
+      promql_supported:
+        - vector_selectors
+        - label_matchers
+        - instant_and_range_vectors
+        - aggregations_sum_min_max_avg_count_by_without
+        - aggregations_topk_bottomk
+        - arithmetic_and_comparison
+        - set_operators_and_or_unless
+        - rate_irate_increase
+        - delta_idelta
+        - over_time_sum_avg_min_max_count_last
+        - math_abs_ceil_floor_round
+        - offset_modifier
+      promql_unsupported:
+        - native_histogram_functions
+        - subqueries
+        - at_modifier
+        - on_ignoring_matching
+        - group_left_group_right
+        - summary_quantile_series_expansion
+        - full_function_catalog
+        - recording_rules_alerts
   loki:
     base_path: /loki/api/v1
     write_apis: false
@@ -67,7 +89,7 @@ protocols:
     language_features:
       traceql: subset_pending_phase_3
   grafana:
-    native_datasources: pending_phase_4
+    native_datasources: prom_smoke_phase_4
     custom_plugin: out_of_scope
 storage_fidelity:
   classic_histogram: preserved

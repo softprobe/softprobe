@@ -1,5 +1,9 @@
 //! Shared helpers for compatibility contract tests.
 
+pub mod prometheus;
+pub mod prometheus_oracle;
+pub mod promqltest;
+
 use softprobe_runtime::compat::capability::{
     parse_capability_yaml, CapabilityManifest, EMBEDDED_CAPABILITY_V0,
 };
