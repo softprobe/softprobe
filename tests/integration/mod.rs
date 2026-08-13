@@ -5,6 +5,7 @@ pub mod metrics_fidelity;
 pub mod metrics_fidelity_postgres;
 pub mod prometheus_diff;
 pub mod prometheus_phase1;
+pub mod prometheus_promqltest;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_apply_e2e;
 pub mod promotion_business_row_extraction;

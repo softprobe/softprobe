@@ -59,7 +59,85 @@ pub fn gauge_series_otlp(metric_name: &str, job: &str, samples: &[(u64, f64)]) -
     req.encode_to_vec()
 }
 
-/// Build a cumulative sum (counter-like) series.
+/// Build a gauge OTLP payload with arbitrary datapoint labels (no `service.name`).
+///
+/// Use this for promqltest loads so projected labels match Prometheus series labels.
+pub fn gauge_labeled_otlp(
+    metric_name: &str,
+    labels: &[(String, String)],
+    samples: &[(u64, f64)],
+) -> Vec<u8> {
+    number_series_otlp(metric_name, labels, samples, false)
+}
+
+/// Cumulative sum (counter-like) with arbitrary datapoint labels.
+pub fn sum_labeled_otlp(
+    metric_name: &str,
+    labels: &[(String, String)],
+    samples: &[(u64, f64)],
+) -> Vec<u8> {
+    number_series_otlp(metric_name, labels, samples, true)
+}
+
+fn number_series_otlp(
+    metric_name: &str,
+    labels: &[(String, String)],
+    samples: &[(u64, f64)],
+    is_sum: bool,
+) -> Vec<u8> {
+    let attrs: Vec<KeyValue> = labels
+        .iter()
+        .map(|(k, v)| KeyValue {
+            key: k.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(v.clone())),
+            }),
+        })
+        .collect();
+    let data_points: Vec<NumberDataPoint> = samples
+        .iter()
+        .map(|(ts, value)| NumberDataPoint {
+            attributes: attrs.clone(),
+            start_time_unix_nano: 0,
+            time_unix_nano: *ts,
+            exemplars: vec![],
+            flags: 0,
+            value: Some(number_data_point::Value::AsDouble(*value)),
+        })
+        .collect();
+    let data = if is_sum {
+        Data::Sum(Sum {
+            data_points,
+            aggregation_temporality: 2, // CUMULATIVE
+            is_monotonic: true,
+        })
+    } else {
+        Data::Gauge(Gauge { data_points })
+    };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![],
+                dropped_attributes_count: 0,
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics: vec![Metric {
+                    name: metric_name.into(),
+                    description: "promqltest".into(),
+                    unit: "1".into(),
+                    data: Some(data),
+                    metadata: vec![],
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+    req.encode_to_vec()
+}
+
+/// Build a cumulative sum (counter-like) series with `service.name` → job projection.
 pub fn sum_series_otlp(metric_name: &str, job: &str, samples: &[(u64, f64)]) -> Vec<u8> {
     let data_points: Vec<NumberDataPoint> = samples
         .iter()
@@ -121,7 +199,16 @@ pub async fn ingest_metrics_as(router: &Router, body: Vec<u8>, tenant_id: Option
         .oneshot(builder.body(Body::from(body)).unwrap())
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "OTLP metrics ingest");
+    let status = resp.status();
+    if status != StatusCode::OK {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        panic!(
+            "OTLP metrics ingest failed: status={status} body={}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
 }
 
 pub async fn get_json(router: &Router, path: &str) -> (StatusCode, serde_json::Value) {

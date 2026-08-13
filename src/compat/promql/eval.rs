@@ -457,6 +457,8 @@ fn apply_vector_scalar(
     return_bool: bool,
     eval_ms: i64,
 ) -> Result<Vec<InstantSample>, CompatError> {
+    // Prometheus drops __name__ for arithmetic and for comparisons with `bool`.
+    let drop_name = !is_comparison(op) || return_bool;
     let mut out = Vec::new();
     for s in vector.samples {
         let (lv, rv) = if vector_is_lhs {
@@ -465,8 +467,12 @@ fn apply_vector_scalar(
             (scalar, s.value)
         };
         if let Some(v) = apply_scalar_op(op, lv, rv, return_bool)? {
+            let mut labels = s.labels;
+            if drop_name {
+                labels.remove("__name__");
+            }
             out.push(InstantSample {
-                labels: s.labels,
+                labels,
                 timestamp_ms: eval_ms,
                 value: v,
             });
@@ -569,6 +575,8 @@ fn negate(value: EvalResult, eval_ms: i64) -> Result<EvalResult, CompatError> {
                 .samples
                 .into_iter()
                 .map(|mut s| {
+                    // Prometheus drops __name__ on unary minus.
+                    s.labels.remove("__name__");
                     s.value = -s.value;
                     s.timestamp_ms = eval_ms;
                     s
@@ -795,13 +803,80 @@ mod tests {
         let expr = parse_promql("up > 0").unwrap();
         let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
         match result {
-            EvalResult::Vector(v) => assert_eq!(v.samples.len(), 1),
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                // Comparison without bool keeps __name__.
+                assert_eq!(
+                    v.samples[0].labels.get("__name__").map(String::as_str),
+                    Some("up")
+                );
+            }
             other => panic!("unexpected {other:?}"),
         }
         let expr = parse_promql("up > 2").unwrap();
         let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
         match result {
             EvalResult::Vector(v) => assert!(v.samples.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_scalar_arith_drops_name() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "up".into());
+        labels.insert("job".into(), "api".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![Sample {
+                    timestamp_ms: 1_000,
+                    value: 10.0,
+                }],
+            }],
+        };
+        let expr = parse_promql("up / 2").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
+        match result {
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                assert!((v.samples[0].value - 5.0).abs() < 1e-9);
+                assert!(!v.samples[0].labels.contains_key("__name__"));
+                assert_eq!(
+                    v.samples[0].labels.get("job").map(String::as_str),
+                    Some("api")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unary_minus_drops_name() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "up".into());
+        labels.insert("job".into(), "api".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![Sample {
+                    timestamp_ms: 1_000,
+                    value: 3.0,
+                }],
+            }],
+        };
+        let expr = parse_promql("-up").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
+        match result {
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                assert!((v.samples[0].value + 3.0).abs() < 1e-9);
+                assert!(!v.samples[0].labels.contains_key("__name__"));
+                assert_eq!(
+                    v.samples[0].labels.get("job").map(String::as_str),
+                    Some("api")
+                );
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

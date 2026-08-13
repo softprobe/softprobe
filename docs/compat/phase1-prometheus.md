@@ -78,6 +78,15 @@ Explicit unsupported (non-exhaustive): `@`, `offset`, subqueries, set ops, `grou
 - Normalize: label order + float tolerance only
 - Run: `make test-prom-diff` (Docker required)
 
+## Upstream promqltest (curated)
+
+- Fixtures: `tests/compat/prometheus/promqltest/curated/` (Apache-2.0 excerpts from Prometheus `v2.54.1`)
+- Attribution: `tests/compat/prometheus/promqltest/ATTRIBUTION.md`
+- Runner loads the same series into lake + pinned Prom, executes supported `eval`s, compares normalized JSON
+- Unsupported AST evals are skipped (logged); expand the curated set as the subset grows
+- Timeline: samples and eval times are shifted from unix-0 to a fixed base so OTLP ingest does not treat timestamp 0 as “now”
+- Run: `make test-promqltest` or `make test-prom-compat`
+
 ---
 
 ## Tests
@@ -86,5 +95,6 @@ Explicit unsupported (non-exhaustive): `@`, `offset`, subqueries, set ops, `grou
 |-------|----------|
 | `tests/compat/prometheus/` | Auth / envelope fixtures |
 | `tests/integration/prometheus_phase1.rs` | Ingest → labels/series/query; two-tenant isolation; unsupported PromQL |
-| `tests/integration/prometheus_diff.rs` | Mini-diff vs pinned Prometheus (`#[ignore]` + make target) |
+| `tests/integration/prometheus_diff.rs` | Mini-diff vs pinned Prometheus (`#[ignore]` + `make test-prom-diff`) |
+| `tests/integration/prometheus_promqltest.rs` | Curated upstream promqltest vs pinned Prometheus (`make test-promqltest`) |
 | Unit | matcher regex fail-loud, PromQL reject table, evaluator |

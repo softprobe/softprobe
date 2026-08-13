@@ -1,27 +1,24 @@
-# Verification — Phase 1 Prometheus (#30)
+# Verification — curated promqltest (option A)
 
-**Branch:** `feat/compat-phase1-prometheus`  
-**Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`
+**Conversation:** `615825ed-06b5-495e-beb4-9279e91140b0`  
+**Feature:** Phase 1 Prometheus + curated upstream promqltest (#30 / option A)
 
-## Gates
+## Acceptance mapping
+
+| Criterion | Evidence |
+|-----------|----------|
+| Curated upstream `.test` fixtures + attribution | `tests/compat/prometheus/promqltest/` |
+| Load into lake + pinned Prom; compare normalized JSON | `tests/integration/prometheus_promqltest.rs` |
+| Shared oracle (DRY with mini-diff) | `tests/compat/support/prometheus_oracle.rs` |
+| Make targets | `make test-promqltest`, `make test-prom-compat` |
+| Docs | `docs/compat/phase1-prometheus.md` |
+| PromQL parity: drop `__name__` on unary minus / vector-scalar arith | `src/compat/promql/eval.rs` + unit tests |
+
+## Gates run
 
 ```text
-make check-fmt && make lint && make test   # green (62 integration + lib + compat_phase0)
-make test-prom-diff                        # green vs prom/prometheus:v2.54.1
+make check-fmt && make lint && make test   # green
+make test-prom-compat                      # green
 ```
 
-## Review fixes covered
-
-- Fail-loud many-to-one matching, scan/distinct caps, metadata over-cap, UTF-8 form body
-- `max_response_bytes` enforced on success encode
-- DRY: shared variant map helper, handler `prepare()`, shared test URL encode
-- Docs: queryability + phase1 limits honesty
-
-## Deferred (documented, not blocking Phase 1 bar)
-
-- Matcher SQL pushdown
-- Prometheus rate boundary extrapolation for sparse series
-
-## Status
-
-Implementation ready for verification.
+Curated run counts (logged): aggregators 11, selectors 6, operators 7, rate 2; unsupported skipped 0.

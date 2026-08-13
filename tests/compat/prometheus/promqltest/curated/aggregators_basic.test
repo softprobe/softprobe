@@ -1,0 +1,62 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/aggregators.test
+# Copyright The Prometheus Authors — Apache-2.0
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"}   0+30x10
+  http_requests{job="api-server", instance="1", group="canary"}   0+40x10
+  http_requests{job="app-server", instance="0", group="production"} 0+50x10
+  http_requests{job="app-server", instance="1", group="production"} 0+60x10
+  http_requests{job="app-server", instance="0", group="canary"}   0+70x10
+  http_requests{job="app-server", instance="1", group="canary"}   0+80x10
+
+# Simple sum.
+eval instant at 50m SUM BY (group) (http_requests{job="api-server"})
+  {group="canary"} 700
+  {group="production"} 300
+
+eval instant at 50m SUM BY (group) (((http_requests{job="api-server"})))
+  {group="canary"} 700
+  {group="production"} 300
+
+# Test alternative "by"-clause order.
+eval instant at 50m sum by (group) (http_requests{job="api-server"})
+  {group="canary"} 700
+  {group="production"} 300
+
+# Simple average.
+eval instant at 50m avg by (group) (http_requests{job="api-server"})
+  {group="canary"} 350
+  {group="production"} 150
+
+# Simple count.
+eval instant at 50m count by (group) (http_requests{job="api-server"})
+  {group="canary"} 2
+  {group="production"} 2
+
+# Simple without.
+eval instant at 50m sum without (instance) (http_requests{job="api-server"})
+  {group="canary",job="api-server"} 700
+  {group="production",job="api-server"} 300
+
+# Empty by.
+eval instant at 50m sum by () (http_requests{job="api-server"})
+  {} 1000
+
+# No by/without.
+eval instant at 50m sum(http_requests{job="api-server"})
+  {} 1000
+
+# Empty without.
+eval instant at 50m sum without () (http_requests{job="api-server",group="production"})
+  {group="production",job="api-server",instance="0"} 100
+  {group="production",job="api-server",instance="1"} 200
+
+eval instant at 50m min by (group) (http_requests{job="api-server"})
+  {group="canary"} 300
+  {group="production"} 100
+
+eval instant at 50m max by (group) (http_requests{job="api-server"})
+  {group="canary"} 400
+  {group="production"} 200
