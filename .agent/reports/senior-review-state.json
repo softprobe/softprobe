@@ -2,6 +2,6 @@
   "status": "approved_with_fixes",
   "needs_rereview": false,
   "conversation_id": "615825ed-06b5-495e-beb4-9279e91140b0",
-  "reviewer_agent_id": "ee76078f-ac7c-4563-b320-a74db261483d",
-  "summary": "Curated promqltest option A: shared Docker oracle, fail-closed Docker, corpus enumeration, ephemeral port, Prom __name__ parity on vector-scalar arith; gates green."
+  "reviewer_agent_id": "29431160-2c5d-4eb4-b5ba-0a22fe86fdbe",
+  "summary": "Coverage gap-close + PR #35 Codex fixes; 71 curated promqltest evals; gates green."
 }

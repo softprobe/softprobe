@@ -67,6 +67,38 @@ fn query_supported(query: &str) -> bool {
     parse_promql(query).is_ok()
 }
 
+async fn ensure_backends(
+    oracle: &mut Option<PromOracle>,
+    lake: &mut Option<(Router, TempDir)>,
+    loaded: &[(SeriesSpec, Duration)],
+    as_counter: bool,
+) {
+    if oracle.is_some() && lake.is_some() {
+        return;
+    }
+    let om = if loaded.is_empty() {
+        "# EOF\n".to_string()
+    } else {
+        to_openmetrics(loaded, as_counter, EVAL_BASE_MS)
+    };
+    *oracle = Some(start_prometheus_with_openmetrics(&om, "thelake-promqltest"));
+    let (router, temp) = build_tenant_router().await;
+    if !loaded.is_empty() {
+        let mut by_interval: Vec<(Duration, Vec<SeriesSpec>)> = Vec::new();
+        for (spec, iv) in loaded {
+            if let Some((_, specs)) = by_interval.iter_mut().find(|(d, _)| *d == *iv) {
+                specs.push(spec.clone());
+            } else {
+                by_interval.push((*iv, vec![spec.clone()]));
+            }
+        }
+        for (iv, specs) in by_interval {
+            ingest_series_to_lake(&router, iv, &specs, as_counter).await;
+        }
+    }
+    *lake = Some((router, temp));
+}
+
 async fn run_curated_file(path: &Path, as_counter: bool) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     let cmds = parse_promqltest(&text).unwrap_or_else(|e| panic!("parse {path:?}: {e}"));
@@ -76,7 +108,6 @@ async fn run_curated_file(path: &Path, as_counter: bool) {
     let mut oracle: Option<PromOracle> = None;
     let mut lake: Option<(Router, TempDir)> = None;
     let mut ran = 0usize;
-    let mut skipped = 0usize;
 
     for cmd in cmds {
         match cmd {
@@ -90,34 +121,22 @@ async fn run_curated_file(path: &Path, as_counter: bool) {
                     loaded.push((s, interval));
                 }
                 // Rebuild backends after each load (merge semantics for consecutive loads).
-                let om = to_openmetrics(&loaded, as_counter, EVAL_BASE_MS);
-                oracle = Some(start_prometheus_with_openmetrics(&om, "thelake-promqltest"));
-                let (router, temp) = build_tenant_router().await;
-                let mut by_interval: Vec<(Duration, Vec<SeriesSpec>)> = Vec::new();
-                for (spec, iv) in &loaded {
-                    if let Some((_, specs)) = by_interval.iter_mut().find(|(d, _)| *d == *iv) {
-                        specs.push(spec.clone());
-                    } else {
-                        by_interval.push((*iv, vec![spec.clone()]));
-                    }
-                }
-                for (iv, specs) in by_interval {
-                    ingest_series_to_lake(&router, iv, &specs, as_counter).await;
-                }
-                lake = Some((router, temp));
+                oracle = None;
+                lake = None;
+                ensure_backends(&mut oracle, &mut lake, &loaded, as_counter).await;
             }
             PtCmd::EvalInstant {
                 at, query, line, ..
             } => {
-                if !query_supported(&query) {
-                    eprintln!("skip unsupported [{file}:{line}] {query}");
-                    skipped += 1;
-                    continue;
-                }
-                let (oracle_h, router_pair) = match (oracle.as_ref(), lake.as_ref()) {
-                    (Some(o), Some(l)) => (o, l),
-                    _ => panic!("{file}:{line}: eval without load"),
-                };
+                assert!(
+                    query_supported(&query),
+                    "curated fixture must only use supported PromQL [{file}:{line}] {query}"
+                );
+                ensure_backends(&mut oracle, &mut lake, &loaded, as_counter).await;
+                let (oracle_h, router_pair) = (
+                    oracle.as_ref().expect("oracle"),
+                    lake.as_ref().expect("lake"),
+                );
                 let time_s = (EVAL_BASE_MS as f64 / 1000.0) + at.as_secs_f64();
                 let params = vec![
                     ("query".into(), query.clone()),
@@ -156,15 +175,15 @@ async fn run_curated_file(path: &Path, as_counter: bool) {
                 line,
                 ..
             } => {
-                if !query_supported(&query) {
-                    eprintln!("skip unsupported [{file}:{line}] {query}");
-                    skipped += 1;
-                    continue;
-                }
-                let (oracle_h, router_pair) = match (oracle.as_ref(), lake.as_ref()) {
-                    (Some(o), Some(l)) => (o, l),
-                    _ => panic!("{file}:{line}: eval without load"),
-                };
+                assert!(
+                    query_supported(&query),
+                    "curated fixture must only use supported PromQL [{file}:{line}] {query}"
+                );
+                ensure_backends(&mut oracle, &mut lake, &loaded, as_counter).await;
+                let (oracle_h, router_pair) = (
+                    oracle.as_ref().expect("oracle"),
+                    lake.as_ref().expect("lake"),
+                );
                 let base_s = EVAL_BASE_MS as f64 / 1000.0;
                 let params = vec![
                     ("query".into(), query.clone()),
@@ -200,7 +219,7 @@ async fn run_curated_file(path: &Path, as_counter: bool) {
         }
     }
 
-    eprintln!("promqltest {file}: ran={ran} skipped_unsupported={skipped}");
+    eprintln!("promqltest {file}: ran={ran}");
     assert!(ran > 0, "{file}: expected at least one eval to run");
 }
 

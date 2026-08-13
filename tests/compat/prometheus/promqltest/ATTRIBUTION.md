@@ -14,13 +14,15 @@ Files under `curated/` are **trimmed excerpts** of upstream `.test` DSL cases th
 1. Parse `load` / `clear` / `eval instant|range`
 2. Expand series into OpenMetrics → pinned `prom/prometheus:v2.54.1` TSDB
 3. Expand the same series into OTLP → Softprobe lake (labels as datapoint attrs; no `service.name` so projection matches Prom labels)
-4. Execute each supported `eval` against both; compare with `diff_normalize` (label order + float eps only)
-5. Skip evals whose AST is outside the declared subset (`unsupported_feature`), recorded in the run log
+4. Execute each `eval` against both; compare with `diff_normalize` (label order + float eps only)
+5. Curated fixtures must only contain Phase‑1-supported PromQL — unsupported AST fails the suite (no silent skip)
 
 ## Adding cases
 
-Prefer copying a contiguous upstream block, keep the attribution header, drop only unsupported `eval` lines (or leave them for the runner to skip).
+Prefer copying a contiguous upstream block, keep the attribution header, and **omit** unsupported `eval` lines (do not leave them for the runner).
 
 Put `# softprobe: counter` near the top when series must ingest as cumulative sums (rate/increase). The runner enumerates every `curated/*.test` file.
 
 Samples and eval times are shifted from unix-0 to a shared base (`EVAL_BASE_MS`) so OTLP does not treat timestamp 0 as “now”.
+
+Curated fixtures must only contain Phase‑1-supported PromQL. Unsupported AST **fails the suite** (no silent skip).

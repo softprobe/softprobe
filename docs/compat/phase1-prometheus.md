@@ -83,7 +83,8 @@ Explicit unsupported (non-exhaustive): `@`, `offset`, subqueries, set ops, `grou
 - Fixtures: `tests/compat/prometheus/promqltest/curated/` (Apache-2.0 excerpts from Prometheus `v2.54.1`)
 - Attribution: `tests/compat/prometheus/promqltest/ATTRIBUTION.md`
 - Runner loads the same series into lake + pinned Prom, executes supported `eval`s, compares normalized JSON
-- Unsupported AST evals are skipped (logged); expand the curated set as the subset grows
+- Curated set covers range evals, irate/rate/increase (dense), compare/`bool`, by(job), `%`/`^`, literals, selector edges
+- Unsupported AST in curated fixtures **fails** (no silent skip)
 - Timeline: samples and eval times are shifted from unix-0 to a fixed base so OTLP ingest does not treat timestamp 0 as “now”
 - Run: `make test-promqltest` or `make test-prom-compat`
 

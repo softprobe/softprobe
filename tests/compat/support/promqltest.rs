@@ -218,6 +218,10 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     if s.is_empty() {
         return Err("empty duration".into());
     }
+    // Upstream promqltest allows bare `0` (no unit).
+    if s == "0" {
+        return Ok(Duration::ZERO);
+    }
     let (num, unit) = s.split_at(
         s.find(|c: char| c.is_ascii_alphabetic())
             .ok_or_else(|| format!("duration missing unit: {s}"))?,

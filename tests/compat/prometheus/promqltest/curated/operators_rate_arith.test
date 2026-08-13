@@ -1,0 +1,12 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/operators.test
+# Copyright The Prometheus Authors — Apache-2.0
+# rate × arithmetic (dense counters).
+# softprobe: counter
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+
+eval instant at 50m rate(http_requests[50m]) * 60
+  {job="api-server", instance="0", group="production"} 2
+  {job="api-server", instance="1", group="production"} 4

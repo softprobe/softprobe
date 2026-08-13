@@ -64,10 +64,21 @@ async fn ingest_then_labels_series_and_query() {
         "values={values}"
     );
 
-    let (status, meta) = get_json(&router, "/api/v1/metadata?metric=http.requests").await;
+    let (status, meta) = get_json(&router, "/api/v1/metadata?metric=http_requests").await;
     assert_eq!(status, StatusCode::OK, "{meta}");
     assert_eq!(meta["status"], "success");
-    assert!(meta["data"].is_object(), "meta={meta}");
+    assert!(
+        meta["data"]
+            .as_object()
+            .map(|o| o.contains_key("http_requests"))
+            .unwrap_or(false),
+        "metadata must key by projected Prometheus name http_requests, got {meta}"
+    );
+    let entry = &meta["data"]["http_requests"][0];
+    assert_eq!(
+        entry["type"], "gauge",
+        "metadata type must use Prometheus vocabulary, got {entry}"
+    );
 
     let series_q = encode_query(&[("match[]", r#"http_requests{job="checkout"}"#)]);
     let (status, series) = get_json(&router, &format!("/api/v1/series?{series_q}")).await;

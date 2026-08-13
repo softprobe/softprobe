@@ -1,0 +1,44 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Dense rate/irate/increase with resets — no sparse extrapolation cases.
+# softprobe: counter
+
+load 5m
+  testcounter_reset_middle 0+10x4 0+10x5
+  testcounter_reset_end 0+10x9 0 10
+
+eval instant at 50m rate(testcounter_reset_middle[50m])
+  {} 0.03
+
+eval instant at 50m rate(testcounter_reset_end[5m])
+  {} 0
+
+clear
+
+load 5m
+  calculate_rate_window 0+80x10
+
+eval instant at 50m rate(calculate_rate_window[50m])
+  {} 0.26666666666666666
+
+clear
+
+load 5m
+  http_requests{path="/foo"} 0+10x10
+  http_requests{path="/bar"} 0+10x5 0+10x5
+
+eval instant at 50m irate(http_requests[50m])
+  {path="/foo"} .03333333333333333333
+  {path="/bar"} .03333333333333333333
+
+eval instant at 30m irate(http_requests[50m])
+  {path="/foo"} .03333333333333333333
+  {path="/bar"} 0
+
+clear
+
+load 5m
+  http_requests{path="/foo"} 0 1 2 3 2 3 4
+
+eval instant at 30m increase(http_requests[30m])
+  {path="/foo"} 7

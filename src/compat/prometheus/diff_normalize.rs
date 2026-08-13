@@ -16,8 +16,18 @@ pub fn normalize_prom_response(mut body: Value) -> Value {
 fn normalize_data(data: Value) -> Value {
     match data {
         Value::Object(mut obj) => {
+            let result_type = obj
+                .get("resultType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if let Some(result) = obj.remove("result") {
-                obj.insert("result".into(), normalize_result(result));
+                let normed = match result_type.as_str() {
+                    // Scalar/string results are a single [ts, value] pair, not a series list.
+                    "scalar" | "string" => normalize_value_pair(result),
+                    _ => normalize_result(result),
+                };
+                obj.insert("result".into(), normed);
             }
             Value::Object(obj)
         }
@@ -169,5 +179,19 @@ mod tests {
             .collect();
         assert_eq!(jobs, vec!["a", "b"]);
         assert_eq!(n["data"]["result"][0]["value"][1], "2");
+    }
+
+    #[test]
+    fn normalizes_scalar_result_pair() {
+        let body = json!({
+            "status": "success",
+            "data": {
+                "resultType": "scalar",
+                "result": [1700003000.0, "12340000.0"]
+            }
+        });
+        let n = normalize_prom_response(body);
+        assert_eq!(n["data"]["result"][0], 1700003000.0);
+        assert_eq!(n["data"]["result"][1], "12340000");
     }
 }

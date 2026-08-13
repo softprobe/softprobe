@@ -1,0 +1,25 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/range_queries.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Phase 1: plain range + arith name-drop (no set ops / *_over_time).
+
+load 30s
+  metric 1+1x4
+
+eval range from 0 to 2m step 1m metric
+  metric 1 3 5
+
+clear
+
+load 30s
+  metric 1+1x8
+
+eval range from 0 to 2m step 1m metric
+  metric 1 3 5
+
+clear
+
+load 30s
+  requests{job="1", __address__="bar"} 100
+
+eval range from 0 to 2m step 1m requests * 2
+  {job="1", __address__="bar"} 200 200 200

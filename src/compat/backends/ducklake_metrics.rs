@@ -6,7 +6,9 @@ use crate::compat::backends::metrics::{
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::ordering::cmp_label_pairs;
-use crate::compat::projection::prometheus::{project_prometheus_labels, sanitize_label_name};
+use crate::compat::projection::prometheus::{
+    project_prometheus_labels, project_prometheus_metric_type, sanitize_label_name,
+};
 use crate::compat::tenant::TenantContext;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
@@ -26,11 +28,25 @@ impl DuckLakeMetricsBackend {
         Self { query }
     }
 
-    async fn execute_soft(&self, sql: &str) -> Result<QueryResult, CompatError> {
-        match self.query.execute_query(sql).await {
-            Ok(result) => Ok(result),
-            Err(err) => {
+    async fn execute_soft(
+        &self,
+        ctx: &TenantContext,
+        sql: &str,
+    ) -> Result<QueryResult, CompatError> {
+        Self::check_deadline(ctx)?;
+        let remaining = ctx.remaining();
+        let exec = self.query.execute_query(sql);
+        let timed = tokio::time::timeout(remaining, exec).await;
+        match timed {
+            Err(_) => Err(CompatError::new(
+                CompatErrorCode::LimitExceeded,
+                "query deadline exceeded",
+            )),
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(err)) => {
                 let msg = err.to_string();
+                // Fresh tenants may not have created metrics tables yet — treat as empty
+                // result set (approved empty-tenant contract), not a query failure.
                 if msg.contains("Table with name metrics does not exist")
                     || msg.contains("Table with name tm_all_metric does not exist")
                     || msg.contains("Table with name tm_cq_metric does not exist")
@@ -113,7 +129,7 @@ impl DuckLakeMetricsBackend {
              ORDER BY timestamp DESC \
              LIMIT {fetch_limit}"
         );
-        let result = self.execute_soft(&sql).await?;
+        let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
         if result.rows.len() > cap {
             return Err(scan_cap_exceeded(cap));
@@ -314,15 +330,8 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
         let time = Self::time_predicates(start_ms, end_ms);
-        let metric_filter = match metric {
-            Some(m) if !m.is_empty() => {
-                format!(
-                    " AND metric_name = '{}'",
-                    crate::storage::ducklake::escape_sql_literal(m)
-                )
-            }
-            _ => String::new(),
-        };
+        // Do not filter by raw storage metric_name in SQL — clients query projected
+        // Prometheus names (e.g. http_requests for OTel http.requests).
         let lim = match limit {
             Some(n) if n > ctx.limits.max_series => {
                 return Err(CompatError::new(
@@ -342,25 +351,44 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
              any_value(unit) AS unit, \
              any_value(metric_type) AS metric_type \
              FROM union_metrics \
-             WHERE 1=1{time}{metric_filter} \
+             WHERE 1=1{time} \
              GROUP BY metric_name \
-             ORDER BY metric_name \
-             LIMIT {lim}"
+             ORDER BY metric_name"
         );
-        let result = self.execute_soft(&sql).await?;
+        let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
+        let want = metric
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut out = Vec::new();
         for row in &result.rows {
-            let metric_name = cell_str(row, 0).unwrap_or_default();
-            if metric_name.is_empty() {
+            let raw_name = cell_str(row, 0).unwrap_or_default();
+            if raw_name.is_empty() {
+                continue;
+            }
+            let metric_name = sanitize_label_name(&raw_name);
+            if let Some(ref want) = want {
+                if metric_name != *want {
+                    continue;
+                }
+            }
+            if !seen.insert(metric_name.clone()) {
                 continue;
             }
             out.push(MetricMetadata {
                 metric_name,
                 help: cell_str(row, 1).unwrap_or_default(),
                 unit: cell_str(row, 2).unwrap_or_default(),
-                metric_type: cell_str(row, 3).unwrap_or_default(),
+                metric_type: project_prometheus_metric_type(
+                    &cell_str(row, 3).unwrap_or_else(|| "unknown".into()),
+                )
+                .to_string(),
             });
+            if out.len() >= lim {
+                break;
+            }
         }
         Ok(out)
     }

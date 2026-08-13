@@ -458,7 +458,7 @@ fn apply_vector_scalar(
     eval_ms: i64,
 ) -> Result<Vec<InstantSample>, CompatError> {
     // Prometheus drops __name__ for arithmetic and for comparisons with `bool`.
-    let drop_name = !is_comparison(op) || return_bool;
+    let drop_name = drops_metric_name(op, return_bool);
     let mut out = Vec::new();
     for s in vector.samples {
         let (lv, rv) = if vector_is_lhs {
@@ -511,8 +511,12 @@ fn apply_vector_vector(
         }
         if let Some(r) = rhs_by_key.get(&key) {
             if let Some(v) = apply_scalar_op(op, s.value, r.value, return_bool)? {
+                // Arithmetic and bool comparisons drop __name__; filtering comparisons keep LHS name.
+                let drop_name = drops_metric_name(op, return_bool);
                 let mut labels = s.labels;
-                labels.remove("__name__");
+                if drop_name {
+                    labels.remove("__name__");
+                }
                 out.push(InstantSample {
                     labels,
                     timestamp_ms: eval_ms,
@@ -534,6 +538,11 @@ fn matching_key(labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
 
 fn is_comparison(op: u16) -> bool {
     op == T_EQLC || op == T_NEQ || op == T_GTR || op == T_GTE || op == T_LSS || op == T_LTE
+}
+
+/// Prometheus drops `__name__` for arithmetic and for comparisons with `bool`.
+fn drops_metric_name(op: u16, return_bool: bool) -> bool {
+    !is_comparison(op) || return_bool
 }
 
 fn cmp(op: u16, lv: f64, rv: f64) -> bool {
@@ -876,6 +885,73 @@ mod tests {
                     v.samples[0].labels.get("job").map(String::as_str),
                     Some("api")
                 );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn comparison_bool_drops_name() {
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "up".into());
+        labels.insert("job".into(), "api".into());
+        let backend = MemBackend {
+            series: vec![MetricSeries {
+                labels,
+                samples: vec![Sample {
+                    timestamp_ms: 1_000,
+                    value: 1.0,
+                }],
+            }],
+        };
+        let expr = parse_promql("up == bool 1").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
+        match result {
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                assert!((v.samples[0].value - 1.0).abs() < 1e-9);
+                assert!(!v.samples[0].labels.contains_key("__name__"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_vector_filter_keeps_lhs_name() {
+        let mut a = BTreeMap::new();
+        a.insert("__name__".into(), "test_total".into());
+        a.insert("instance".into(), "localhost".into());
+        let mut b = BTreeMap::new();
+        b.insert("__name__".into(), "test_smaller".into());
+        b.insert("instance".into(), "localhost".into());
+        let backend = MemBackend {
+            series: vec![
+                MetricSeries {
+                    labels: a,
+                    samples: vec![Sample {
+                        timestamp_ms: 1_000,
+                        value: 50.0,
+                    }],
+                },
+                MetricSeries {
+                    labels: b,
+                    samples: vec![Sample {
+                        timestamp_ms: 1_000,
+                        value: 10.0,
+                    }],
+                },
+            ],
+        };
+        let expr = parse_promql("test_total > test_smaller").unwrap();
+        let result = eval_instant(&backend, &ctx(), &expr, 1_000).await.unwrap();
+        match result {
+            EvalResult::Vector(v) => {
+                assert_eq!(v.samples.len(), 1);
+                assert_eq!(
+                    v.samples[0].labels.get("__name__").map(String::as_str),
+                    Some("test_total")
+                );
+                assert!((v.samples[0].value - 50.0).abs() < 1e-9);
             }
             other => panic!("unexpected {other:?}"),
         }

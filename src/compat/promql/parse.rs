@@ -54,13 +54,17 @@ fn validate_supported(expr: &Expr) -> Result<(), CompatError> {
             if vs.offset.is_some() {
                 return Err(CompatError::unsupported("promql: offset modifier"));
             }
+            if !vs.matchers.or_matchers.is_empty() {
+                return Err(CompatError::unsupported("promql: OR matchers"));
+            }
             Ok(())
         }
         Expr::MatrixSelector(ms) => {
             validate_supported(&Expr::VectorSelector(ms.vs.clone()))?;
             Ok(())
         }
-        Expr::NumberLiteral(_) | Expr::StringLiteral(_) => Ok(()),
+        Expr::NumberLiteral(_) => Ok(()),
+        Expr::StringLiteral(_) => Err(CompatError::unsupported("promql: string literal")),
         Expr::Unary(u) => validate_supported(&u.expr),
         Expr::Paren(p) => validate_supported(&p.expr),
         Expr::Binary(b) => {
