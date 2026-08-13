@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Start host Softprobe + pinned Grafana for manual Prom inspection.
+# Start host Softprobe + pinned Grafana + OpenTelemetry Demo (Astronomy Shop)
+# as the live OTLP traffic source.
 # Usage (from repo root): ./scripts/grafana-manual-up.sh
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
 
@@ -11,13 +12,22 @@ cd "$ROOT"
 COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
 COMPOSE_FILE="$ROOT/tests/compat/grafana/docker-compose.manual.yml"
+OVERLAY_DIR="$ROOT/tests/compat/grafana/otel-demo"
+COLLECTOR_EXTRAS="$OVERLAY_DIR/otelcol-config-extras.yml"
+COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"
 LOG="$STATE_DIR/softprobe.log"
 PID_FILE="$STATE_DIR/softprobe.pid"
 CONFIG="$STATE_DIR/config.yaml"
-SEED_BIN="$STATE_DIR/seed-otlp.bin"
 AUTH_URL="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
 SOFTPROBE_URL_HOST="${SOFTPROBE_LISTEN:-http://127.0.0.1:8090}"
+
+# Official Astronomy Shop pin (https://github.com/open-telemetry/opentelemetry-demo).
+OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
+CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
+DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
+DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
+STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 
 mkdir -p "$STATE_DIR/data" "$STATE_DIR/cache"
 
@@ -32,62 +42,96 @@ our_softprobe_running() {
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   [[ -n "${pid:-}" ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  # Ensure cmdline looks like our binary (avoid killing unrelated pid reuse).
   local cmd
   cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
   [[ "$cmd" == *softprobe-runtime* ]] || return 1
   return 0
 }
 
-seed_and_print() {
-  echo "==> seeding demo metrics (checkout + payments)"
-  "$SEED_TOOL" "$SEED_BIN"
-  curl -sf -X POST "$SOFTPROBE_URL_HOST/v1/metrics" \
-    -H "Authorization: Bearer $API_KEY" \
-    -H "Content-Type: application/x-protobuf" \
-    --data-binary @"$SEED_BIN" >/dev/null
-  curl -sf -H "Authorization: Bearer $API_KEY" "$SOFTPROBE_URL_HOST/api/v1/labels" >/dev/null
+demo_compose() {
+  # shellcheck disable=SC2086
+  (cd "$DEMO_DIR" && \
+    DEMO_VERSION="$OTEL_DEMO_TAG" \
+    IMAGE_VERSION="$OTEL_DEMO_TAG" \
+    OTEL_COLLECTOR_CONFIG_EXTRAS="$COLLECTOR_EXTRAS" \
+    $COMPOSE -p "$DEMO_PROJECT" \
+      --env-file .env \
+      -f compose.yaml \
+      -f "$COMPOSE_SOFTPROBE" \
+      "$@")
+}
 
+ensure_otel_demo_checkout() {
+  if [[ -f "$DEMO_DIR/compose.yaml" ]]; then
+    echo "==> OpenTelemetry Demo $OTEL_DEMO_TAG already at $DEMO_DIR"
+    return 0
+  fi
+  echo "==> cloning OpenTelemetry Demo $OTEL_DEMO_TAG → $DEMO_DIR"
+  mkdir -p "$(dirname "$DEMO_DIR")"
+  rm -rf "$DEMO_DIR"
+  git clone --depth 1 --branch "$OTEL_DEMO_TAG" \
+    https://github.com/open-telemetry/opentelemetry-demo.git "$DEMO_DIR"
+}
+
+print_ready() {
   cat <<EOF
 
-Grafana is ready for manual inspection.
+Grafana is ready for manual inspection (live Astronomy Shop traffic).
 
-  URL:        http://127.0.0.1:3000
-  Login:      admin / admin
-  Dashboard:  Softprobe → Softprobe Prometheus smoke
-  Softprobe:  $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
-  PID file:   $PID_FILE
-  Log:        $LOG
+  Grafana:     http://127.0.0.1:3000  (admin / admin)
+  Dashboard:   Softprobe → Softprobe Prometheus smoke
+  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
+  Store UI:    $STORE_URL
+  Demo pin:    $OTEL_DEMO_TAG  ($DEMO_DIR)
+  Softprobe log: $LOG
 
-  Expected panel shapes (single clean seed):
-    http_requests / sum / topk / offset / compare  → ramps or filtered ramps
-    rate(http_requests[5m])                       → nearly FLAT ≈ 0.0167/s
-    avg_over_time(...)                            → rising (smoothed ramp)
-    payments                                      → sine wave (not a ramp)
+Panels show multi-service OTLP from the official demo (Go/Java/Python/…).
+Load-generator traffic is continuous; Explore may show additional metric names.
 
 Teardown: make grafana-down
 EOF
 }
 
-# Reuse only if *we* own Softprobe + Grafana is healthy.
-# Do NOT re-seed: overlapping ramps corrupt lookback and inflate rate().
+wait_for_demo_metrics() {
+  echo "==> waiting for Softprobe to see demo metrics"
+  local ok=0
+  local body=""
+  for _ in $(seq 1 90); do
+    body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+      "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
+    if [[ -n "$body" ]] && [[ "$body" != *'"data":[]'* ]] && [[ "$body" == *'"status":"success"'* ]]; then
+      # Prefer evidence of multi-service / spanmetrics / http server metrics.
+      if echo "$body" | grep -Eqi 'http_|traces_span|rpc_|process_|otelcol_|calls|duration'; then
+        ok=1
+        break
+      fi
+      # Any non-empty name list after collector is up is enough to proceed.
+      if echo "$body" | grep -q '"data":\[.'; then
+        ok=1
+        break
+      fi
+    fi
+    sleep 2
+  done
+  if [[ "$ok" != 1 ]]; then
+    echo "ERROR: no metrics appeared in Softprobe after starting OTel Demo." >&2
+    echo "  last /api/v1/label/__name__/values: ${body:-<empty>}" >&2
+    echo "  collector: docker logs otel-collector 2>&1 | tail -40" >&2
+    exit 1
+  fi
+  echo "==> Softprobe metric names: $(echo "$body" | head -c 400)…"
+}
+
+# Reuse if Softprobe + Grafana + demo collector already healthy.
 if our_softprobe_running \
   && curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
-  && curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
-  echo "already up (owned Softprobe pid=$(cat "$PID_FILE")); not re-seeding (avoids overlapping series)."
-  echo "  For a fresh hour of demo data: make grafana-down && make grafana-up"
-  cat <<EOF
-
-  URL:        http://127.0.0.1:3000  (admin / admin)
-  Dashboard:  Softprobe → Softprobe Prometheus smoke
-  Softprobe:  $SOFTPROBE_URL_HOST
-
-Teardown: make grafana-down
-EOF
+  && curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1 \
+  && docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q true; then
+  echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector)."
+  print_ready
   exit 0
 fi
 
-# Refuse to clobber a foreign Softprobe on :8090.
 if port_busy 8090 && ! our_softprobe_running; then
   echo "ERROR: :8090 is in use by another process. Stop it or make grafana-down first." >&2
   exit 1
@@ -96,8 +140,10 @@ if port_busy 3000 && ! curl -sf -o /dev/null -u admin:admin http://127.0.0.1:300
   echo "ERROR: :3000 is in use but not our Grafana. Free the port or set a different mapping." >&2
   exit 1
 fi
+if port_busy 8080; then
+  echo "WARN: :8080 busy — Astronomy Shop UI may fail to bind (ENVOY_PORT). Softprobe ingest can still work." >&2
+fi
 
-# Tear any previous host process we started.
 if [[ -f "$PID_FILE" ]]; then
   old="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
@@ -114,7 +160,6 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-# Fresh DuckLake so a single seed is authoritative (no overlapping ramps).
 rm -rf "$STATE_DIR/data" "$STATE_DIR/cache"
 rm -f "$STATE_DIR/metadata.sqlite"
 mkdir -p "$STATE_DIR/data" "$STATE_DIR/cache"
@@ -152,11 +197,10 @@ dropdown_catalog:
   enabled: false
 EOF
 
-echo "==> building softprobe-runtime + grafana_seed_otlp"
-cargo build -q --bin softprobe-runtime --bin grafana_seed_otlp
+echo "==> building softprobe-runtime"
+cargo build -q --bin softprobe-runtime
 
 RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
-SEED_TOOL="${CARGO_TARGET_DIR:-target}/debug/grafana_seed_otlp"
 if [[ ! -x "$RUNTIME_BIN" ]]; then
   echo "ERROR: missing $RUNTIME_BIN" >&2
   exit 1
@@ -179,7 +223,6 @@ if [[ "$auth_ok" != 1 ]]; then
   exit 1
 fi
 
-# libduckdb is dynamically linked (same pattern as scripts/run-isolated-cargo-tests.sh).
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
 if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
@@ -230,4 +273,10 @@ if [[ "$graf_ok" != 1 ]]; then
   exit 1
 fi
 
-seed_and_print
+ensure_otel_demo_checkout
+
+echo "==> starting OpenTelemetry Demo $OTEL_DEMO_TAG (minimal, Softprobe backend)"
+demo_compose up --pull missing --remove-orphans --detach
+
+wait_for_demo_metrics
+print_ready

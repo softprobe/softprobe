@@ -42,7 +42,7 @@ src/compat/backends/metrics.rs   # MetricsQueryBackend + matchers
 ```
 
 Wiring: `api/mod.rs` merges `prometheus_routes()`; Loki/Tempo remain stubs.
-Manual Grafana: `make grafana-up` (see `tests/compat/grafana/README.md`).
+Manual Grafana: `make grafana-up` (OpenTelemetry Demo traffic; see `tests/compat/grafana/README.md`).
 
 ---
 

@@ -1,4 +1,4 @@
-# Grafana compatibility (Phase 4)
+# Grafana compatibility
 
 Pinned Grafana image: `grafana/grafana:11.2.0` (see `docs/compat/references.v0.yaml`).
 
@@ -7,9 +7,10 @@ Pinned Grafana image: `grafana/grafana:11.2.0` (see `docs/compat/references.v0.y
 From the repo root:
 
 ```bash
-make grafana-up      # build Softprobe, compose Grafana+auth-mock, seed demo metrics
+make grafana-up      # Softprobe + Grafana + OpenTelemetry Demo (Astronomy Shop)
 # open http://127.0.0.1:3000  (admin / admin)
 # Dashboards → Softprobe → Softprobe Prometheus smoke
+# Store UI:    http://127.0.0.1:8080
 make grafana-down
 ```
 
@@ -20,22 +21,13 @@ What it starts:
 | Softprobe runtime | host `:8090` (sqlite DuckLake under `/tmp/thelake-grafana-manual/`) |
 | Auth mock | compose `:18080` → Bearer `local-dev-key` → tenant `local-dev-tenant` |
 | Grafana | compose `:3000`, Prom datasource → `host.docker.internal:8090` |
-| Seed | `grafana_seed_otlp` → `http.requests` jobs `checkout` (ramp) + `payments` (sine) |
+| Traffic | Official [OpenTelemetry Demo](https://github.com/open-telemetry/opentelemetry-demo) **3.0.0** (minimal, no demo o11y stack). Multi-language services + load-generator; Collector extras export OTLP/HTTP to Softprobe. |
 
-Each `grafana-up` wipes the disposable DuckLake so only **one** seed is present. Re-running
-`grafana-up` while already up does **not** re-seed (overlapping ramps break `rate()`).
+Requires Docker and ~3 GB RAM. Demo checkout is cached under
+`~/.cache/thelake/otel-demo/3.0.0` (see [`otel-demo/README.md`](otel-demo/README.md)).
 
-### Expected panel shapes
-
-| Panel | Expected |
-|-------|----------|
-| `http_requests` | checkout ramp up; payments sine |
-| `rate(...[5m])` | nearly **flat** ≈ `0.0167/s` on checkout (not a ramp) |
-| `avg_over_time` | rising for checkout (smoothed ramp) |
-| `sum by (job)` | same shapes as raw |
-| `topk(1, …)` | usually checkout (higher) |
-| `offset 1m` | ramp shifted earlier |
-| `> 40` | filtered series |
+Panels target live Astronomy Shop series (spanmetrics / HTTP / RPC when present).
+Use Explore if a panel is empty — metric names vary by service SDK.
 
 Correctness vs Prometheus remains `make test-prom-compat`.
 
@@ -53,12 +45,12 @@ Do **not** use the root `docker-compose.yml` Grafana service (legacy DuckDB plug
   `tests/integration/grafana_prom_smoke.rs` via `make test` / `make test-grafana-prom-smoke`
 
 Covers discovery, GET↔POST, `rate`, `offset`, `*_over_time`, `sum by`, `topk`, compare,
-arith, and a `query_range` timing bound (prefetch regression). It does **not** start Grafana
-or run Playwright Explore.
+arith, and a `query_range` timing bound (prefetch regression). It does **not** start Grafana,
+the OTel Demo, or Playwright Explore.
 
 **Correctness vs Prometheus** stays on `make test-prom-compat` (mini-diff + curated promqltest).
 
-## Still pending (full #27)
+## Still pending (full Grafana Explore CI)
 
 - Loki / Tempo datasource provisioning and smoke
 - Pinned Grafana container + Explore / dashboard JSON assertions in CI

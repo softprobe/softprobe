@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop host Softprobe + Grafana manual stack started by grafana-manual-up.sh.
+# Stop Softprobe + Grafana + OpenTelemetry Demo started by grafana-manual-up.sh.
 # Usage (from repo root): ./scripts/grafana-manual-down.sh
 
 set -euo pipefail
@@ -10,7 +10,15 @@ cd "$ROOT"
 COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
 COMPOSE_FILE="$ROOT/tests/compat/grafana/docker-compose.manual.yml"
+OVERLAY_DIR="$ROOT/tests/compat/grafana/otel-demo"
+COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"
+COLLECTOR_EXTRAS="$OVERLAY_DIR/otelcol-config-extras.yml"
 PID_FILE="$STATE_DIR/softprobe.pid"
+
+OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
+CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
+DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
+DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 
 if [[ -f "$PID_FILE" ]]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -31,6 +39,21 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 else
   echo "==> no Softprobe pid file at $PID_FILE (skip host kill)"
+fi
+
+if [[ -f "$DEMO_DIR/compose.yaml" ]]; then
+  echo "==> stopping OpenTelemetry Demo ($DEMO_PROJECT)"
+  (cd "$DEMO_DIR" && \
+    DEMO_VERSION="$OTEL_DEMO_TAG" \
+    IMAGE_VERSION="$OTEL_DEMO_TAG" \
+    OTEL_COLLECTOR_CONFIG_EXTRAS="$COLLECTOR_EXTRAS" \
+    $COMPOSE -p "$DEMO_PROJECT" \
+      --env-file .env \
+      -f compose.yaml \
+      -f "$COMPOSE_SOFTPROBE" \
+      down --remove-orphans >/dev/null 2>&1) || true
+else
+  echo "==> no OTel Demo checkout at $DEMO_DIR (skip)"
 fi
 
 echo "==> stopping Grafana compose"
