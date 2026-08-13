@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Bookmark-compatible smoke dashboard. Prefer Softprobe \u00b7 Overview for full coverage.",
+  "description": "Live OpenTelemetry Demo traffic through Softprobe Prom API.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -20,7 +20,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -49,7 +49,7 @@
           "refId": "A"
         }
       ],
-      "title": "load-generator HTTP reqs/s (k6)",
+      "title": "load-generator HTTP reqs/s",
       "type": "timeseries"
     },
     {
@@ -64,8 +64,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 8
+        "x": 12,
+        "y": 0
       },
       "id": 2,
       "options": {
@@ -107,7 +107,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 8
       },
       "id": 3,
@@ -135,7 +135,50 @@
           "refId": "A"
         }
       ],
-      "title": "demo_ad_served_total",
+      "title": "ad served total",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
+          "legendFormat": "{{job}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "cart add-item latency count rate",
       "type": "timeseries"
     },
     {
@@ -153,7 +196,50 @@
         "x": 0,
         "y": 16
       },
-      "id": 4,
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (job) (rate(http_server_request_duration_count[5m]))",
+          "legendFormat": "{{job}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP server request duration count rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -178,50 +264,7 @@
           "refId": "A"
         }
       ],
-      "title": "topk(5) container CPU",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "softprobe-prom"
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "id": 5,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "softprobe-prom"
-          },
-          "editorMode": "code",
-          "expr": "avg_over_time(k6_http_reqs[5m])",
-          "legendFormat": "{{method}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "avg_over_time(k6_http_reqs[5m])",
+      "title": "topk container CPU",
       "type": "timeseries"
     }
   ],
@@ -240,7 +283,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe Prometheus smoke",
-  "uid": "softprobe-prom-smoke",
+  "title": "Softprobe \u00b7 Overview (Astronomy Shop)",
+  "uid": "softprobe-prom-overview",
   "version": 1
 }

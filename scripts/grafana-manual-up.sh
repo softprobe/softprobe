@@ -79,14 +79,15 @@ print_ready() {
 Grafana is ready for manual inspection (live Astronomy Shop traffic).
 
   Grafana:     http://127.0.0.1:3000  (admin / admin)
-  Dashboard:   Softprobe → Softprobe Prometheus smoke
+  Dashboards:  Softprobe → Overview / Selectors / rate / Aggregations /
+               Operators / over_time / Histograms (+ smoke)
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
   Store UI:    $STORE_URL
   Demo pin:    $OTEL_DEMO_TAG  ($DEMO_DIR)
   Softprobe log: $LOG
 
-Panels show multi-service OTLP from the official demo (Go/Java/Python/…).
-Load-generator traffic is continuous; Explore may show additional metric names.
+Panels use live Astronomy Shop metrics covering the declared PromQL subset.
+Explore may show additional metric names as services warm up.
 
 Teardown: make grafana-down
 EOF

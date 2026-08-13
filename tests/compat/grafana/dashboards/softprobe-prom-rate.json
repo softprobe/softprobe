@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Bookmark-compatible smoke dashboard. Prefer Softprobe \u00b7 Overview for full coverage.",
+  "description": "Supported range functions: rate, irate, increase, delta, idelta.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -20,7 +20,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -49,7 +49,7 @@
           "refId": "A"
         }
       ],
-      "title": "load-generator HTTP reqs/s (k6)",
+      "title": "rate(k6_http_reqs[5m])",
       "type": "timeseries"
     },
     {
@@ -64,8 +64,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 8
+        "x": 12,
+        "y": 0
       },
       "id": 2,
       "options": {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "sum by (job) (irate(k6_http_reqs[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 virtual users",
+      "title": "irate(k6_http_reqs[5m])",
       "type": "timeseries"
     },
     {
@@ -107,7 +107,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 8
       },
       "id": 3,
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "demo_ad_served_total",
-          "legendFormat": "{{category}}",
+          "expr": "sum by (job) (increase(k6_http_reqs[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "demo_ad_served_total",
+      "title": "increase(k6_http_reqs[5m])",
       "type": "timeseries"
     },
     {
@@ -150,8 +150,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 16
+        "x": 12,
+        "y": 8
       },
       "id": 4,
       "options": {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, sum by (job) (container_cpu_utilization))",
-          "legendFormat": "{{job}}",
+          "expr": "delta(k6_vus[5m])",
+          "legendFormat": "delta",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk(5) container CPU",
+      "title": "delta(k6_vus[5m])",
       "type": "timeseries"
     },
     {
@@ -193,7 +193,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 16
       },
       "id": 5,
@@ -215,13 +215,56 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg_over_time(k6_http_reqs[5m])",
-          "legendFormat": "{{method}}",
+          "expr": "idelta(k6_vus[5m])",
+          "legendFormat": "idelta",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg_over_time(k6_http_reqs[5m])",
+      "title": "idelta(k6_vus[5m])",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
+          "legendFormat": "{{job}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "rate(demo_cart_add_item_latency_count[5m])",
       "type": "timeseries"
     }
   ],
@@ -230,7 +273,8 @@
   "tags": [
     "softprobe",
     "prometheus",
-    "otel-demo"
+    "promql",
+    "rate"
   ],
   "templating": {
     "list": []
@@ -240,7 +284,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe Prometheus smoke",
-  "uid": "softprobe-prom-smoke",
+  "title": "Softprobe \u00b7 rate / irate / increase / delta",
+  "uid": "softprobe-prom-rate",
   "version": 1
 }

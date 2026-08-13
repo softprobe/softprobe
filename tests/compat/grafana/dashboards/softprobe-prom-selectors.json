@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Bookmark-compatible smoke dashboard. Prefer Softprobe \u00b7 Overview for full coverage.",
+  "description": "Vector selectors and label matchers (=, =~, !=, !~).",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -20,7 +20,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(k6_http_reqs[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "k6_http_reqs{job=\"load-generator\"}",
+          "legendFormat": "{{method}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "load-generator HTTP reqs/s (k6)",
+      "title": "equality job=",
       "type": "timeseries"
     },
     {
@@ -64,8 +64,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 8
+        "x": 12,
+        "y": 0
       },
       "id": 2,
       "options": {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "k6_http_reqs{job=~\"load.*\"}",
+          "legendFormat": "{{method}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 virtual users",
+      "title": "regex job=~",
       "type": "timeseries"
     },
     {
@@ -107,7 +107,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 8
       },
       "id": 3,
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "demo_ad_served_total",
-          "legendFormat": "{{category}}",
+          "expr": "sum by (job) (container_cpu_utilization{job!=\"otel-collector\"})",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "demo_ad_served_total",
+      "title": "not-equal job!=",
       "type": "timeseries"
     },
     {
@@ -150,8 +150,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 16
+        "x": 12,
+        "y": 8
       },
       "id": 4,
       "options": {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, sum by (job) (container_cpu_utilization))",
-          "legendFormat": "{{job}}",
+          "expr": "demo_ad_served_total{category!~\"telescopes\"}",
+          "legendFormat": "{{category}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk(5) container CPU",
+      "title": "regex not-match category!~",
       "type": "timeseries"
     },
     {
@@ -193,7 +193,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 16
       },
       "id": 5,
@@ -215,13 +215,56 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg_over_time(k6_http_reqs[5m])",
-          "legendFormat": "{{method}}",
+          "expr": "http_server_request_duration_count{job=~\".+\"}",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg_over_time(k6_http_reqs[5m])",
+      "title": "multi-matcher HTTP server",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "nginx_requests",
+          "legendFormat": "nginx",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "instant vector (no range fn)",
       "type": "timeseries"
     }
   ],
@@ -230,7 +273,8 @@
   "tags": [
     "softprobe",
     "prometheus",
-    "otel-demo"
+    "promql",
+    "selectors"
   ],
   "templating": {
     "list": []
@@ -240,7 +284,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe Prometheus smoke",
-  "uid": "softprobe-prom-smoke",
+  "title": "Softprobe \u00b7 Selectors & matchers",
+  "uid": "softprobe-prom-selectors",
   "version": 1
 }

@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Bookmark-compatible smoke dashboard. Prefer Softprobe \u00b7 Overview for full coverage.",
+  "description": "Classic _bucket/_sum/_count expansion (no histogram_quantile).",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -20,7 +20,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(k6_http_reqs[5m]))",
+          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "load-generator HTTP reqs/s (k6)",
+      "title": "cart latency _count rate",
       "type": "timeseries"
     },
     {
@@ -64,8 +64,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 8
+        "x": 12,
+        "y": 0
       },
       "id": 2,
       "options": {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "sum by (job) (rate(demo_cart_add_item_latency_sum[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 virtual users",
+      "title": "cart latency _sum rate",
       "type": "timeseries"
     },
     {
@@ -107,7 +107,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 8
       },
       "id": 3,
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "demo_ad_served_total",
-          "legendFormat": "{{category}}",
+          "expr": "sum by (le) (rate(demo_cart_add_item_latency_bucket[5m]))",
+          "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "demo_ad_served_total",
+      "title": "cart latency _bucket rate",
       "type": "timeseries"
     },
     {
@@ -150,8 +150,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 16
+        "x": 12,
+        "y": 8
       },
       "id": 4,
       "options": {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, sum by (job) (container_cpu_utilization))",
+          "expr": "sum by (job) (http_server_request_duration_count)",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk(5) container CPU",
+      "title": "HTTP server duration _count",
       "type": "timeseries"
     },
     {
@@ -193,7 +193,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 16
       },
       "id": 5,
@@ -215,13 +215,142 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg_over_time(k6_http_reqs[5m])",
-          "legendFormat": "{{method}}",
+          "expr": "sum by (job) (http_server_request_duration_sum)",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg_over_time(k6_http_reqs[5m])",
+      "title": "HTTP server duration _sum",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (le) (http_server_request_duration_bucket)",
+          "legendFormat": "{{le}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP server duration _bucket (sample)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (job) (rate(k6_http_req_duration_count[5m]))",
+          "legendFormat": "{{job}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "k6_http_req_duration _count rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (le) (rate(k6_http_req_duration_bucket[5m]))",
+          "legendFormat": "{{le}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "k6_http_req_duration _bucket rate",
       "type": "timeseries"
     }
   ],
@@ -230,7 +359,8 @@
   "tags": [
     "softprobe",
     "prometheus",
-    "otel-demo"
+    "promql",
+    "histograms"
   ],
   "templating": {
     "list": []
@@ -240,7 +370,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe Prometheus smoke",
-  "uid": "softprobe-prom-smoke",
+  "title": "Softprobe \u00b7 Classic histogram series",
+  "uid": "softprobe-prom-histograms",
   "version": 1
 }
