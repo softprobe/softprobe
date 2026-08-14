@@ -3,6 +3,7 @@
 pub mod ducklake_metrics;
 pub mod logs;
 pub mod metrics;
+pub mod prom_labels;
 pub mod traces;
 
 pub use ducklake_metrics::DuckLakeMetricsBackend;

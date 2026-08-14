@@ -9,8 +9,8 @@ with `THELAKE_CACHE_ROOT`) and starts **minimal + no demo observability stack**:
 docker compose -f compose.yaml -f <thelake>/compose.softprobe.yaml
 ```
 
-Collector extras ([`otelcol-config-extras.yml`](otelcol-config-extras.yml)) export
-traces/metrics/logs to Softprobe at `host.docker.internal:8090` with Bearer
-`local-dev-key`.
+Collector extras ([`otelcol-config-extras.yml`](otelcol-config-extras.yml)) batch
+telemetry for 60s, then export traces/metrics/logs to Softprobe at
+`host.docker.internal:8090` with Bearer `local-dev-key`.
 
 Requires ~3 GB RAM and Docker. Store UI: http://127.0.0.1:8080

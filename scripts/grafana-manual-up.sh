@@ -21,6 +21,12 @@ CONFIG="$STATE_DIR/config.yaml"
 AUTH_URL="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
 SOFTPROBE_URL_HOST="${SOFTPROBE_LISTEN:-http://127.0.0.1:8090}"
+PG_HOST="${GRAFANA_PG_HOST:-127.0.0.1}"
+PG_PORT="${GRAFANA_PG_HOST_PORT:-5434}"
+PG_SCHEMA="${GRAFANA_PG_SCHEMA:-grafana_manual}"
+ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}"
+TENANT_ID="${GRAFANA_TENANT_ID:-local-dev-tenant}"
+TENANT_SCHEMA="${GRAFANA_TENANT_SCHEMA:-${PG_SCHEMA}_local_dev_tenant}"
 
 # Official Astronomy Shop pin (https://github.com/open-telemetry/opentelemetry-demo).
 OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
@@ -29,7 +35,7 @@ DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 
-mkdir -p "$STATE_DIR/data" "$STATE_DIR/cache"
+mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
 port_busy() {
   local port="$1"
@@ -82,6 +88,8 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
   Dashboards:  Astronomy Shop → GOLD overview + per-service boards
                Softprobe PromQL → capability smoke boards
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
+  DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
+  Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL
   Demo pin:    $OTEL_DEMO_TAG  ($DEMO_DIR)
   Softprobe log: $LOG
@@ -141,6 +149,10 @@ if port_busy 3000 && ! curl -sf -o /dev/null -u admin:admin http://127.0.0.1:300
   echo "ERROR: :3000 is in use but not our Grafana. Free the port or set a different mapping." >&2
   exit 1
 fi
+if port_busy "$PG_PORT" && ! docker inspect -f '{{.State.Running}}' thelake-grafana-postgres 2>/dev/null | grep -q true; then
+  echo "ERROR: :$PG_PORT is in use by another process. Stop it or set GRAFANA_PG_HOST_PORT." >&2
+  exit 1
+fi
 if port_busy 8080; then
   echo "WARN: :8080 busy — Astronomy Shop UI may fail to bind (ENVOY_PORT). Softprobe ingest can still work." >&2
 fi
@@ -161,9 +173,56 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-rm -rf "$STATE_DIR/data" "$STATE_DIR/cache"
-rm -f "$STATE_DIR/metadata.sqlite"
-mkdir -p "$STATE_DIR/data" "$STATE_DIR/cache"
+reset_grafana_state() {
+  rm -rf "$STATE_DIR/data" "$STATE_DIR/cache"
+  if [[ -d "$STATE_DIR/postgres" ]]; then
+    docker run --rm -v "$STATE_DIR/postgres:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+  fi
+  mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+}
+
+reset_grafana_state
+
+echo "==> building softprobe-runtime"
+cargo build -q --bin softprobe-runtime
+
+RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
+if [[ ! -x "$RUNTIME_BIN" ]]; then
+  echo "ERROR: missing $RUNTIME_BIN" >&2
+  exit 1
+fi
+
+echo "==> starting Grafana + auth-mock + Postgres 19"
+THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" GRAFANA_PG_HOST_PORT="$PG_PORT" \
+  $COMPOSE -f "$COMPOSE_FILE" up -d
+
+echo "==> waiting for auth-mock"
+auth_ok=0
+for _ in $(seq 1 40); do
+  if curl -sf -X POST "$AUTH_URL" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1; then
+    auth_ok=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$auth_ok" != 1 ]]; then
+  echo "ERROR: auth-mock did not become ready at $AUTH_URL" >&2
+  exit 1
+fi
+
+echo "==> waiting for Postgres on $PG_HOST:$PG_PORT"
+pg_ok=0
+for _ in $(seq 1 60); do
+  if docker inspect -f '{{.State.Health.Status}}' thelake-grafana-postgres 2>/dev/null | grep -q healthy; then
+    pg_ok=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$pg_ok" != 1 ]]; then
+  echo "ERROR: Postgres did not become healthy on $PG_HOST:$PG_PORT" >&2
+  exit 1
+fi
 
 cat >"$CONFIG" <<EOF
 server:
@@ -181,48 +240,26 @@ query:
   cache_dir: "$STATE_DIR/cache"
 
 maintenance:
-  enabled: false
+  enabled: true
   target_file_size_bytes: 67108864
-  interval_seconds: 3600
+  interval_seconds: 300
+  metadata_enabled: true
+  metadata_interval_seconds: 300
+  remove_orphan_files_enabled: true
+  remove_orphan_older_than_seconds: 0
 
 ducklake:
-  catalog_type: "sqlite"
-  metadata_path: "$STATE_DIR/metadata.sqlite"
+  catalog_type: "postgres"
+  metadata_path: "host=$PG_HOST port=$PG_PORT dbname=ducklake user=ducklake password=ducklake"
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"
-  metadata_schema: "main"
+  metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 10000
   writer_pool_size: 2
 
 dropdown_catalog:
   enabled: false
 EOF
-
-echo "==> building softprobe-runtime"
-cargo build -q --bin softprobe-runtime
-
-RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
-if [[ ! -x "$RUNTIME_BIN" ]]; then
-  echo "ERROR: missing $RUNTIME_BIN" >&2
-  exit 1
-fi
-
-echo "==> starting Grafana + auth-mock"
-$COMPOSE -f "$COMPOSE_FILE" up -d
-
-echo "==> waiting for auth-mock"
-auth_ok=0
-for _ in $(seq 1 40); do
-  if curl -sf -X POST "$AUTH_URL" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1; then
-    auth_ok=1
-    break
-  fi
-  sleep 0.5
-done
-if [[ "$auth_ok" != 1 ]]; then
-  echo "ERROR: auth-mock did not become ready at $AUTH_URL" >&2
-  exit 1
-fi
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
@@ -238,6 +275,7 @@ esac
 echo "==> starting Softprobe on :8090"
 export CONFIG_FILE="$CONFIG"
 export SOFTPROBE_AUTH_URL="$AUTH_URL"
+export SOFTPROBE_ADMIN_API_KEY="$ADMIN_API_KEY"
 export SOFTPROBE_GRPC_DISABLE=1
 export RUST_LOG="${RUST_LOG:-info}"
 : >"$LOG"
@@ -259,6 +297,35 @@ if [[ "$ok" != 1 ]]; then
   tail -40 "$LOG" >&2 || true
   exit 1
 fi
+
+echo "==> provisioning tenant $TENANT_ID (Postgres catalog)"
+tenant_payload="$(TENANT_ID="$TENANT_ID" TENANT_SCHEMA="$TENANT_SCHEMA" TENANT_DATA_PATH="$STATE_DIR/data/$TENANT_ID/" python3 - <<'PY'
+import json, os
+print(json.dumps({
+    "tenantId": os.environ["TENANT_ID"],
+    "storageHints": {
+        "ducklakeMetadataSchema": os.environ["TENANT_SCHEMA"],
+        "ducklakeDataPath": os.environ["TENANT_DATA_PATH"],
+        "gcsBucket": "warehouse",
+    },
+}))
+PY
+)"
+tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http_code}' \
+  -X POST "$SOFTPROBE_URL_HOST/v1/tenants" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$tenant_payload" || true)"
+if [[ "$tenant_http" != "200" && "$tenant_http" != "201" ]]; then
+  echo "ERROR: tenant provisioning returned HTTP ${tenant_http:-curl-fail}" >&2
+  cat /tmp/thelake-grafana-tenant-provision.json >&2 || true
+  exit 1
+fi
+
+# Prefer typed hot columns for Prom/Grafana selectors before demo traffic.
+# shellcheck source=scripts/lib/apply-prom-hot-labels.sh
+source "$ROOT/scripts/lib/apply-prom-hot-labels.sh"
+apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0

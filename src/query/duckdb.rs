@@ -443,6 +443,11 @@ impl DuckDBQueryEngine {
         })
     }
 
+    /// Catalog alias for `__ducklake_metadata_<alias>` / `{alias}.promotion_specs`.
+    pub fn catalog_alias(&self) -> &str {
+        &self.config.ducklake.catalog_alias
+    }
+
     /// Execute arbitrary SQL query and return results as JSON
     /// Used by Grafana SQL API endpoint
     pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {

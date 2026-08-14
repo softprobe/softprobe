@@ -14,6 +14,8 @@ make grafana-down
 | Piece | Where |
 |-------|--------|
 | Softprobe runtime | host `:8090` |
+| DuckLake catalog | Postgres 19 (`postgres:19beta3` until stable `:19` tag ships) on `:5434` |
+| Parquet data | `/tmp/thelake-grafana-manual/data/` |
 | Auth mock | `:18080` → Bearer `local-dev-key` |
 | Grafana | `:3000` → Prom datasource Softprobe |
 | Traffic | OpenTelemetry Demo **3.0.0** (minimal, Softprobe BYO backend) |

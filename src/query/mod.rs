@@ -37,6 +37,11 @@ pub async fn create_query_engine_for_scope(
 }
 
 impl QueryEngine {
+    /// DuckLake catalog alias used by this engine (e.g. `softprobe`).
+    pub fn catalog_alias(&self) -> &str {
+        self.duckdb.catalog_alias()
+    }
+
     pub async fn execute_query(&self, query: &str) -> anyhow::Result<duckdb::QueryResult> {
         self.duckdb.execute_query(query).await
     }

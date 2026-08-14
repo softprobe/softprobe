@@ -272,6 +272,12 @@ if [[ "$ok" != 1 ]]; then
   exit 1
 fi
 
+# Prefer typed hot columns for Prom scans (service.name / instance / …).
+# Must run before loadgen so ingest fills promoted columns.
+# shellcheck source=scripts/lib/apply-prom-hot-labels.sh
+source "$ROOT/scripts/lib/apply-prom-hot-labels.sh"
+apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
+
 job="svc-000"
 instance="svc-000-i0"
 if [[ "$CARDINALITY" -gt 0 ]]; then

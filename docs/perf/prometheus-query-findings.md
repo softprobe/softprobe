@@ -29,19 +29,14 @@ Softprobe’s product bet is **durable DuckLake/Parquet evidence**, with Prometh
 
 Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/query/{duckdb,cache}.rs`, `src/storage/ducklake/{writer,compaction}`, `src/config.rs`, and related docs/tests.
 
-### 2.1 Column promotion and VARIANT shredding — write yes, Prom query mostly no
+### 2.1 Column promotion and VARIANT shredding — write yes, Prom query yes (lean scalars)
 
 | Feature | Write / storage | Prometheus query path |
 |---------|-----------------|------------------------|
-| VARIANT on `metrics.attributes` / `resource_attributes` | Yes — JSON staging → `::JSON::VARIANT` on INSERT; typed shredding for a few hot keys (`gen_ai.usage.*_tokens`, `sp.cost.total`) | **Not used for filters.** Backend does `CAST(... AS JSON)` then projects labels in Rust |
-| Telemetry column promotion | Opt-in via `POST /v1/promotions/apply`; ingest extracts into typed columns | **Unused.** No Prom SQL references promoted columns; Softprobe does not auto-promote label keys |
+| VARIANT on `metrics.attributes` / `resource_attributes` | Yes — JSON staging → `::JSON::VARIANT` on INSERT; typed shredding for a few hot keys (`gen_ai.usage.*_tokens`, `sp.cost.total`) | **Used.** Equality matchers and SELECT project per-key `CAST(col['k'] AS VARCHAR)` (and promoted columns). **No** `CAST(... AS JSON)` on the sample path. |
+| Telemetry column promotion | Opt-in via `POST /v1/promotions/apply`; ingest extracts into typed columns | **Used when applied.** Canonical hot-label manifest [`docs/promotion/metrics-prom-hot-labels.yaml`](../promotion/metrics-prom-hot-labels.yaml); COALESCE(promoted, VARIANT path). Softprobe does not auto-promote arbitrary keys. |
 
-**Implication:** Shredding/promotion can prune files and avoid nested decode for SQL that uses `CAST(attributes['k'] AS VARCHAR)` or promoted columns. As of 2026-08-14:
-
-- Prom equality pushdown for `__name__`, `job`, `instance`, and other safe label names uses VARIANT field access (not JSON-extract).
-- The SELECT list still projects `CAST(... AS JSON)` because the DuckDB Rust client cannot decode bare VARIANT cells.
-- Gauge/sum selectors skip histogram fidelity columns; scans are not SQL-sorted (samples sort in Rust).
-- Short-TTL scan cache (5s time buckets) and Prom `query_range` result cache (15s) absorb Grafana refresh storms.
+**Implication:** Series identity \(N\) is resolved from reserved aliases ∪ matcher/grouping labels ∪ active promotion sources ∪ cached `ducklake_file_variant_stats` paths (capped). Missing keys yield NULL labels — never a full JSON blob decode. Bare VARIANT SELECT remains unsupported by duckdb-rs.
 
 ### 2.2 Global locks — largely avoided on hot paths
 
@@ -74,11 +69,11 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 
 ### 2.4 Bloom filters and predicate pushdown — weak for Prom
 
-- **Effective SQL pushdown today:** `timestamp` range + equality on typed `metric_name` + VARIANT field equality for `job` / `instance` / safe Prom labels.
-- **SELECT still casts VARIANT → JSON** (client limitation); filters no longer wrap full blobs in JSON-extract.
+- **Effective SQL pushdown today:** `timestamp` range + equality on typed `metric_name` + promoted-column / VARIANT field equality for `job` / `instance` / safe Prom labels.
+- **SELECT projects scalar labels only** (promoted + per-key VARIANT VARCHAR); full-blob JSON cast removed from the Prom sample path.
 - **No pushdown:** regex / inequality matchers — applied after scan/projection in Rust, with scan cap `max(max_series*10, 10000)`.
 
-**Implication:** Narrow Grafana selectors (`{job=...}`) prune early. Unfiltered high-cardinality panels still decode attribute JSON for every matching row — mitigated by fidelity gating, no SQL sort, and short-TTL caches.
+**Implication:** Narrow Grafana selectors (`{job=...}`) prune early. Unfiltered panels still avoid full attribute JSON materialization by projecting the known identity key set \(N\) as scalars.
 
 ### 2.5 Caching — DuckDB file/object caches yes; Prom result cache no
 
@@ -97,10 +92,10 @@ When `query.cache_dir` is set (default `/var/tmp/softprobe/duckdb`):
 
 ## 3. Root-cause summary (ranked)
 
-1. **Prom SQL materializes attributes as JSON and filters labels in Rust** → defeats VARIANT shredding and promotion; high CPU/RAM.
+1. **Prom SQL materializes full series identity as VARCHAR scalars** (promoted + VARIANT paths); full-blob JSON cast eliminated — remaining cost is wide \(N\) or missing promotions.
 2. **Flush-through + demo churn → many small files** → expensive scans; compaction lag / skip under contention.
-3. **No Prom-level result reuse** → every Grafana panel refresh re-hits storage.
-4. **No bloom / weak attribute pushdown** → cannot skip row groups for common label selectors.
+3. **Prom-level result reuse** helps Grafana refresh storms (short TTL); cold first paint still pays scan cost.
+4. **No bloom / weak attribute pushdown** beyond VARIANT field / promoted equality → cannot skip row groups for every selector shape.
 5. Locks are a lesser concern on the hot path.
 
 ---
@@ -259,10 +254,11 @@ Workload: 40 jobs × 3 instances gauge `bench_http_requests`, 20s warmup / 30s m
 | `killcase-before` (`1d0a827`) | 222ms | 236ms | 53ms | 140/140 |
 | `killcase-after` (lean scan + fidelity + scan cache) | 132ms | 139ms | 32ms | 160/160 |
 | `killcase-after-cache` (+ Prom `query_range` TTL cache) | 27ms | 30ms | 22ms | 240/240 |
+| `killcase-lean-scalar` (no JSON + hot-label promo + caches) | 25ms | 25ms | 20ms | 220/220 |
 
-p95 stays high on cold misses (full scan still ~250–300ms); the cache is for Grafana refresh storms, not first-panel paint.
+p95 stays high on cold misses (full scan still ~250–400ms); the cache is for Grafana refresh storms, not first-panel paint. Lean scalar SELECT + static hot-label promotion keep cold-ish identity projection off the full JSON path.
 
-Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decoding Variant columns is not supported` → 0/300 ok (result `20260814T014227Z-killcase-after` discarded). SELECT must keep `CAST(... AS JSON)`.
+Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decoding Variant columns is not supported`. SELECT uses per-key `CAST(col['k'] AS VARCHAR)` and promoted columns — not bare VARIANT and not full-blob `CAST(... AS JSON)`. Artifact: `docs/perf/results/20260814T043035Z-killcase-lean-scalar.{json,md}`.
 
 **Competitor compare (Option B — not yet wired):**
 
@@ -291,11 +287,12 @@ Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decodin
 2. **Done:** labeled `baseline` / `killcase-before` runs before lean-scan changes.
 3. **Done:** VARIANT pushdown for `job` / `instance` / safe equality labels; unit tests; kill-case remeasure.
 4. **Done:** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY; 15s scan cache + Prom `query_range` result cache.
-5. Docs: recommended metrics promotion manifest for `service.name` / `instance`.
-6. **Done (partial):** compaction interval 300s, metrics-first merge, retries (see Phase B).
-7. (Later) Wire VictoriaMetrics prometheus-benchmark overlay for competitor numbers.
-8. Publish first results; adjust latency bar if needed with evidence.
-9. (Next) Grafana/demo stress validation (`make grafana-up` / Astronomy Shop) under the caches.
+5. **Done:** lean scalar Prom SELECT (no `CAST(... AS JSON)`); resolve \(N\) from variant stats + promotions + aliases; promotion-aware matchers.
+6. **Done:** canonical metrics hot-label manifest + apply in bench/grafana-up before ingest.
+7. **Done (partial):** compaction interval 300s, metrics-first merge, retries (see Phase B).
+8. (Later) Wire VictoriaMetrics prometheus-benchmark overlay for competitor numbers.
+9. Publish first results; adjust latency bar if needed with evidence.
+10. (Next) Grafana/demo stress validation (`make grafana-up` / Astronomy Shop) under the caches.
 
 ---
 

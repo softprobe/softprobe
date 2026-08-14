@@ -2,8 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
-# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — keep upstream
-# exporters you still want; base 3.0.0 core uses debug + span_metrics on traces).
+# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — repeat upstream
+# receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
+
+processors:
+  batch/softprobe:
+    timeout: 60s
+    send_batch_size: 8192
 
 exporters:
   otlphttp/softprobe:
@@ -16,8 +21,19 @@ exporters:
 service:
   pipelines:
     traces:
+      processors:
+        [
+          resourcedetection,
+          memory_limiter,
+          transform/sanitize_spans,
+          gen_ai_normalizer,
+          batch/softprobe,
+        ]
       exporters: [debug, span_metrics, otlphttp/softprobe]
     metrics:
+      processors: [resourcedetection, memory_limiter, batch/softprobe]
       exporters: [debug, otlphttp/softprobe]
     logs:
+      processors:
+        [resourcedetection, memory_limiter, transform/sanitize_logs, batch/softprobe]
       exporters: [debug, otlphttp/softprobe]
