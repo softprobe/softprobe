@@ -116,6 +116,10 @@ path = "src/main.rs"
 name = "perf_stress"
 path = "src/bin/perf_stress.rs"
 
+[[bin]]
+name = "grafana_seed_otlp"
+path = "src/bin/grafana_seed_otlp.rs"
+
 [profile.release]
 opt-level = 2
 lto = "off"
