@@ -1,0 +1,23 @@
+# Copyright Softprobe / OpenTelemetry Authors overlay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
+# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — keep upstream
+# exporters you still want; base 3.0.0 core uses debug + span_metrics on traces).
+
+exporters:
+  otlphttp/softprobe:
+    endpoint: http://host.docker.internal:8090
+    tls:
+      insecure: true
+    headers:
+      Authorization: "Bearer local-dev-key"
+
+service:
+  pipelines:
+    traces:
+      exporters: [debug, span_metrics, otlphttp/softprobe]
+    metrics:
+      exporters: [debug, otlphttp/softprobe]
+    logs:
+      exporters: [debug, otlphttp/softprobe]

@@ -150,7 +150,7 @@ Phase 4 validates native Prometheus/Loki/Tempo datasources against the lake.
 `tests/integration/grafana_prom_smoke.rs` plus provisioning YAML under
 `tests/compat/grafana/provisioning/datasources/prometheus.yaml` (pin
 `grafana/grafana:11.2.0`). Manual stack: `make grafana-up` / `make grafana-down`
-(see `tests/compat/grafana/README.md`). Loki/Tempo datasources and Explore UI remain pending.
+(OpenTelemetry Demo → Softprobe; see `tests/compat/grafana/README.md`). Loki/Tempo datasources and Explore UI remain pending.
 No custom Grafana datasource plugin in initial scope.
 
 ## Canonical data fidelity (storage)

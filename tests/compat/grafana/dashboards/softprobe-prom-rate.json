@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Smoke panels: gauges + rates on stable counters (not avg_over_time of counters).",
+  "description": "Supported range functions: rate, irate, increase, delta, idelta.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "sum by (job) (rate(k6_iterations[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 VUs",
+      "title": "rate(k6_iterations[5m])",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(k6_iterations[5m]))",
-          "legendFormat": "iter/s",
+          "expr": "sum by (job) (irate(k6_iterations[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 iterations/s",
+      "title": "irate(k6_iterations[5m])",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(demo_ad_served_total[5m]))",
-          "legendFormat": "ads/s",
+          "expr": "sum by (job) (increase(k6_iterations[5m]))",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "demo_ad_served rate",
+      "title": "increase(k6_iterations[5m])",
       "type": "timeseries"
     },
     {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, avg by (container_name) (container_cpu_utilization))",
-          "legendFormat": "{{container_name}}",
+          "expr": "delta(k6_vus[5m])",
+          "legendFormat": "delta",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk CPU by container_name",
+      "title": "delta(k6_vus[5m])",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg_over_time(k6_vus[5m])",
-          "legendFormat": "avg vus",
+          "expr": "idelta(k6_vus[5m])",
+          "legendFormat": "idelta",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg_over_time(k6_vus[5m])",
+      "title": "idelta(k6_vus[5m])",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(http_server_request_duration_count[5m]))",
+          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP server req duration count rate",
+      "title": "rate(demo_cart_add_item_latency_count[5m])",
       "type": "timeseries"
     }
   ],
@@ -273,7 +273,8 @@
   "tags": [
     "softprobe",
     "prometheus",
-    "otel-demo"
+    "promql",
+    "rate"
   ],
   "templating": {
     "list": []
@@ -283,7 +284,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe Prometheus smoke",
-  "uid": "softprobe-prom-smoke",
-  "version": 2
+  "title": "Softprobe \u00b7 rate / irate / increase / delta",
+  "uid": "softprobe-prom-rate",
+  "version": 1
 }

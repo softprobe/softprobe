@@ -1,5 +1,5 @@
 # Manual Grafana inspection stack (Prom-only).
-# Prefer: make grafana-up / make grafana-down (builds Softprobe, seeds metrics).
+# Prefer: make grafana-up / make grafana-down (Softprobe + Grafana + OTel Demo).
 #
 # Softprobe runtime runs on the host at :8090 (SOFTPROBE_URL for Grafana).
 #
