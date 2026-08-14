@@ -12,6 +12,7 @@ Related:
 - Column promotion: [`../promotion.md`](../promotion.md)
 - Architecture invariants: [`../decision_log.md`](../decision_log.md) (flush-through ingest, no app buffer)
 - Positioning: storage/SQL first; Prom is query compatibility, not a second TSDB write path ([`../positioning.md`](../positioning.md), [`../goals.md`](../goals.md))
+- **Proposed layout (implementation source of truth for this problem):** [`../metrics-timeseries-layout.md`](../metrics-timeseries-layout.md) — DuckLake postings + skinny samples + 5m/1h ladder + collapse; 39 machine ACs including 30d/90d, snapshots, small files, histograms, GOLD
 
 ---
 

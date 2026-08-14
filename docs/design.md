@@ -240,6 +240,11 @@ flush-through ingest does not create one tiny file per export. See
 [`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md)
 Phase B.
 
+**Proposed** metrics physical layout (not current code): day-sharded postings,
+skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
+acceptance suite are in
+[`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+
 When enabled, the Postgres dropdown catalog is pruned by its active-value
 retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
 exist in the current path.
@@ -307,6 +312,9 @@ manual (`make test-perf` / `.github/workflows/performance.yml`).
 Prometheus/Grafana storage-path findings, improvement phases, and the open
 `prometheus-benchmark` compare plan live in
 [`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md).
+The proposed metrics layout (DuckLake-only, 30d/90d windows, snapshot/file
+bounds) is [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+The proposed 39-id acceptance suite is in
 
 `make test` is unit/lightweight; `make test-e2e` is isolated MinIO/PostgreSQL
 integration. `make duckdb-shell` is the supported manual ATTACH smoke.

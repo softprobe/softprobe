@@ -114,7 +114,12 @@ impl DuckLakeMetricsBackend {
             guard.entries.retain(|_, e| e.expires > now);
             if guard.entries.len() >= SCAN_CACHE_MAX {
                 // Drop an arbitrary expired-or-oldest style: clear half.
-                let keys: Vec<u64> = guard.entries.keys().copied().take(SCAN_CACHE_MAX / 2).collect();
+                let keys: Vec<u64> = guard
+                    .entries
+                    .keys()
+                    .copied()
+                    .take(SCAN_CACHE_MAX / 2)
+                    .collect();
                 for k in keys {
                     guard.entries.remove(&k);
                 }
@@ -217,10 +222,17 @@ impl DuckLakeMetricsBackend {
         let time = Self::time_predicates(start_ms, end_ms);
         let promotions = self.load_metrics_promotions(ctx).await;
         let matcher_sql = Self::matcher_predicates(matchers, &promotions);
-        let bindings = self.resolve_label_bindings(ctx, matchers, &promotions).await;
+        let bindings = self
+            .resolve_label_bindings(ctx, matchers, &promotions)
+            .await;
         let label_proj = Self::label_select_sql(&bindings);
-        let cache_key =
-            Self::scan_cache_key(start_ms, end_ms, include_fidelity, &matcher_sql, &label_proj);
+        let cache_key = Self::scan_cache_key(
+            start_ms,
+            end_ms,
+            include_fidelity,
+            &matcher_sql,
+            &label_proj,
+        );
         if let Some(cached) = self.scan_cache_get(cache_key).await {
             if cached.len() > cap {
                 return Err(scan_cap_exceeded(cap));
@@ -301,7 +313,10 @@ impl DuckLakeMetricsBackend {
         keys.insert("container_name".into());
         keys.insert("container.name".into());
         // Cap open identity keys; reserved aliases always kept.
-        let max = ctx.limits.max_labels_per_series.max(reserved_identity_keys().len());
+        let max = ctx
+            .limits
+            .max_labels_per_series
+            .max(reserved_identity_keys().len());
         if keys.len() > max {
             let mut reserved: BTreeSet<String> = reserved_identity_keys()
                 .iter()
@@ -413,7 +428,9 @@ impl DuckLakeMetricsBackend {
             }
         }
         // No __name__ equality → may be scanning mixed types; keep fidelity.
-        !matchers.iter().any(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
+        !matchers
+            .iter()
+            .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
     }
 
     /// Push common equality matchers into SQL to avoid full-window table scans.
@@ -1045,9 +1062,7 @@ fn sql_string_literal(value: &str) -> String {
 fn is_safe_prom_label_name(name: &str) -> bool {
     !name.is_empty()
         && name != "__name__"
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Best-effort reverse of sanitize_label_name for common OTel dotted keys.
@@ -1121,9 +1136,7 @@ fn storage_metric_name_candidates(prom_name: &str) -> Vec<String> {
 }
 
 /// Matchers safe to push into `GROUP BY metric_name` (no OR groups, only `__name__` equality).
-fn pushdown_distinct_metric_matchers(
-    matchers: &[Vec<LabelMatcher>],
-) -> Option<&[LabelMatcher]> {
+fn pushdown_distinct_metric_matchers(matchers: &[Vec<LabelMatcher>]) -> Option<&[LabelMatcher]> {
     if matchers.is_empty() {
         return Some(&[]);
     }
@@ -1516,7 +1529,10 @@ mod tests {
 
     #[test]
     fn pushdown_distinct_metric_matchers_allows_empty_or_name_only() {
-        assert_eq!(pushdown_distinct_metric_matchers(&[]), Some(&[] as &[LabelMatcher]));
+        assert_eq!(
+            pushdown_distinct_metric_matchers(&[]),
+            Some(&[] as &[LabelMatcher])
+        );
         let group = vec![LabelMatcher {
             name: "__name__".into(),
             op: MatcherOp::Eq,

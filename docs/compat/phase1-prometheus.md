@@ -83,6 +83,8 @@ Storage-feature utilization, small-file/compaction gaps, and an open
 competitor-comparable benchmark plan (VictoriaMetrics
 `prometheus-benchmark` via OTLP write + Prom query):
 [`../perf/prometheus-query-findings.md`](../perf/prometheus-query-findings.md).
+Physical layout goals and machine ACs:
+[`../metrics-timeseries-layout.md`](../metrics-timeseries-layout.md).
 
 ## Mini differential (Slice C)
 

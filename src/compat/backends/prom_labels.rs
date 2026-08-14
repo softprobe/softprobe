@@ -4,7 +4,9 @@
 //! per-key `CAST(resource_attributes['k'] AS VARCHAR)` / `CAST(attributes['k'] AS VARCHAR)`.
 
 use crate::compat::projection::prometheus::sanitize_label_name;
-use crate::promotion::{PromotionColumn, PromotionSource, TelemetryColumnsManifest, TelemetryTable};
+use crate::promotion::{
+    PromotionColumn, PromotionSource, TelemetryColumnsManifest, TelemetryTable,
+};
 use crate::storage::schema::variant_varchar;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +92,10 @@ fn is_safe_sql_ident(name: &str) -> bool {
             .chars()
             .enumerate()
             .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || (i > 0 && c == '$'))
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Map active metrics promotions: source OTel key → SQL column name.
@@ -307,7 +312,10 @@ mod tests {
             }],
         };
         let map = metrics_promotion_by_source(&[m]);
-        assert_eq!(map.get("http.method").map(String::as_str), Some("http_method"));
+        assert_eq!(
+            map.get("http.method").map(String::as_str),
+            Some("http_method")
+        );
     }
 
     #[test]

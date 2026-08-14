@@ -87,3 +87,33 @@ Schema promotion is tenant-scoped:
 - do not configure promotion through process-global `config.yaml`.
 
 Canonical contract: [`promotion.md`](promotion.md).
+
+## Proposed: metrics time-series layout on DuckLake
+
+**Date:** 2026-08-14
+**Status:** Proposed — not accepted until the verification report maps every
+AC-\* id in [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+
+### Context
+
+The fat `metrics` event table cannot serve Grafana under Astronomy Shop ingest:
+mixed-name Parquet files, day-floored snapshot expiry (thousands of live
+snapshots), and `max_query_range_seconds = 86400`. Product constraints still
+forbid a second TSDB, an application WAL, and deleting tenant data to make
+queries fast.
+
+### Decision (proposed)
+
+Keep DuckLake as the only store. Split metrics into per-day `metric_series` +
+`metric_postings` + skinny `metric_samples` / `metric_hist_samples`, with
+maintenance-built 5m/1h downsamples and `metric_collapse_job_1h`. Raise the
+Prom range ceiling to 90 days. Expire snapshots and clean orphan files at
+**second** granularity. Do not hive-partition by `metric_name`.
+
+### Consequences (if accepted)
+
+- Flush-through ingest still commits once per OTLP request; snapshot **count**
+  is `ceil(age / commit_interval) + headroom`, not an unbounded catalog.
+- Prom resolves series from postings and fails loud at `max_series`.
+- SQL names `union_metrics` / `committed_metrics` remain.
+- Layout tests live under `make test-perf` (no new public Make target).

@@ -26,13 +26,7 @@ struct Entry {
     expires: Instant,
 }
 
-pub fn cache_key(
-    tenant_id: &str,
-    query: &str,
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-) -> u64 {
+pub fn cache_key(tenant_id: &str, query: &str, start_ms: i64, end_ms: i64, step_ms: i64) -> u64 {
     let bucket = |ms: i64| ms.div_euclid(TIME_BUCKET_MS) * TIME_BUCKET_MS;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     tenant_id.hash(&mut hasher);

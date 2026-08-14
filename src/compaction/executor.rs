@@ -411,11 +411,9 @@ fn count_parquet_files_under(data_path: &str) -> usize {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("parquet") || e.eq_ignore_ascii_case("parq"))
-            {
+            } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                e.eq_ignore_ascii_case("parquet") || e.eq_ignore_ascii_case("parq")
+            }) {
                 count += 1;
             }
         }
