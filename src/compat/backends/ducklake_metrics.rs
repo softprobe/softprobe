@@ -12,20 +12,90 @@ use crate::compat::projection::prometheus::{
 use crate::compat::tenant::TenantContext;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
-use crate::storage::schema::{variant_json_to_string_map, variant_varchar};
+use crate::storage::schema::{variant_as_json, variant_json_to_string_map, variant_varchar};
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 /// Metrics backend that scans the tenant DuckLake `metrics` table.
 pub struct DuckLakeMetricsBackend {
     query: Arc<QueryEngine>,
 }
 
+/// Short-TTL scan cache: Grafana refresh storms repeat the same selector window.
+static SCAN_CACHE: Lazy<Mutex<ScanCache>> = Lazy::new(|| Mutex::new(ScanCache::default()));
+
+#[derive(Default)]
+struct ScanCache {
+    entries: HashMap<u64, ScanCacheEntry>,
+}
+
+struct ScanCacheEntry {
+    rows: Arc<Vec<RawMetricRow>>,
+    expires: Instant,
+}
+
+const SCAN_CACHE_TTL: Duration = Duration::from_secs(15);
+const SCAN_CACHE_MAX: usize = 256;
+
 impl DuckLakeMetricsBackend {
     pub fn new(query: Arc<QueryEngine>) -> Self {
         Self { query }
+    }
+
+    fn scan_cache_key(
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        include_fidelity: bool,
+        matcher_sql: &str,
+    ) -> u64 {
+        // Bucket time bounds so Grafana refresh storms (near-identical windows) hit.
+        let bucket = |ms: Option<i64>| ms.map(|v| v.div_euclid(5_000) * 5_000);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bucket(start_ms).hash(&mut hasher);
+        bucket(end_ms).hash(&mut hasher);
+        include_fidelity.hash(&mut hasher);
+        matcher_sql.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    async fn scan_cache_get(&self, key: u64) -> Option<Arc<Vec<RawMetricRow>>> {
+        let mut guard = SCAN_CACHE.lock().await;
+        let now = Instant::now();
+        if let Some(entry) = guard.entries.get(&key) {
+            if entry.expires > now {
+                return Some(Arc::clone(&entry.rows));
+            }
+        }
+        guard.entries.retain(|_, e| e.expires > now);
+        None
+    }
+
+    async fn scan_cache_put(&self, key: u64, rows: Arc<Vec<RawMetricRow>>) {
+        let mut guard = SCAN_CACHE.lock().await;
+        if guard.entries.len() >= SCAN_CACHE_MAX {
+            let now = Instant::now();
+            guard.entries.retain(|_, e| e.expires > now);
+            if guard.entries.len() >= SCAN_CACHE_MAX {
+                // Drop an arbitrary expired-or-oldest style: clear half.
+                let keys: Vec<u64> = guard.entries.keys().copied().take(SCAN_CACHE_MAX / 2).collect();
+                for k in keys {
+                    guard.entries.remove(&k);
+                }
+            }
+        }
+        guard.entries.insert(
+            key,
+            ScanCacheEntry {
+                rows,
+                expires: Instant::now() + SCAN_CACHE_TTL,
+            },
+        );
     }
 
     async fn execute_soft(
@@ -115,28 +185,64 @@ impl DuckLakeMetricsBackend {
         let fetch_limit = cap.saturating_add(1);
         let time = Self::time_predicates(start_ms, end_ms);
         let matcher_sql = Self::matcher_predicates(matchers);
+        let cache_key = Self::scan_cache_key(start_ms, end_ms, include_fidelity, &matcher_sql);
+        if let Some(cached) = self.scan_cache_get(cache_key).await {
+            if cached.len() > cap {
+                return Err(scan_cap_exceeded(cap));
+            }
+            return Ok((*cached).clone());
+        }
+        // DuckDB's Rust binding cannot decode VARIANT cells ("decoding Variant
+        // columns is not supported"). Project via CAST(... AS JSON) for the
+        // client; keep WHERE predicates on VARIANT field access so shredding
+        // still helps prune before this materialization.
         let fidelity = if include_fidelity {
             ", metric_type, count, sum, bucket_counts, explicit_bounds, quantiles"
         } else {
             ", metric_type, NULL::UBIGINT AS count, NULL::DOUBLE AS sum, NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles"
         };
+        // No ORDER BY: expand_series sorts samples in Rust. Skipping the SQL sort
+        // avoids a full window sort on every Grafana panel refresh.
         let sql = format!(
-            "SELECT metric_name, description, unit, \
-             CAST(attributes AS JSON) AS attributes, \
-             CAST(resource_attributes AS JSON) AS resource_attributes, \
+            "SELECT metric_name, \
+             '' AS description, \
+             '' AS unit, \
+             {attrs}, \
+             {res_attrs}, \
              CAST((epoch(timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
              value{fidelity} \
              FROM union_metrics \
              WHERE 1=1{time}{matcher_sql} \
-             ORDER BY timestamp DESC \
-             LIMIT {fetch_limit}"
+             LIMIT {fetch_limit}",
+            attrs = variant_as_json("attributes"),
+            res_attrs = variant_as_json("resource_attributes"),
         );
         let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
         if result.rows.len() > cap {
             return Err(scan_cap_exceeded(cap));
         }
-        Ok(parse_raw_rows(&result))
+        let rows = parse_raw_rows(&result);
+        self.scan_cache_put(cache_key, Arc::new(rows.clone())).await;
+        Ok(rows)
+    }
+
+    /// Histogram fidelity columns are heavy; only pull them when the selector
+    /// can expand classic `_bucket` / `_sum` / `_count` series.
+    fn wants_histogram_fidelity(matchers: &[LabelMatcher]) -> bool {
+        for m in matchers {
+            if m.name != "__name__" {
+                continue;
+            }
+            if m.value.ends_with("_bucket")
+                || m.value.ends_with("_sum")
+                || m.value.ends_with("_count")
+            {
+                return true;
+            }
+        }
+        // No __name__ equality → may be scanning mixed types; keep fidelity.
+        !matchers.iter().any(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
     }
 
     /// Push common equality matchers into SQL to avoid full-window table scans.
@@ -188,6 +294,22 @@ impl DuckLakeMetricsBackend {
                     inst_label_res = variant_varchar("resource_attributes", "instance"),
                     lit = lit,
                 ));
+            } else if is_safe_prom_label_name(&m.name) {
+                // Best-effort: Prom label `http_method` ↔ OTel `http.method` / `http_method`.
+                let lit = sql_string_literal(&m.value);
+                let dotted = prom_label_to_otel_key(&m.name);
+                let mut alts = vec![
+                    format!("{} = {lit}", variant_varchar("attributes", &m.name)),
+                    format!("{} = {lit}", variant_varchar("resource_attributes", &m.name)),
+                ];
+                if dotted != m.name {
+                    alts.push(format!("{} = {lit}", variant_varchar("attributes", &dotted)));
+                    alts.push(format!(
+                        "{} = {lit}",
+                        variant_varchar("resource_attributes", &dotted)
+                    ));
+                }
+                parts.push(format!("({})", alts.join(" OR ")));
             }
         }
         if parts.is_empty() {
@@ -291,7 +413,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 ctx,
                 request.start_ms,
                 request.end_ms,
-                true,
+                Self::wants_histogram_fidelity(&request.matchers),
                 &request.matchers,
             )
             .await?;
@@ -311,7 +433,13 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             Vec::new()
         };
         let rows = self
-            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .scan_rows(
+                ctx,
+                req.start_ms,
+                req.end_ms,
+                Self::wants_histogram_fidelity(&flat),
+                &flat,
+            )
             .await?;
         let mut names = BTreeSet::new();
         let mut any = false;
@@ -345,7 +473,13 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             Vec::new()
         };
         let rows = self
-            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .scan_rows(
+                ctx,
+                req.start_ms,
+                req.end_ms,
+                Self::wants_histogram_fidelity(&flat),
+                &flat,
+            )
             .await?;
         let mut values = BTreeSet::new();
         for row in &rows {
@@ -375,7 +509,13 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             Vec::new()
         };
         let rows = self
-            .scan_rows(ctx, req.start_ms, req.end_ms, true, &flat)
+            .scan_rows(
+                ctx,
+                req.start_ms,
+                req.end_ms,
+                Self::wants_histogram_fidelity(&flat),
+                &flat,
+            )
             .await?;
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
@@ -644,6 +784,22 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn is_safe_prom_label_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "__name__"
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Best-effort reverse of sanitize_label_name for common OTel dotted keys.
+fn prom_label_to_otel_key(name: &str) -> String {
+    // Known multi-segment conventions: keep underscores that are not segment
+    // separators only when they appear after the first segment — convert all
+    // `_` → `.` for attribute lookup (http_method → http.method).
+    name.replace('_', ".")
+}
+
 /// Map a Prometheus `__name__` matcher to the DuckLake storage `metric_name`
 /// identity used for SQL pushdown (classic histogram/summary suffixes removed).
 fn classic_base_metric_name(prom_name: &str) -> &str {
@@ -812,6 +968,43 @@ mod tests {
         assert!(sql.contains("'checkout'"));
         assert!(sql.contains("'host-1'"));
         assert!(!sql.contains("extra"));
+    }
+
+    #[test]
+    fn matcher_predicates_push_generic_equality_via_variant() {
+        let sql = DuckLakeMetricsBackend::matcher_predicates(&[LabelMatcher {
+            name: "http_method".into(),
+            op: MatcherOp::Eq,
+            value: "GET".into(),
+        }]);
+        assert!(
+            sql.contains("CAST(attributes['http_method'] AS VARCHAR)"),
+            "got {sql}"
+        );
+        assert!(
+            sql.contains("CAST(attributes['http.method'] AS VARCHAR)"),
+            "dotted OTel key must be tried, got {sql}"
+        );
+        assert!(!sql.contains("CAST(attributes AS JSON)"));
+    }
+
+    #[test]
+    fn wants_histogram_fidelity_only_for_classic_names() {
+        assert!(DuckLakeMetricsBackend::wants_histogram_fidelity(&[
+            LabelMatcher {
+                name: "__name__".into(),
+                op: MatcherOp::Eq,
+                value: "http_duration_bucket".into(),
+            }
+        ]));
+        assert!(!DuckLakeMetricsBackend::wants_histogram_fidelity(&[
+            LabelMatcher {
+                name: "__name__".into(),
+                op: MatcherOp::Eq,
+                value: "bench_http_requests".into(),
+            }
+        ]));
+        assert!(DuckLakeMetricsBackend::wants_histogram_fidelity(&[]));
     }
 
     #[test]

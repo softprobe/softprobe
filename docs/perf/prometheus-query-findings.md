@@ -1,6 +1,6 @@
 # Prometheus query performance — findings, plan, and benchmark
 
-**Status:** Working plan (not yet implemented)  
+**Status:** In progress — Phase A/B/C partially landed with kill-case measurements  
 **Date:** 2026-08-14  
 **Context:** Host killed under OpenTelemetry Demo traffic + Grafana Prom dashboards; DuckDB/PromQL path felt unacceptably slow.  
 **Scope:** Metrics storage + Prometheus-compatible **query** path (`DuckLakeMetricsBackend` + PromQL eval). Traces/logs are out of scope except where shared DuckLake maintenance applies.
@@ -36,9 +36,12 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 | VARIANT on `metrics.attributes` / `resource_attributes` | Yes — JSON staging → `::JSON::VARIANT` on INSERT; typed shredding for a few hot keys (`gen_ai.usage.*_tokens`, `sp.cost.total`) | **Not used for filters.** Backend does `CAST(... AS JSON)` then projects labels in Rust |
 | Telemetry column promotion | Opt-in via `POST /v1/promotions/apply`; ingest extracts into typed columns | **Unused.** No Prom SQL references promoted columns; Softprobe does not auto-promote label keys |
 
-**Implication:** Shredding/promotion can prune files and avoid nested decode for SQL that uses `CAST(attributes['k'] AS VARCHAR)` or promoted columns. As of 2026-08-14, Prom equality pushdown for `job` / `instance` uses VARIANT field access; the SELECT list still materializes full attribute JSON for label projection. Remaining matchers still filter in memory.
+**Implication:** Shredding/promotion can prune files and avoid nested decode for SQL that uses `CAST(attributes['k'] AS VARCHAR)` or promoted columns. As of 2026-08-14:
 
-Evidence: `matcher_predicates` only pushes `__name__` → `metric_name` and `job` → `json_extract_string(CAST(... AS JSON), ...)`. Scan SQL always selects full attribute JSON blobs.
+- Prom equality pushdown for `__name__`, `job`, `instance`, and other safe label names uses VARIANT field access (not JSON-extract).
+- The SELECT list still projects `CAST(... AS JSON)` because the DuckDB Rust client cannot decode bare VARIANT cells.
+- Gauge/sum selectors skip histogram fidelity columns; scans are not SQL-sorted (samples sort in Rust).
+- Short-TTL scan cache (5s time buckets) and Prom `query_range` result cache (15s) absorb Grafana refresh storms.
 
 ### 2.2 Global locks — largely avoided on hot paths
 
@@ -71,12 +74,11 @@ Evidence: `matcher_predicates` only pushes `__name__` → `metric_name` and `job
 
 ### 2.4 Bloom filters and predicate pushdown — weak for Prom
 
-- **Bloom filters:** not configured in current write or DuckDB session setup (only mentioned in legacy Iceberg docs).
-- **Effective SQL pushdown today:** `timestamp` range + equality on typed `metric_name`.
-- **Weak pushdown:** `job` via JSON extract over `CAST(... AS JSON)`.
-- **No pushdown:** all other Prom label matchers — applied after scan/projection in Rust, with scan cap `max(max_series*10, 10000)`.
+- **Effective SQL pushdown today:** `timestamp` range + equality on typed `metric_name` + VARIANT field equality for `job` / `instance` / safe Prom labels.
+- **SELECT still casts VARIANT → JSON** (client limitation); filters no longer wrap full blobs in JSON-extract.
+- **No pushdown:** regex / inequality matchers — applied after scan/projection in Rust, with scan cap `max(max_series*10, 10000)`.
 
-**Implication:** High-cardinality Grafana panels often scan large windows, decode attributes for every row, then throw most rows away in memory. That burns CPU and RAM (consistent with host death under demo + many dashboards).
+**Implication:** Narrow Grafana selectors (`{job=...}`) prune early. Unfiltered high-cardinality panels still decode attribute JSON for every matching row — mitigated by fidelity gating, no SQL sort, and short-TTL caches.
 
 ### 2.5 Caching — DuckDB file/object caches yes; Prom result cache no
 
@@ -239,10 +241,28 @@ Compare Softprobe **fairly** against other systems on a **public, open workload*
 ```bash
 make bench-prom-baseline                                    # label=baseline
 BENCH_LABEL=variant-pushdown make bench-prom-baseline       # after a fix
+# High-cardinality kill-case (no hostmetrics; OTLP loadgen):
+BENCH_CARDINALITY=40 BENCH_WARMUP_SECS=20 BENCH_MEASURE_SECS=30 BENCH_REPEAT=2 \
+  BENCH_LABEL=killcase make bench-prom-baseline
 make bench-prom-down
 ```
 
 Harness: `tests/compat/prometheus/benchmark/`. Results: `docs/perf/results/<stamp>-<label>.{json,md}`.
+Fails closed if `ok_requests == 0` (latency without success is meaningless).
+
+### 5.4.1 Kill-case A/B (2026-08-14)
+
+Workload: 40 jobs × 3 instances gauge `bench_http_requests`, 20s warmup / 30s measure, repeat=2.
+
+| Label | overall p50 | unfiltered `{__name__=...}` p50 | `{job=...}` p50 | ok |
+|-------|-------------|----------------------------------|-----------------|-----|
+| `killcase-before` (`1d0a827`) | 222ms | 236ms | 53ms | 140/140 |
+| `killcase-after` (lean scan + fidelity + scan cache) | 132ms | 139ms | 32ms | 160/160 |
+| `killcase-after-cache` (+ Prom `query_range` TTL cache) | 27ms | 30ms | 22ms | 240/240 |
+
+p95 stays high on cold misses (full scan still ~250–300ms); the cache is for Grafana refresh storms, not first-panel paint.
+
+Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decoding Variant columns is not supported` → 0/300 ok (result `20260814T014227Z-killcase-after` discarded). SELECT must keep `CAST(... AS JSON)`.
 
 **Competitor compare (Option B — not yet wired):**
 
@@ -267,14 +287,15 @@ Harness: `tests/compat/prometheus/benchmark/`. Results: `docs/perf/results/<stam
 
 ## 6. Implementation sketch (engineering tickets)
 
-1. **Done (Option A):** `make bench-prom-baseline` harness + results dir.
-2. Capture a labeled `baseline` run before code changes.
-3. Refactor `DuckLakeMetricsBackend::matcher_predicates` + scan SQL for VARIANT pushdown; add unit/integration tests; re-run with `BENCH_LABEL=variant-pushdown`.
-4. Expand pushdown allowlist; keep fail-loud scan caps; re-measure.
+1. **Done (Option A):** `make bench-prom-baseline` harness + results dir + high-card loadgen (`BENCH_CARDINALITY`).
+2. **Done:** labeled `baseline` / `killcase-before` runs before lean-scan changes.
+3. **Done:** VARIANT pushdown for `job` / `instance` / safe equality labels; unit tests; kill-case remeasure.
+4. **Done:** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY; 15s scan cache + Prom `query_range` result cache.
 5. Docs: recommended metrics promotion manifest for `service.name` / `instance`.
-6. Compaction/ops: metrics file-count metric + shorter merge interval experiment.
+6. **Done (partial):** compaction interval 300s, metrics-first merge, retries (see Phase B).
 7. (Later) Wire VictoriaMetrics prometheus-benchmark overlay for competitor numbers.
 8. Publish first results; adjust latency bar if needed with evidence.
+9. (Next) Grafana/demo stress validation (`make grafana-up` / Astronomy Shop) under the caches.
 
 ---
 

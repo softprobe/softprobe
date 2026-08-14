@@ -3,6 +3,7 @@
 mod encode;
 mod handlers;
 mod params;
+mod result_cache;
 
 pub mod diff_normalize;
 

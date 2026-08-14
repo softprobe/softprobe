@@ -35,13 +35,25 @@ REPEAT="${BENCH_REPEAT:-3}"
 LABEL="${BENCH_LABEL:-baseline}"
 LEAVE_UP="${LEAVE_UP:-0}"
 FORCE_PARQUET="${BENCH_FORCE_PARQUET:-0}"
+CARDINALITY="${BENCH_CARDINALITY:-0}"
+INSTANCES_PER_JOB="${BENCH_INSTANCES:-3}"
 INLINE_LIMIT=10000
-if [[ "$FORCE_PARQUET" == "1" ]]; then
+if [[ "$FORCE_PARQUET" == "1" || "$CARDINALITY" -gt 0 ]]; then
   INLINE_LIMIT=0
+fi
+if [[ "$CARDINALITY" -gt 0 ]]; then
+  QUERIES_FILE="${BENCH_QUERIES_FILE:-$BENCH_DIR/queries.card.promql}"
+  if [[ "$LABEL" == "baseline" ]]; then
+    LABEL="killcase"
+  fi
 fi
 
 compose_up() {
-  if [[ "$FORCE_PARQUET" == "1" ]]; then
+  if [[ "$CARDINALITY" -gt 0 ]]; then
+    # Auth only — loadgen supplies high-cardinality metrics (no hostmetrics noise).
+    # shellcheck disable=SC2086
+    $COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d auth-mock
+  elif [[ "$FORCE_PARQUET" == "1" ]]; then
     # shellcheck disable=SC2086
     $COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" -f "$COMPOSE_CHURN" up -d
   else
@@ -186,17 +198,22 @@ if [[ "$FORCE_PARQUET" == "1" ]]; then
   echo "==> BENCH_FORCE_PARQUET=1 (data_inlining_row_limit=0, 1s hostmetrics + tiny batches)"
 fi
 
-echo "==> building softprobe-runtime (+ ingest_sample for maintenance)"
-cargo build -q --bin softprobe-runtime --bin ingest_sample
+echo "==> building softprobe-runtime (+ loadgen + maintenance)"
+cargo build -q --bin softprobe-runtime --bin ingest_sample --bin bench_prom_loadgen
 
 RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
 INGEST_SAMPLE_BIN="${CARGO_TARGET_DIR:-target}/debug/ingest_sample"
+LOADGEN_BIN="${CARGO_TARGET_DIR:-target}/debug/bench_prom_loadgen"
 if [[ ! -x "$RUNTIME_BIN" ]]; then
   echo "ERROR: missing $RUNTIME_BIN" >&2
   exit 1
 fi
 if [[ ! -x "$INGEST_SAMPLE_BIN" ]]; then
   echo "ERROR: missing $INGEST_SAMPLE_BIN" >&2
+  exit 1
+fi
+if [[ "$CARDINALITY" -gt 0 && ! -x "$LOADGEN_BIN" ]]; then
+  echo "ERROR: missing $LOADGEN_BIN" >&2
   exit 1
 fi
 
@@ -255,43 +272,62 @@ if [[ "$ok" != 1 ]]; then
   exit 1
 fi
 
-echo "==> warm-up ${WARMUP_SECS}s (hostmetrics ingest)"
-metric=""
-deadline=$((SECONDS + WARMUP_SECS))
-while (( SECONDS < deadline )); do
+job="svc-000"
+instance="svc-000-i0"
+if [[ "$CARDINALITY" -gt 0 ]]; then
+  echo "==> high-cardinality loadgen jobs=${CARDINALITY} instances=${INSTANCES_PER_JOB} for ${WARMUP_SECS}s"
+  "$LOADGEN_BIN" \
+    --url "$SOFTPROBE_URL_HOST" \
+    --token "$API_KEY" \
+    --metric "bench.http.requests" \
+    --jobs "$CARDINALITY" \
+    --instances "$INSTANCES_PER_JOB" \
+    --seconds "$WARMUP_SECS" \
+    --interval 0.4
+  metric="bench_http_requests"
+  # Prefer sanitized Prom name; fall back to dotted storage name if needed.
   body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
     "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
-  if [[ -n "$body" && "$body" == *'"status":"success"'* && "$body" == *'"data":['* ]]; then
-    metric="$(pick_metric <<<"$body")"
-    if [[ -n "$metric" ]]; then
-      echo "==> discovered metric: $metric"
-      break
-    fi
+  if echo "$body" | grep -q 'bench_http_requests'; then
+    metric="bench_http_requests"
+  elif echo "$body" | grep -q 'bench.http.requests'; then
+    metric="bench.http.requests"
   fi
-  sleep 2
-done
-# Extra settle time if we discovered early.
-remain=$((deadline - SECONDS))
-if (( remain > 0 )); then
-  sleep "$remain"
+  mid=$((CARDINALITY / 2))
+  job="$(printf 'svc-%03d' "$mid")"
+  instance="${job}-i0"
+else
+  echo "==> warm-up ${WARMUP_SECS}s (hostmetrics ingest)"
+  metric=""
+  deadline=$((SECONDS + WARMUP_SECS))
+  while (( SECONDS < deadline )); do
+    body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+      "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
+    if [[ -n "$body" && "$body" == *'"status":"success"'* && "$body" == *'"data":['* ]]; then
+      metric="$(pick_metric <<<"$body")"
+      if [[ -n "$metric" ]]; then
+        echo "==> discovered metric: $metric"
+        break
+      fi
+    fi
+    sleep 2
+  done
+  remain=$((deadline - SECONDS))
+  if (( remain > 0 )); then
+    sleep "$remain"
+  fi
+  body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+    "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
+  metric="$(pick_metric <<<"$body")"
 fi
-
-body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
-  "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
-metric="$(pick_metric <<<"$body")"
 
 if [[ -z "$metric" ]]; then
   echo "ERROR: no metrics after warm-up. last names: ${body:-<empty>}" >&2
-  echo "  otelcol: docker logs thelake-prom-bench-otelcol 2>&1 | tail -40" >&2
   echo "  softprobe: tail -40 $LOG" >&2
   ./scripts/bench-prom-down.sh || true
   exit 1
 fi
-if [[ "$metric" != system_* && "$metric" != process_* ]]; then
-  echo "WARN: selected metric '$metric' is not system_/process_ (hostmetrics)." >&2
-  echo "  Another OTLP source may still be writing to Softprobe." >&2
-fi
-echo "==> measuring against metric: $metric (${MEASURE_SECS}s, repeat=$REPEAT)"
+echo "==> measuring against metric=$metric job=$job (${MEASURE_SECS}s, repeat=$REPEAT)"
 
 RAW_LAT="$STATE_DIR/latencies.jsonl"
 : >"$RAW_LAT"
@@ -305,6 +341,8 @@ while (( $(now_s) < measure_deadline )); do
   while IFS= read -r qline || [[ -n "$qline" ]]; do
     [[ -z "$qline" || "$qline" =~ ^[[:space:]]*# ]] && continue
     query="${qline//\{\{metric\}\}/$metric}"
+    query="${query//\{\{job\}\}/$job}"
+    query="${query//\{\{instance\}\}/$instance}"
     for _ in $(seq 1 "$REPEAT"); do
       end="$(now_s)"
       start=$((end - 120))
@@ -479,6 +517,11 @@ with open(out_md, "w") as f:
     f.write("\n".join(lines))
 print(out_json)
 print(out_md)
+if env["total_requests"] and env["ok_requests"] == 0:
+    raise SystemExit(
+        "ERROR: 0 successful Prom responses — latency numbers are not meaningful "
+        "(likely SQL/cast regression). See /tmp/thelake-prom-bench/last_body.json"
+    )
 PY
 
 echo ""

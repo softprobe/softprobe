@@ -1,0 +1,12 @@
+# High-cardinality PromQL suite (BENCH_CARDINALITY>0). {{metric}} / {{job}} substituted.
+
+{{metric}}
+{__name__="{{metric}}"}
+{__name__="{{metric}}",job="{{job}}"}
+{__name__="{{metric}}",job="{{job}}",instance="{{instance}}"}
+rate({{metric}}[1m])
+sum(rate({{metric}}[1m]))
+sum by (job) (rate({{metric}}[1m]))
+sum by (job) (rate({{metric}}{job="{{job}}"}[1m]))
+max_over_time({{metric}}[2m])
+avg_over_time({{metric}}[2m])

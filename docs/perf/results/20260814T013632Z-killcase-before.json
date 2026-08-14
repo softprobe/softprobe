@@ -1,0 +1,104 @@
+{
+  "stamp": "20260814T013632Z",
+  "label": "killcase-before",
+  "git_sha": "1d0a827",
+  "metric": "bench_http_requests",
+  "warmup_secs": 20,
+  "measure_secs": 30,
+  "repeat": 2,
+  "rounds": 7,
+  "softprobe_rss_kb": 472516,
+  "data_bytes": 282855,
+  "data_file_count": 43,
+  "parquet_file_count": 1,
+  "parquet_before_compact": 43,
+  "parquet_after_compact": 1,
+  "force_parquet": false,
+  "total_requests": 140,
+  "ok_requests": 140,
+  "overall_p50_ms": 222,
+  "overall_p95_ms": 256,
+  "overall_max_ms": 274,
+  "per_query": [
+    {
+      "query": "avg_over_time(bench_http_requests[2m])",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 231,
+      "p95_ms": 247,
+      "max_ms": 248
+    },
+    {
+      "query": "bench_http_requests",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 230,
+      "p95_ms": 250,
+      "max_ms": 253
+    },
+    {
+      "query": "max_over_time(bench_http_requests[2m])",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 230,
+      "p95_ms": 245,
+      "max_ms": 259
+    },
+    {
+      "query": "rate(bench_http_requests[1m])",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 226,
+      "p95_ms": 244,
+      "max_ms": 265
+    },
+    {
+      "query": "sum by (job) (rate(bench_http_requests[1m]))",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 220,
+      "p95_ms": 235,
+      "max_ms": 263
+    },
+    {
+      "query": "sum by (job) (rate(bench_http_requests{job=\"svc-020\"}[1m]))",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 52,
+      "p95_ms": 55,
+      "max_ms": 57
+    },
+    {
+      "query": "sum(rate(bench_http_requests[1m]))",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 216,
+      "p95_ms": 225,
+      "max_ms": 253
+    },
+    {
+      "query": "{__name__=\"bench_http_requests\",job=\"svc-020\",instance=\"svc-020-i0\"}",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 50,
+      "p95_ms": 55,
+      "max_ms": 57
+    },
+    {
+      "query": "{__name__=\"bench_http_requests\",job=\"svc-020\"}",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 53,
+      "p95_ms": 56,
+      "max_ms": 57
+    },
+    {
+      "query": "{__name__=\"bench_http_requests\"}",
+      "n": 14,
+      "ok": 14,
+      "p50_ms": 236,
+      "p95_ms": 273,
+      "max_ms": 274
+    }
+  ]
+}
