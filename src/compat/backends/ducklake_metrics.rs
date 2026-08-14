@@ -1308,7 +1308,14 @@ mod tests {
             ],
             &empty,
         );
-        assert!(sql.contains("regexp_replace(metric_name"));
+        assert!(
+            sql.contains("metric_name IN (") && sql.contains("'http_requests'"),
+            "name equality must push metric_name IN (...), got {sql}"
+        );
+        assert!(
+            !sql.contains("regexp_replace"),
+            "row-wise regexp on metric_name prevents prune, got {sql}"
+        );
         assert!(
             sql.contains("CAST(resource_attributes['service.name'] AS VARCHAR)"),
             "job must use VARIANT field access, got {sql}"
