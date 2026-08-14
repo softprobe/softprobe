@@ -23,6 +23,7 @@ Useful env overrides:
 | `BENCH_MEASURE_SECS` | `60` | Wall clock spent issuing queries |
 | `BENCH_REPEAT` | `3` | Repeats per query per round |
 | `BENCH_LABEL` | `baseline` | Tag in result filenames (e.g. `after-variant-pushdown`) |
+| `BENCH_FORCE_PARQUET` | `0` | `1` = disable DuckLake inlining + 1s hostmetrics/tiny batches (small-file stress); maintenance merge runs at end |
 | `THELAKE_BENCH_STATE_DIR` | `/tmp/thelake-prom-bench` | Softprobe data/cache/config |
 | `SOFTPROBE_LISTEN` | `http://127.0.0.1:8090` | Softprobe base URL |
 

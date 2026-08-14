@@ -221,8 +221,12 @@ interactive workflow.
 
 ## Maintenance
 
-The scheduler runs when compaction or metadata maintenance is enabled. It
-walks the default DuckLake scope and all registered tenant scopes.
+The scheduler runs when compaction or metadata maintenance is enabled
+(default interval **300s**). It walks the default DuckLake scope and all
+registered tenant scopes. **Metrics are compacted first**, then traces,
+logs, and scores. Merge calls retry through serialization conflicts (8
+attempts × 2 waves). After each scope pass, Softprobe logs when Parquet
+file counts remain high (≥200).
 
 For `traces`, `logs`, and `metrics`, it can:
 
@@ -230,6 +234,11 @@ For `traces`, `logs`, and `metrics`, it can:
 - call `ducklake_merge_adjacent_files`;
 - expire old DuckLake snapshots;
 - clean old DuckLake files.
+
+Operators should still batch OTLP upstream (collector `batch` processor) so
+flush-through ingest does not create one tiny file per export. See
+[`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md)
+Phase B.
 
 When enabled, the Postgres dropdown catalog is pruned by its active-value
 retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not

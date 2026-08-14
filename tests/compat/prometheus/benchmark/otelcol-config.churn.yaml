@@ -1,13 +1,9 @@
-# Host metrics → Softprobe OTLP/HTTP (Prom micro-benchmark).
-# Pin image via docker-compose.yml.
-#
-# Prefer larger collector batches in production so flush-through ingest does not
-# create one tiny Parquet file per export. See docs/perf/prometheus-query-findings.md
-# Phase B. The churn overlay (otelcol-config.churn.yaml) deliberately does the opposite.
+# Host metrics → Softprobe with aggressive flush (small-file stress).
+# Used when BENCH_FORCE_PARQUET=1 (compose override).
 
 receivers:
   hostmetrics:
-    collection_interval: 5s
+    collection_interval: 1s
     scrapers:
       cpu:
       memory:
@@ -20,6 +16,11 @@ processors:
       - key: service.name
         value: prom-bench-host
         action: upsert
+  batch:
+    # Keep batches tiny so DuckLake cannot absorb them via inlining alone
+    # when data_inlining_row_limit is 0.
+    send_batch_size: 8
+    timeout: 1s
 
 exporters:
   otlphttp/softprobe:
@@ -35,5 +36,5 @@ service:
   pipelines:
     metrics:
       receivers: [hostmetrics]
-      processors: [resource]
+      processors: [resource, batch]
       exporters: [otlphttp/softprobe, debug]

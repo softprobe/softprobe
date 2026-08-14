@@ -1,0 +1,5 @@
+# Override: remount churn hostmetrics config (1s scrape, tiny batches).
+services:
+  otel-collector:
+    volumes:
+      - ./otelcol-config.churn.yaml:/etc/otelcol/config.yaml:ro

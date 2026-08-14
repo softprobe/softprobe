@@ -100,7 +100,9 @@ impl MaintenanceExecutor {
     }
 
     async fn run_once_ducklake(&self) -> Result<MaintenanceSummary> {
-        let tables = ["traces", "logs", "metrics", "scores"];
+        // Metrics first: Prom/Grafana load is usually the loudest small-file
+        // victim under continuous OTLP. Traces/logs/scores follow.
+        let tables = ["metrics", "traces", "logs", "scores"];
         let mut results = Vec::new();
 
         for (label, ducklake) in self.maintenance_scopes().await? {
@@ -116,6 +118,7 @@ impl MaintenanceExecutor {
                 continue;
             }
 
+            let files_before = count_parquet_files_under(&ducklake.data_path);
             for table in tables {
                 let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
                 let compaction = if self.config.maintenance.enabled {
@@ -194,6 +197,8 @@ impl MaintenanceExecutor {
                     remove_orphan_files,
                 });
             }
+            let files_after = count_parquet_files_under(&ducklake.data_path);
+            warn_if_too_many_parquet_files(&label, &ducklake.data_path, files_before, files_after);
         }
 
         if let Some(ref dc) = self.dropdown_catalog {
@@ -264,7 +269,7 @@ impl MaintenanceExecutor {
         if let Err(err) = execute_batch_with_serialization_retry(
             conn,
             &set_target,
-            3,
+            COMPACTION_SERIALIZATION_ATTEMPTS,
             &format!("ducklake set_option target_file_size {}", qualified),
         ) {
             if is_ducklake_serialization_conflict(&err) {
@@ -284,28 +289,44 @@ impl MaintenanceExecutor {
             "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}');",
             ducklake.catalog_alias, table, ducklake.metadata_schema
         );
-        match execute_batch_with_serialization_retry(
-            conn,
-            &sql,
-            3,
-            &format!("ducklake_merge_adjacent_files {}", qualified),
-        ) {
-            Ok(_) => Ok(CompactionStatus::Completed),
-            Err(err) if is_ducklake_serialization_conflict(&err) => {
-                warn!(
-                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
-                    qualified, err
-                );
-                Ok(CompactionStatus::Skipped)
+        // Two waves: under heavy ingest the first merge window can still lose the
+        // serialization race after inner retries; wait and try once more before skip.
+        for wave in 1..=2 {
+            match execute_batch_with_serialization_retry(
+                conn,
+                &sql,
+                COMPACTION_SERIALIZATION_ATTEMPTS,
+                &format!("ducklake_merge_adjacent_files {} wave{}", qualified, wave),
+            ) {
+                Ok(_) => return Ok(CompactionStatus::Completed),
+                Err(err) if is_ducklake_serialization_conflict(&err) && wave < 2 => {
+                    warn!(
+                        "DuckLake compaction conflict on {} wave {}; backing off before retry: {}",
+                        qualified, wave, err
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(err) if is_ducklake_serialization_conflict(&err) => {
+                    warn!(
+                        "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                        qualified, err
+                    );
+                    return Ok(CompactionStatus::Skipped);
+                }
+                Err(err) if is_ducklake_unsupported(&err) => {
+                    return Ok(CompactionStatus::Unsupported);
+                }
+                Err(err) => {
+                    return Err(anyhow!(
+                        "DuckLake compaction failed for {}.{}: {}",
+                        ducklake.metadata_schema,
+                        table,
+                        err
+                    ));
+                }
             }
-            Err(err) if is_ducklake_unsupported(&err) => Ok(CompactionStatus::Unsupported),
-            Err(err) => Err(anyhow!(
-                "DuckLake compaction failed for {}.{}: {}",
-                ducklake.metadata_schema,
-                table,
-                err
-            )),
         }
+        Ok(CompactionStatus::Skipped)
     }
 
     fn ducklake_expire_snapshots(
@@ -367,6 +388,61 @@ fn is_ducklake_serialization_conflict(err: &duckdb::Error) -> bool {
         || msg.contains("serialization failure")
 }
 
+/// Inner attempts per merge wave. Paired with a second wave in
+/// [`MaintenanceExecutor::ducklake_compact_table`].
+const COMPACTION_SERIALIZATION_ATTEMPTS: usize = 8;
+
+/// Soft warn when a scope still has many Parquet files after a maintenance pass.
+const PARQUET_FILE_WARN_THRESHOLD: usize = 200;
+
+fn count_parquet_files_under(data_path: &str) -> usize {
+    let root = std::path::Path::new(data_path);
+    if !root.exists() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("parquet") || e.eq_ignore_ascii_case("parq"))
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn warn_if_too_many_parquet_files(
+    scope_label: &str,
+    data_path: &str,
+    files_before: usize,
+    files_after: usize,
+) {
+    if files_after >= PARQUET_FILE_WARN_THRESHOLD {
+        warn!(
+            "DuckLake scope {} still has {} parquet files under {} after maintenance (was {}); \
+             query scans may stay expensive — check ingest batching / compaction conflicts",
+            scope_label, files_after, data_path, files_before
+        );
+    } else if files_before > files_after {
+        info!(
+            "DuckLake scope {} parquet files {} → {} under {}",
+            scope_label, files_before, files_after, data_path
+        );
+    }
+}
+
 fn execute_batch_with_serialization_retry(
     conn: &Connection,
     sql: &str,
@@ -384,7 +460,7 @@ fn execute_batch_with_serialization_retry(
                     action, attempt, attempts, err
                 );
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                backoff_ms = backoff_ms.saturating_mul(2);
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(2_000);
             }
             Err(err) => return Err(err),
         }
@@ -400,4 +476,35 @@ fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {
         count += 1;
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn maintenance_compacts_metrics_before_other_tables() {
+        let tables = ["metrics", "traces", "logs", "scores"];
+        assert_eq!(tables[0], "metrics");
+    }
+
+    #[test]
+    fn count_parquet_files_under_walks_nested_dirs() {
+        let tmp = TempDir::new().expect("temp");
+        let nested = tmp.path().join("metrics").join("record_date=2026-08-14");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("a.parquet"), b"x").unwrap();
+        fs::write(nested.join("b.parq"), b"y").unwrap();
+        fs::write(nested.join("ignore.txt"), b"z").unwrap();
+        assert_eq!(count_parquet_files_under(tmp.path().to_str().unwrap()), 2);
+        assert_eq!(count_parquet_files_under("/no/such/path"), 0);
+    }
+
+    #[test]
+    fn parquet_warn_threshold_is_sane() {
+        assert!(PARQUET_FILE_WARN_THRESHOLD >= 50);
+        assert_eq!(COMPACTION_SERIALIZATION_ATTEMPTS, 8);
+    }
 }

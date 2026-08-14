@@ -137,11 +137,20 @@ Gauges/sums should not pull histogram arrays when the selector cannot need them.
 
 ### Phase B — File hygiene under continuous ingest
 
-**B1. Measure file count / avg size under demo** (`ducklake` metadata tables) before/after.
+**Status (2026-08-14):** partially implemented.
 
-**B2. Tighten maintenance under churn:** shorter compaction interval for metrics-only scopes; retry/backoff when merge skips on serialization conflict; alert when file count exceeds a threshold.
+**B1. Measure file count / avg size under demo** (`ducklake` metadata tables) before/after.  
+Micro-bench now records `parquet_before_compact` / `parquet_after_compact`. Use
+`BENCH_FORCE_PARQUET=1` for a small-file stress corpus.
 
-**B3. Collector-side batching guidance** (docs + demo overlay): larger OTLP export batches / longer flush intervals so flush-through does not create tiny files. Prefer this over reintroducing an app buffer (non-goal today).
+**B2. Tighten maintenance under churn:** default maintenance interval **300s**
+(was 3600); compact **metrics first**; merge uses **8 serialization retries × 2
+waves**; warn when ≥200 Parquet files remain after a pass.
+
+**B3. Collector-side batching guidance** (docs + demo overlay): larger OTLP
+export batches / longer flush intervals so flush-through does not create tiny
+files. Prefer this over reintroducing an app buffer (non-goal today). Churn
+bench overlay documents the anti-pattern (1s scrape + `send_batch_size: 8`).
 
 **B4. Write-path Parquet properties** (evaluate): larger row groups; enable bloom filters on `metric_name` / promoted columns **if** DuckLake/Parquet path honors them on read. Prototype behind a measured A/B — do not assume Iceberg-era bloom docs still apply.
 

@@ -5,6 +5,7 @@
 #   ./scripts/bench-prom-baseline.sh
 #   ./scripts/bench-prom-baseline.sh --self-check
 #   BENCH_LABEL=variant-pushdown ./scripts/bench-prom-baseline.sh
+#   BENCH_FORCE_PARQUET=1 BENCH_LABEL=small-files make bench-prom-baseline
 #   LEAVE_UP=1 ./scripts/bench-prom-baseline.sh
 #
 # Make: make bench-prom-baseline
@@ -18,6 +19,7 @@ COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_BENCH_STATE_DIR:-/tmp/thelake-prom-bench}"
 BENCH_DIR="$ROOT/tests/compat/prometheus/benchmark"
 COMPOSE_FILE="$BENCH_DIR/docker-compose.yml"
+COMPOSE_CHURN="$BENCH_DIR/docker-compose.churn.yml"
 COMPOSE_PROJECT="${THELAKE_BENCH_COMPOSE_PROJECT:-thelake-prom-bench}"
 QUERIES_FILE="${BENCH_QUERIES_FILE:-$BENCH_DIR/queries.promql}"
 RESULTS_DIR="${BENCH_RESULTS_DIR:-$ROOT/docs/perf/results}"
@@ -32,6 +34,21 @@ MEASURE_SECS="${BENCH_MEASURE_SECS:-60}"
 REPEAT="${BENCH_REPEAT:-3}"
 LABEL="${BENCH_LABEL:-baseline}"
 LEAVE_UP="${LEAVE_UP:-0}"
+FORCE_PARQUET="${BENCH_FORCE_PARQUET:-0}"
+INLINE_LIMIT=10000
+if [[ "$FORCE_PARQUET" == "1" ]]; then
+  INLINE_LIMIT=0
+fi
+
+compose_up() {
+  if [[ "$FORCE_PARQUET" == "1" ]]; then
+    # shellcheck disable=SC2086
+    $COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" -f "$COMPOSE_CHURN" up -d
+  else
+    # shellcheck disable=SC2086
+    $COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d
+  fi
+}
 
 port_busy() {
   local port="$1"
@@ -55,6 +72,8 @@ self_check() {
   [[ -f "$QUERIES_FILE" ]] || { echo "missing $QUERIES_FILE" >&2; exit 1; }
   [[ -f "$COMPOSE_FILE" ]] || { echo "missing $COMPOSE_FILE" >&2; exit 1; }
   [[ -f "$BENCH_DIR/otelcol-config.yaml" ]] || { echo "missing otelcol config" >&2; exit 1; }
+  [[ -f "$BENCH_DIR/otelcol-config.churn.yaml" ]] || { echo "missing otelcol churn config" >&2; exit 1; }
+  [[ -f "$COMPOSE_CHURN" ]] || { echo "missing $COMPOSE_CHURN" >&2; exit 1; }
   local n=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -147,6 +166,8 @@ maintenance:
   interval_seconds: 300
   metadata_enabled: true
   metadata_interval_seconds: 300
+  remove_orphan_files_enabled: true
+  remove_orphan_older_than_seconds: 0
 
 ducklake:
   catalog_type: "sqlite"
@@ -154,25 +175,33 @@ ducklake:
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"
   metadata_schema: "main"
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: $INLINE_LIMIT
   writer_pool_size: 2
 
 dropdown_catalog:
   enabled: false
 EOF
 
-echo "==> building softprobe-runtime"
-cargo build -q --bin softprobe-runtime
+if [[ "$FORCE_PARQUET" == "1" ]]; then
+  echo "==> BENCH_FORCE_PARQUET=1 (data_inlining_row_limit=0, 1s hostmetrics + tiny batches)"
+fi
+
+echo "==> building softprobe-runtime (+ ingest_sample for maintenance)"
+cargo build -q --bin softprobe-runtime --bin ingest_sample
 
 RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
+INGEST_SAMPLE_BIN="${CARGO_TARGET_DIR:-target}/debug/ingest_sample"
 if [[ ! -x "$RUNTIME_BIN" ]]; then
   echo "ERROR: missing $RUNTIME_BIN" >&2
   exit 1
 fi
+if [[ ! -x "$INGEST_SAMPLE_BIN" ]]; then
+  echo "ERROR: missing $INGEST_SAMPLE_BIN" >&2
+  exit 1
+fi
 
 echo "==> starting auth-mock + otel-collector"
-# shellcheck disable=SC2086
-$COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d
+compose_up
 
 echo "==> waiting for auth-mock"
 auth_ok=0
@@ -334,8 +363,20 @@ for dirpath,_,files in os.walk(root):
             pass
 print(total)
 ' "$STATE_DIR/data")"
-parquet_files="$(find "$STATE_DIR/data" -type f \( -name '*.parquet' -o -name '*.parq' \) 2>/dev/null | wc -l | tr -d ' ')"
+parquet_before="$(find "$STATE_DIR/data" -type f \( -name '*.parquet' -o -name '*.parq' \) 2>/dev/null | wc -l | tr -d ' ')"
 file_count="$(find "$STATE_DIR/data" -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+echo "==> running DuckLake maintenance once (merge adjacent files)"
+# Pause Softprobe writes briefly by stopping otelcol so merge is less contested.
+# shellcheck disable=SC2086
+$COMPOSE -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" stop otel-collector >/dev/null 2>&1 || true
+sleep 1
+export CONFIG_FILE="$CONFIG"
+export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+MAINTENANCE_RUN_ONCE=1 "$INGEST_SAMPLE_BIN" || echo "WARN: maintenance run reported failure" >&2
+parquet_after="$(find "$STATE_DIR/data" -type f \( -name '*.parquet' -o -name '*.parq' \) 2>/dev/null | wc -l | tr -d ' ')"
+echo "==> parquet files before compact=${parquet_before} after=${parquet_after}"
+parquet_files="$parquet_after"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_JSON="$RESULTS_DIR/${STAMP}-${LABEL}.json"
@@ -345,6 +386,7 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 STAMP="$STAMP" LABEL="$LABEL" GIT_SHA="$GIT_SHA" METRIC="$metric" \
 WARMUP_SECS="$WARMUP_SECS" MEASURE_SECS="$MEASURE_SECS" REPEAT="$REPEAT" ROUNDS="$rounds" \
 RSS_KB="$rss_kb" DATA_BYTES="$data_bytes" FILE_COUNT="$file_count" PARQUET_FILES="$parquet_files" \
+PARQUET_BEFORE="$parquet_before" PARQUET_AFTER="$parquet_after" FORCE_PARQUET="$FORCE_PARQUET" \
 python3 - "$RAW_LAT" "$OUT_JSON" "$OUT_MD" <<'PY'
 import json, os, sys
 
@@ -397,6 +439,9 @@ env = {
     "data_bytes": int(os.environ["DATA_BYTES"]),
     "data_file_count": int(os.environ["FILE_COUNT"]),
     "parquet_file_count": int(os.environ["PARQUET_FILES"]),
+    "parquet_before_compact": int(os.environ["PARQUET_BEFORE"]),
+    "parquet_after_compact": int(os.environ["PARQUET_AFTER"]),
+    "force_parquet": os.environ.get("FORCE_PARQUET") == "1",
     "total_requests": len(rows),
     "ok_requests": ok_n,
     "overall_p50_ms": pct(all_ms, 50),
@@ -418,7 +463,8 @@ lines = [
     f"- Requests: {env['ok_requests']}/{env['total_requests']} ok",
     f"- Latency overall: p50={env['overall_p50_ms']}ms p95={env['overall_p95_ms']}ms max={env['overall_max_ms']}ms",
     f"- Softprobe RSS: {env['softprobe_rss_kb']} KiB",
-    f"- Data dir: {env['data_bytes']} bytes, {env['data_file_count']} files ({env['parquet_file_count']} parquet)",
+    f"- Data dir: {env['data_bytes']} bytes, {env['data_file_count']} files",
+    f"- Parquet: before compact={env['parquet_before_compact']} after={env['parquet_after_compact']} (force_parquet={env['force_parquet']})",
     "",
     "| Query | n | ok | p50 ms | p95 ms | max ms |",
     "|-------|---|----|--------|--------|--------|",

@@ -1,0 +1,88 @@
+{
+  "stamp": "20260814T011519Z",
+  "label": "small-files",
+  "git_sha": "9eab147",
+  "metric": "system_cpu_load_average_15m",
+  "warmup_secs": 20,
+  "measure_secs": 25,
+  "repeat": 1,
+  "rounds": 30,
+  "softprobe_rss_kb": 499324,
+  "data_bytes": 343574,
+  "data_file_count": 47,
+  "parquet_file_count": 1,
+  "parquet_before_compact": 47,
+  "parquet_after_compact": 1,
+  "force_parquet": true,
+  "total_requests": 240,
+  "ok_requests": 240,
+  "overall_p50_ms": 45,
+  "overall_p95_ms": 50,
+  "overall_max_ms": 70,
+  "per_query": [
+    {
+      "query": "avg_over_time(system_cpu_load_average_15m[2m])",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 44,
+      "p95_ms": 50,
+      "max_ms": 53
+    },
+    {
+      "query": "max_over_time(system_cpu_load_average_15m[2m])",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 45,
+      "p95_ms": 50,
+      "max_ms": 50
+    },
+    {
+      "query": "rate(system_cpu_load_average_15m[1m])",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 45,
+      "p95_ms": 48,
+      "max_ms": 62
+    },
+    {
+      "query": "sum by (job) (rate(system_cpu_load_average_15m[1m]))",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 44,
+      "p95_ms": 51,
+      "max_ms": 56
+    },
+    {
+      "query": "sum(rate(system_cpu_load_average_15m[1m]))",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 45,
+      "p95_ms": 48,
+      "max_ms": 48
+    },
+    {
+      "query": "system_cpu_load_average_15m",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 45,
+      "p95_ms": 52,
+      "max_ms": 70
+    },
+    {
+      "query": "{__name__=\"system_cpu_load_average_15m\",job=\"prom-bench-host\"}",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 46,
+      "p95_ms": 57,
+      "max_ms": 57
+    },
+    {
+      "query": "{__name__=\"system_cpu_load_average_15m\"}",
+      "n": 30,
+      "ok": 30,
+      "p50_ms": 44,
+      "p95_ms": 53,
+      "max_ms": 64
+    }
+  ]
+}

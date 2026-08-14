@@ -323,6 +323,7 @@ grafana-down:
 
 # Softprobe-only Prom micro-benchmark (Option A): hostmetrics OTLP + curated PromQL.
 # Writes docs/perf/results/<stamp>-<label>.{json,md}. Override: BENCH_LABEL=… LEAVE_UP=1
+# Small-file stress: BENCH_FORCE_PARQUET=1 BENCH_LABEL=small-files make bench-prom-baseline
 # Short smoke: BENCH_WARMUP_SECS=15 BENCH_MEASURE_SECS=20 make bench-prom-baseline
 bench-prom-baseline: ensure-cache
 	@chmod +x scripts/bench-prom-baseline.sh scripts/bench-prom-down.sh

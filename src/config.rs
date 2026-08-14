@@ -203,7 +203,9 @@ fn default_target_file_size_bytes() -> usize {
 }
 
 fn default_interval_seconds() -> u64 {
-    3600
+    // Flush-through OTLP creates many small files under demo/Grafana churn;
+    // merge every 5m by default so query scans do not wait an hour.
+    300
 }
 
 fn default_max_snapshot_age_seconds() -> u64 {
@@ -458,6 +460,15 @@ mod tests {
         assert_eq!(parsed.server.port, c.server.port);
         assert_eq!(parsed.object_store.region, c.object_store.region);
         assert_eq!(parsed.ducklake.catalog_type, c.ducklake.catalog_type);
+    }
+
+    #[test]
+    fn maintenance_defaults_favor_frequent_compaction() {
+        let c = Config::default();
+        assert_eq!(c.maintenance.interval_seconds, 300);
+        assert_eq!(c.maintenance.metadata_interval_seconds, 300);
+        assert!(c.maintenance.enabled);
+        assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
