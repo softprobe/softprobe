@@ -1,0 +1,77 @@
+{
+  "stamp": "20260814T005209Z",
+  "label": "baseline",
+  "git_sha": "e23102d",
+  "metric": "aspnetcore_memory_pool_allocated",
+  "warmup_secs": 25,
+  "measure_secs": 30,
+  "repeat": 2,
+  "rounds": 12,
+  "softprobe_rss_kb": 734260,
+  "data_bytes": 9586826,
+  "data_file_count": 758,
+  "parquet_file_count": 756,
+  "total_requests": 168,
+  "ok_requests": 168,
+  "overall_p50_ms": 70,
+  "overall_p95_ms": 110,
+  "overall_max_ms": 1430,
+  "per_query": [
+    {
+      "query": "aspnetcore_memory_pool_allocated",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 72,
+      "p95_ms": 1063,
+      "max_ms": 1430
+    },
+    {
+      "query": "avg_over_time(aspnetcore_memory_pool_allocated[2m])",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 69,
+      "p95_ms": 78,
+      "max_ms": 82
+    },
+    {
+      "query": "max_over_time(aspnetcore_memory_pool_allocated[2m])",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 69,
+      "p95_ms": 86,
+      "max_ms": 150
+    },
+    {
+      "query": "rate(aspnetcore_memory_pool_allocated[1m])",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 71,
+      "p95_ms": 101,
+      "max_ms": 390
+    },
+    {
+      "query": "sum by (job) (rate(aspnetcore_memory_pool_allocated[1m]))",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 67,
+      "p95_ms": 89,
+      "max_ms": 126
+    },
+    {
+      "query": "sum(rate(aspnetcore_memory_pool_allocated[1m]))",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 71,
+      "p95_ms": 93,
+      "max_ms": 1088
+    },
+    {
+      "query": "{__name__=\"aspnetcore_memory_pool_allocated\"}",
+      "n": 24,
+      "ok": 24,
+      "p50_ms": 72,
+      "p95_ms": 181,
+      "max_ms": 1102
+    }
+  ]
+}

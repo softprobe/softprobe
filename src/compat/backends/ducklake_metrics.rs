@@ -12,7 +12,7 @@ use crate::compat::projection::prometheus::{
 use crate::compat::tenant::TenantContext;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
-use crate::storage::schema::variant_json_to_string_map;
+use crate::storage::schema::{variant_json_to_string_map, variant_varchar};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -141,8 +141,9 @@ impl DuckLakeMetricsBackend {
 
     /// Push common equality matchers into SQL to avoid full-window table scans.
     ///
-    /// Only `__name__` and `job` (OTel `service.name`) — other matchers still
-    /// filter after Prometheus projection in Rust.
+    /// Pushed today: `__name__` → typed `metric_name`; `job` / `instance` via
+    /// DuckLake VARIANT field access (not `CAST(... AS JSON)`). Other matchers
+    /// still filter after Prometheus projection in Rust.
     ///
     /// Classic histogram/summary selectors use expanded Prometheus names
     /// (`{base}_bucket` / `_sum` / `_count`) while DuckLake stores the OTel
@@ -164,11 +165,28 @@ impl DuckLakeMetricsBackend {
                 ));
             } else if m.name == "job" {
                 let lit = sql_string_literal(&m.value);
+                // Prefer VARIANT shredding paths over JSON extract so DuckLake can
+                // prune shredded nested fields / file stats.
                 parts.push(format!(
-                    "(json_extract_string(CAST(resource_attributes AS JSON), '$.\"service.name\"') = {lit} \
-                     OR json_extract_string(CAST(attributes AS JSON), '$.\"service.name\"') = {lit} \
-                     OR json_extract_string(CAST(attributes AS JSON), '$.job') = {lit} \
-                     OR json_extract_string(CAST(resource_attributes AS JSON), '$.job') = {lit})"
+                    "({svc_res} = {lit} OR {svc_attr} = {lit} OR {job_attr} = {lit} OR {job_res} = {lit})",
+                    svc_res = variant_varchar("resource_attributes", "service.name"),
+                    svc_attr = variant_varchar("attributes", "service.name"),
+                    job_attr = variant_varchar("attributes", "job"),
+                    job_res = variant_varchar("resource_attributes", "job"),
+                    lit = lit,
+                ));
+            } else if m.name == "instance" {
+                let lit = sql_string_literal(&m.value);
+                parts.push(format!(
+                    "({inst_res} = {lit} OR {inst_attr} = {lit} OR {host_res} = {lit} OR {host_attr} = {lit} \
+                     OR {inst_label_attr} = {lit} OR {inst_label_res} = {lit})",
+                    inst_res = variant_varchar("resource_attributes", "service.instance.id"),
+                    inst_attr = variant_varchar("attributes", "service.instance.id"),
+                    host_res = variant_varchar("resource_attributes", "host.name"),
+                    host_attr = variant_varchar("attributes", "host.name"),
+                    inst_label_attr = variant_varchar("attributes", "instance"),
+                    inst_label_res = variant_varchar("resource_attributes", "instance"),
+                    lit = lit,
                 ));
             }
         }
@@ -749,7 +767,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matcher_predicates_push_name_and_job() {
+    fn matcher_predicates_push_name_job_instance_via_variant() {
         let sql = DuckLakeMetricsBackend::matcher_predicates(&[
             LabelMatcher {
                 name: "__name__".into(),
@@ -763,14 +781,37 @@ mod tests {
             },
             LabelMatcher {
                 name: "instance".into(),
+                op: MatcherOp::Eq,
+                value: "host-1".into(),
+            },
+            LabelMatcher {
+                name: "extra".into(),
                 op: MatcherOp::Re,
                 value: ".*".into(),
             },
         ]);
         assert!(sql.contains("regexp_replace(metric_name"));
-        assert!(sql.contains("service.name"));
+        assert!(
+            sql.contains("CAST(resource_attributes['service.name'] AS VARCHAR)"),
+            "job must use VARIANT field access, got {sql}"
+        );
+        assert!(
+            sql.contains("CAST(resource_attributes['host.name'] AS VARCHAR)")
+                || sql.contains("CAST(resource_attributes['service.instance.id'] AS VARCHAR)"),
+            "instance must use VARIANT field access, got {sql}"
+        );
+        assert!(
+            !sql.contains("json_extract_string"),
+            "must not defeat shredding with JSON extract: {sql}"
+        );
+        assert!(
+            !sql.contains("CAST(attributes AS JSON)")
+                && !sql.contains("CAST(resource_attributes AS JSON)"),
+            "matcher predicates must not CAST entire VARIANT to JSON: {sql}"
+        );
         assert!(sql.contains("'checkout'"));
-        assert!(!sql.contains("instance"));
+        assert!(sql.contains("'host-1'"));
+        assert!(!sql.contains("extra"));
     }
 
     #[test]

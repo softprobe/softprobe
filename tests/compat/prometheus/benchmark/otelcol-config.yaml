@@ -1,0 +1,35 @@
+# Host metrics → Softprobe OTLP/HTTP (Prom micro-benchmark).
+# Pin image via docker-compose.yml.
+
+receivers:
+  hostmetrics:
+    collection_interval: 5s
+    scrapers:
+      cpu:
+      memory:
+      load:
+      network:
+
+processors:
+  resource:
+    attributes:
+      - key: service.name
+        value: prom-bench-host
+        action: upsert
+
+exporters:
+  otlphttp/softprobe:
+    endpoint: http://host.docker.internal:8090
+    tls:
+      insecure: true
+    headers:
+      Authorization: "Bearer local-dev-key"
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resource]
+      exporters: [otlphttp/softprobe, debug]

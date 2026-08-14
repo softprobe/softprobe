@@ -28,7 +28,8 @@ Rules:
 - **`query_range` / PromQL range eval:** one DuckDB fetch per unique selector
   (window = `[start − lookback|range − offset, end − offset]`), then evaluate
   every `step` in memory. Do **not** issue SQL per step (Grafana refresh was
-  O(steps) otherwise). Equality pushdown for `__name__` / `job` reduces scanned rows.
+  O(steps) otherwise). Equality pushdown for `__name__` / `job` / `instance`
+  uses typed `metric_name` and VARIANT field access (not JSON extract).
 
 ---
 
@@ -75,6 +76,13 @@ Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `gr
 | `max_response_bytes` | Enforced on success envelope encode; overrun → `limit_exceeded` |
 
 ---
+
+## Performance (findings + plan)
+
+Storage-feature utilization, small-file/compaction gaps, and an open
+competitor-comparable benchmark plan (VictoriaMetrics
+`prometheus-benchmark` via OTLP write + Prom query):
+[`../perf/prometheus-query-findings.md`](../perf/prometheus-query-findings.md).
 
 ## Mini differential (Slice C)
 

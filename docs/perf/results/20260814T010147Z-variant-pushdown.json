@@ -1,0 +1,85 @@
+{
+  "stamp": "20260814T010147Z",
+  "label": "variant-pushdown",
+  "git_sha": "e23102d",
+  "metric": "system_cpu_load_average_15m",
+  "warmup_secs": 25,
+  "measure_secs": 30,
+  "repeat": 2,
+  "rounds": 19,
+  "softprobe_rss_kb": 427772,
+  "data_bytes": 88148,
+  "data_file_count": 12,
+  "parquet_file_count": 12,
+  "total_requests": 304,
+  "ok_requests": 304,
+  "overall_p50_ms": 37,
+  "overall_p95_ms": 42,
+  "overall_max_ms": 68,
+  "per_query": [
+    {
+      "query": "avg_over_time(system_cpu_load_average_15m[2m])",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 42,
+      "max_ms": 47
+    },
+    {
+      "query": "max_over_time(system_cpu_load_average_15m[2m])",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 42,
+      "max_ms": 43
+    },
+    {
+      "query": "rate(system_cpu_load_average_15m[1m])",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 42,
+      "max_ms": 42
+    },
+    {
+      "query": "sum by (job) (rate(system_cpu_load_average_15m[1m]))",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 37,
+      "p95_ms": 42,
+      "max_ms": 51
+    },
+    {
+      "query": "sum(rate(system_cpu_load_average_15m[1m]))",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 41,
+      "max_ms": 47
+    },
+    {
+      "query": "system_cpu_load_average_15m",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 56,
+      "max_ms": 68
+    },
+    {
+      "query": "{__name__=\"system_cpu_load_average_15m\",job=\"prom-bench-host\"}",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 38,
+      "p95_ms": 41,
+      "max_ms": 42
+    },
+    {
+      "query": "{__name__=\"system_cpu_load_average_15m\"}",
+      "n": 38,
+      "ok": 38,
+      "p50_ms": 36,
+      "p95_ms": 43,
+      "max_ms": 48
+    }
+  ]
+}

@@ -24,7 +24,8 @@ SHELL := /bin/bash
 	test test-e2e test-perf ci release _release \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
-	grafana-up grafana-down
+	grafana-up grafana-down \
+	bench-prom-baseline bench-prom-down
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
@@ -91,6 +92,7 @@ help:
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
 	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke"
+	@echo "Bench:    bench-prom-baseline | bench-prom-down"
 	@echo ""
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
@@ -318,6 +320,17 @@ grafana-up: ensure-cache
 grafana-down:
 	@chmod +x scripts/grafana-manual-down.sh
 	./scripts/grafana-manual-down.sh
+
+# Softprobe-only Prom micro-benchmark (Option A): hostmetrics OTLP + curated PromQL.
+# Writes docs/perf/results/<stamp>-<label>.{json,md}. Override: BENCH_LABEL=… LEAVE_UP=1
+# Short smoke: BENCH_WARMUP_SECS=15 BENCH_MEASURE_SECS=20 make bench-prom-baseline
+bench-prom-baseline: ensure-cache
+	@chmod +x scripts/bench-prom-baseline.sh scripts/bench-prom-down.sh
+	./scripts/bench-prom-baseline.sh
+
+bench-prom-down:
+	@chmod +x scripts/bench-prom-down.sh
+	./scripts/bench-prom-down.sh
 
 test-e2e: ensure-cache check-infra
 	@set -e; \
