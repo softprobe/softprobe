@@ -239,9 +239,9 @@ pub fn parse_variant_stats_path(path: &str) -> Option<String> {
     if trimmed.starts_with("element.") || trimmed.starts_with("element\"") {
         return None;
     }
-    let Some(inner) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
-        return None;
-    };
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))?;
     let unescaped = inner.replace("\"\"", "\"");
     if unescaped.is_empty() || unescaped == "root" || unescaped == "element" {
         return None;
