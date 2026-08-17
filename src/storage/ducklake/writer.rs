@@ -204,10 +204,22 @@ impl DuckLakeWriter {
         dk: &DuckLakeConfig,
         table: &TelemetryTable,
     ) -> Result<()> {
+        if matches!(table, TelemetryTable::Metrics) {
+            // Layout family replaces fat `metrics` for DDL ensure (promotions / empty bootstrap).
+            let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+            let pool = self.get_or_create_pool(dk)?;
+            return tokio::task::spawn_blocking(move || {
+                pool.with_conn(|conn| {
+                    crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)
+                })
+            })
+            .await
+            .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))?;
+        }
         let (table_name, schema) = match table {
             TelemetryTable::Traces => ("traces", TraceTable::schema()),
             TelemetryTable::Logs => ("logs", OtlpLogsTable::schema()),
-            TelemetryTable::Metrics => ("metrics", OtlpMetricsTable::schema()),
+            TelemetryTable::Metrics => unreachable!("handled above"),
         };
         let arrow_schema = Arc::new(schema);
         let batch = RecordBatch::new_empty(arrow_schema);

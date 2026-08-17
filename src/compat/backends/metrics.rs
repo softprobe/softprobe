@@ -44,6 +44,11 @@ pub struct MetricsQueryRequest {
     pub end_ms: Option<i64>,
     /// Single selector matchers (AND).
     pub matchers: Vec<LabelMatcher>,
+    /// Grafana/Prom `step` for grain selection (§9.1: step ≥ 1h → prefer 1h).
+    pub step_ms: Option<i64>,
+    /// When set, fetch from `metric_collapse_job_1h` for this metric (§9.1 step 5).
+    /// Used for `sum by (job) (rate|irate|increase(…))` when window ≥ 2h.
+    pub collapse_metric: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +222,8 @@ mod tests {
                     start_ms: None,
                     end_ms: None,
                     matchers: vec![],
+                    step_ms: None,
+                    collapse_metric: None,
                 },
             )
             .await

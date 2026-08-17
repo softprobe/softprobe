@@ -90,7 +90,7 @@ Canonical contract: [`promotion.md`](promotion.md).
 
 ## Proposed: metrics time-series layout on DuckLake
 
-**Date:** 2026-08-14
+**Date:** 2026-08-15 (redesign after GreptimeDB study; original goals 2026-08-14)
 **Status:** Proposed — not accepted until the verification report maps every
 AC-\* id in [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
 
@@ -104,16 +104,17 @@ queries fast.
 
 ### Decision (proposed)
 
-Keep DuckLake as the only store. Split metrics into per-day `metric_series` +
-`metric_postings` + skinny `metric_samples` / `metric_hist_samples`, with
-maintenance-built 5m/1h downsamples and `metric_collapse_job_1h`. Raise the
-Prom range ceiling to 90 days. Expire snapshots and clean orphan files at
-**second** granularity. Do not hive-partition by `metric_name`.
+Keep DuckLake as the only store. **Learn from GreptimeDB** (TWCS, inverted-index *ideas*, metric-engine multiplexing, Flow-style rollups) without forking or embedding it. Split metrics into per-day `metric_series` + `metric_postings` + skinny samples/hist, with **TWCS-shaped** maintenance, 5m/1h downsamples, and `metric_collapse_job_1h`. **Remove** Softprobe-imposed Prom `max_query_range` (retention/TTL bounds data, like Greptime). Expire snapshots at **second** granularity.
+
+**Programmable Softprobe∶Greptime gate (G9):** shared OTLP fixtures; Softprobe_p95 ≤ **10 ×** Greptime_p95 on a pinned query set under `make test-perf` (`COMPARE_GREPTIME=1`). Beating Greptime remains a non-goal. Expected healthy gap ~2–10× (§4.4). Matching Greptime p50 requires reopening G1 or flush-through — not a silent sidecar.
+
+**Query range:** no Softprobe-imposed Prom max (not 90d / not 180d). Like Greptime, retention/TTL decides availability; planner uses 1h/collapse for all windows > 48h. Tested SLO windows remain 30d / 90d / 180d.
 
 ### Consequences (if accepted)
 
-- Flush-through ingest still commits once per OTLP request; snapshot **count**
-  is `ceil(age / commit_interval) + headroom`, not an unbounded catalog.
-- Prom resolves series from postings and fails loud at `max_series`.
-- SQL names `union_metrics` / `committed_metrics` remain.
-- Layout tests live under `make test-perf` (no new public Make target).
+- Flush-through ingest still commits once per OTLP request; snapshot **count** is `ceil(age / commit_interval) + headroom`.
+- Prom resolves series from day postings (not SST row-group prune) and fails loud at `max_series`.
+- SQL names `union_metrics` / `committed_metrics` remain; Prom must not scan the fat/view path.
+- Layout + G9 tests live under `make test-perf` (no new public Make target).
+- Research clone `./greptime` is reference + **external** bench target only.
+- Ready gate: 49 AC ids, `release_full` JSON schema, Greptime ratio rows required.

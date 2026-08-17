@@ -129,16 +129,87 @@ wait_for_demo_metrics() {
     exit 1
   fi
   echo "==> Softprobe metric names: $(echo "$body" | head -c 400)…"
+
+  # Require real scrape continuity — lookback of one sample draws flat Grafana lines.
+  # Prefer a counter that moves under load (not k6_vus, which can be constant).
+  echo "==> waiting for non-identical Prom samples (live scrapes)"
+  local vary=0
+  local end start payload changes q
+  for _ in $(seq 1 90); do
+    end="$(date +%s)"
+    start="$((end - 300))"
+    for q in \
+      'http_server_request_duration_count' \
+      'traces_span_metrics_calls' \
+      'demo_ad_served_total' \
+      'k6_iterations'
+    do
+      payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-urlencode "query=$q" \
+        --data "start=$start&end=$end&step=15" \
+        "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null || true)"
+      printf '%s' "$payload" > /tmp/thelake-grafana-prom-live.json
+      changes="$(python3 - <<'PY'
+import json
+try:
+    d = json.load(open("/tmp/thelake-grafana-prom-live.json"))
+except Exception:
+    print(0)
+    raise SystemExit
+rows = (d.get("data") or {}).get("result") or []
+best = 0
+for s in rows:
+    vals = [float(v) for _, v in (s.get("values") or [])]
+    ch = sum(1 for a, b in zip(vals, vals[1:]) if a != b)
+    best = max(best, ch)
+print(best)
+PY
+)"
+      if [[ "${changes:-0}" -ge 2 ]]; then
+        vary=1
+        echo "==> live scrapes OK ($q value changes=$changes)"
+        break 2
+      fi
+    done
+    sleep 5
+  done
+  if [[ "$vary" != 1 ]]; then
+    echo "ERROR: Prom series stayed flat (lookback of a single scrape). Ingest is not continuous." >&2
+    echo "  collector: docker logs otel-collector 2>&1 | tail -60" >&2
+    echo "  softprobe: tail -60 $LOG" >&2
+    exit 1
+  fi
 }
 
-# Reuse if Softprobe + Grafana + demo collector already healthy.
+# Reuse if Softprobe + Grafana + demo collector already healthy *and* ingest is live.
 if our_softprobe_running \
   && curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
   && curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1 \
   && docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q true; then
-  echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector)."
-  print_ready
-  exit 0
+  # Flat lookback lines mean the collector is timing out — do not claim "already up".
+  end_now="$(date +%s)"
+  start_now="$((end_now - 180))"
+  live_changes="$(curl -sf -m 20 -H "Authorization: Bearer $API_KEY" \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    --data-urlencode 'query=demo_ad_served_total' \
+    --data "start=$start_now&end=$end_now&step=15" \
+    "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null \
+    | python3 -c 'import sys,json
+try:
+ d=json.load(sys.stdin); r=(d.get("data") or {}).get("result") or []; best=0
+ for s in r:
+  vals=[float(v) for _,v in (s.get("values") or [])]
+  best=max(best, sum(1 for a,b in zip(vals,vals[1:]) if a!=b))
+ print(best)
+except Exception:
+ print(0)' || echo 0)"
+  if [[ "${live_changes:-0}" -ge 2 ]]; then
+    echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live scrapes OK)."
+    print_ready
+    exit 0
+  fi
+  echo "already up but Prom series are flat (changes=${live_changes:-0}); rebuilding stack for live ingest."
 fi
 
 if port_busy 8090 && ! our_softprobe_running; then
@@ -183,12 +254,16 @@ reset_grafana_state() {
 
 reset_grafana_state
 
-echo "==> building softprobe-runtime"
-cargo build -q --bin softprobe-runtime
+echo "==> building softprobe-runtime (release; AC-S3)"
+if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
+  make -C "$ROOT" build-release
+else
+  cargo build -q --release --bin softprobe-runtime
+fi
 
-RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/debug/softprobe-runtime"
+RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/release/softprobe-runtime"
 if [[ ! -x "$RUNTIME_BIN" ]]; then
-  echo "ERROR: missing $RUNTIME_BIN" >&2
+  echo "ERROR: missing $RUNTIME_BIN (expected release binary)" >&2
   exit 1
 fi
 
@@ -239,13 +314,14 @@ query:
   max_connections: 4
   cache_dir: "$STATE_DIR/cache"
 
+# Demo ingest + Grafana refresh: skip maintenance storms (small-file thrash).
 maintenance:
-  enabled: true
+  enabled: false
   target_file_size_bytes: 67108864
   interval_seconds: 300
-  metadata_enabled: true
+  metadata_enabled: false
   metadata_interval_seconds: 300
-  remove_orphan_files_enabled: true
+  remove_orphan_files_enabled: false
   remove_orphan_older_than_seconds: 0
 
 ducklake:
@@ -255,7 +331,7 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 10000
-  writer_pool_size: 2
+  writer_pool_size: 4
 
 dropdown_catalog:
   enabled: false

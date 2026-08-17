@@ -42,6 +42,14 @@ impl QueryEngine {
         self.duckdb.catalog_alias()
     }
 
+    /// Schema-qualified layout prefix (`softprobe` or `softprobe.<tenant_schema>`).
+    ///
+    /// Must match ingest `layout_catalog_prefix` so Prom postings/sample SQL hits
+    /// the same `metric_*` tables the writer populates.
+    pub fn layout_catalog_prefix(&self) -> String {
+        self.duckdb.layout_catalog_prefix()
+    }
+
     pub async fn execute_query(&self, query: &str) -> anyhow::Result<duckdb::QueryResult> {
         self.duckdb.execute_query(query).await
     }

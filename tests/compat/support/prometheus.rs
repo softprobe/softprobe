@@ -6,8 +6,8 @@ use axum::Router;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{
-    metric::Data, number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
-    Sum,
+    metric::Data, number_data_point, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
+    ResourceMetrics, ScopeMetrics, Sum,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message;
@@ -172,6 +172,71 @@ fn number_series_otlp(
                     description: "promqltest".into(),
                     unit: "1".into(),
                     data: Some(data),
+                    metadata: vec![],
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+    req.encode_to_vec()
+}
+
+/// Classic histogram series: `(time_unix_nano, count, sum)` samples share one series identity.
+///
+/// Prom expands to `{name}_count` / `{name}_bucket` / `{name}_sum` (AC-H1 / F-gold).
+pub fn histogram_series_otlp(
+    metric_name: &str,
+    job: &str,
+    datapoint_labels: &[(&str, &str)],
+    samples: &[(u64, u64, f64)],
+) -> Vec<u8> {
+    let attrs: Vec<KeyValue> = datapoint_labels
+        .iter()
+        .map(|(k, v)| KeyValue {
+            key: (*k).into(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue((*v).into())),
+            }),
+        })
+        .collect();
+    let data_points: Vec<HistogramDataPoint> = samples
+        .iter()
+        .map(|(ts, count, sum)| HistogramDataPoint {
+            attributes: attrs.clone(),
+            start_time_unix_nano: 0,
+            time_unix_nano: *ts,
+            count: *count,
+            sum: Some(*sum),
+            bucket_counts: vec![(*count).saturating_sub(count / 2), count / 2],
+            explicit_bounds: vec![50.0],
+            exemplars: vec![],
+            flags: 0,
+            min: Some(1.0),
+            max: Some(80.0),
+        })
+        .collect();
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue(job.into())),
+                    }),
+                }],
+                dropped_attributes_count: 0,
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: None,
+                metrics: vec![Metric {
+                    name: metric_name.into(),
+                    description: "test histogram".into(),
+                    unit: "ms".into(),
+                    data: Some(Data::Histogram(Histogram {
+                        data_points,
+                        aggregation_temporality: 2, // CUMULATIVE
+                    })),
                     metadata: vec![],
                 }],
                 schema_url: String::new(),

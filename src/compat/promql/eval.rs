@@ -54,6 +54,12 @@ pub async fn eval_instant(
 /// Fetches each selector once over `[start - lookback/range, end]` from DuckDB,
 /// then evaluates every step in memory. Grafana `query_range` uses many steps
 /// (e.g. 1h @ 15s ≈ 240); a per-step SQL scan made refreshes multi‑second.
+///
+/// Lookback is `max(5m, step)` so 1h-grain / collapse points remain visible when
+/// Grafana's eval timestamps are not hour-aligned (AC-Q2 / AC-W5). Long-window
+/// `sum by (job) (rate|irate|increase(...))` short-circuits to the collapse
+/// table samples (Softprobe Flow analog — AC-Q5 / AC-W3): re-running `rate[5m]`
+/// on hourly points cannot produce ≥2 samples in a 5m window.
 pub async fn eval_range(
     backend: &dyn MetricsQueryBackend,
     ctx: &TenantContext,
@@ -75,13 +81,27 @@ pub async fn eval_range(
         ));
     }
 
-    let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms).await?;
+    let range_ms = (end_ms - start_ms).abs();
+    let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
 
+    // §9.1 step 5: collapse table already holds sum-by-job series at 1h grain.
+    if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
+        let series = prefetch.flat_series();
+        return Ok(EvalResult::Matrix(matrix_from_grain_series(
+            &series,
+            start_ms,
+            end_ms,
+            step_ms,
+            ONE_HOUR_LOOKBACK_MS,
+        )));
+    }
+
+    let lookback = range_lookback_ms(step_ms);
     // Matrix output: for each series identity, collect (ts, value) at each step.
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
     let mut t = start_ms;
     while t <= end_ms {
-        let instant = eval_expr(&prefetch, ctx, expr, t, None).await?;
+        let instant = eval_expr(&prefetch, ctx, expr, t, Some(lookback)).await?;
         match instant {
             EvalResult::Vector(v) => {
                 for s in v.samples {
@@ -139,15 +159,64 @@ struct PrefetchBackend {
 }
 
 impl PrefetchBackend {
+    fn flat_series(&self) -> Vec<MetricSeries> {
+        let mut out = Vec::new();
+        for (_, series) in &self.entries {
+            out.extend(series.iter().cloned());
+        }
+        out
+    }
+
     async fn load(
         backend: &dyn MetricsQueryBackend,
         ctx: &TenantContext,
         expr: &Expr,
         start_ms: i64,
         end_ms: i64,
+        step_ms: i64,
     ) -> Result<Self, CompatError> {
+        let range_ms = (end_ms - start_ms).abs();
+        // §9.1 step 5: sum by (job) (rate|irate|increase) over ≥2h → collapse table.
+        if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
+            let metric = crate::compaction::collapse::collapse_metric_name(expr).ok_or_else(|| {
+                CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "collapse path requires a metric __name__ selector",
+                )
+            })?;
+            let mut needs = Vec::new();
+            collect_selector_needs(expr, &mut needs)?;
+            let matchers = needs
+                .into_iter()
+                .next()
+                .map(|n| n.matchers)
+                .unwrap_or_default();
+            let series = backend
+                .query_range(
+                    ctx,
+                    MetricsQueryRequest {
+                        start_ms: Some(start_ms),
+                        end_ms: Some(end_ms),
+                        matchers: matchers.clone(),
+                        step_ms: Some(step_ms),
+                        collapse_metric: Some(metric),
+                    },
+                )
+                .await?;
+            return Ok(Self {
+                entries: vec![(matchers, series)],
+            });
+        }
+
         let mut needs = Vec::new();
         collect_selector_needs(expr, &mut needs)?;
+        // Expand plain-selector lookback to cover Grafana step on 1h grain (AC-Q2).
+        let step_lookback = range_lookback_ms(step_ms);
+        for need in &mut needs {
+            if need.window_ms <= default_lookback_ms() {
+                need.window_ms = step_lookback;
+            }
+        }
 
         // Merge overlapping fetch windows for identical matcher sets.
         let mut merged: Vec<(Vec<LabelMatcher>, i64, i64)> = Vec::new();
@@ -174,6 +243,8 @@ impl PrefetchBackend {
                         start_ms: Some(fetch_start),
                         end_ms: Some(fetch_end),
                         matchers: matchers.clone(),
+                        step_ms: Some(step_ms),
+                        collapse_metric: None,
                     },
                 )
                 .await?;
@@ -313,11 +384,10 @@ async fn eval_expr(
     eval_ms: i64,
     lookback_ms: Option<i64>,
 ) -> Result<EvalResult, CompatError> {
-    let _ = lookback_ms;
     match expr {
-        Expr::Paren(p) => Box::pin(eval_expr(backend, ctx, &p.expr, eval_ms, None)).await,
+        Expr::Paren(p) => Box::pin(eval_expr(backend, ctx, &p.expr, eval_ms, lookback_ms)).await,
         Expr::Unary(u) => {
-            let inner = Box::pin(eval_expr(backend, ctx, &u.expr, eval_ms, None)).await?;
+            let inner = Box::pin(eval_expr(backend, ctx, &u.expr, eval_ms, lookback_ms)).await?;
             Ok(negate(inner, eval_ms)?)
         }
         Expr::NumberLiteral(n) => Ok(EvalResult::Scalar {
@@ -329,9 +399,9 @@ async fn eval_expr(
             let matchers = extract_selector_matchers(vs)?;
             let off = offset_shift_ms(&vs.offset);
             let data_ms = eval_ms - off;
-            let series =
-                fetch_series(backend, ctx, &matchers, data_ms, default_lookback_ms()).await?;
-            let mut vector = instant_vector_at(&series, data_ms);
+            let lookback = lookback_ms.unwrap_or_else(default_lookback_ms);
+            let series = fetch_series(backend, ctx, &matchers, data_ms, lookback).await?;
+            let mut vector = instant_vector_at(&series, data_ms, lookback);
             for s in &mut vector.samples {
                 s.timestamp_ms = eval_ms;
             }
@@ -349,14 +419,14 @@ async fn eval_expr(
         }
         Expr::Call(c) => eval_call(backend, ctx, c, eval_ms).await,
         Expr::Aggregate(a) => {
-            let inner = Box::pin(eval_expr(backend, ctx, &a.expr, eval_ms, None)).await?;
+            let inner = Box::pin(eval_expr(backend, ctx, &a.expr, eval_ms, lookback_ms)).await?;
             let vector = expect_vector(inner)?;
             let op = a.op.id();
             if op == T_TOPK || op == T_BOTTOMK {
                 let param = a.param.as_ref().ok_or_else(|| {
                     CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
                 })?;
-                let k_val = Box::pin(eval_expr(backend, ctx, param, eval_ms, None)).await?;
+                let k_val = Box::pin(eval_expr(backend, ctx, param, eval_ms, lookback_ms)).await?;
                 let k = expect_scalar_k(k_val)?;
                 Ok(EvalResult::Vector(aggregate_topk(
                     k,
@@ -375,8 +445,8 @@ async fn eval_expr(
             }
         }
         Expr::Binary(b) => {
-            let lhs = Box::pin(eval_expr(backend, ctx, &b.lhs, eval_ms, None)).await?;
-            let rhs = Box::pin(eval_expr(backend, ctx, &b.rhs, eval_ms, None)).await?;
+            let lhs = Box::pin(eval_expr(backend, ctx, &b.lhs, eval_ms, lookback_ms)).await?;
+            let rhs = Box::pin(eval_expr(backend, ctx, &b.rhs, eval_ms, lookback_ms)).await?;
             let id = b.op.id();
             if id == T_LAND || id == T_LOR || id == T_LUNLESS {
                 eval_set_op(id, lhs, rhs, eval_ms)
@@ -391,6 +461,52 @@ async fn eval_expr(
 
 fn default_lookback_ms() -> i64 {
     5 * 60 * 1000
+}
+
+/// 1h grain / collapse sample spacing — lookback must cover one closed hour.
+const ONE_HOUR_LOOKBACK_MS: i64 = 60 * 60 * 1000;
+
+/// Range-query lookback: at least Prometheus 5m, and at least Grafana `step`
+/// so hourly downsample points remain visible when eval times are unaligned.
+fn range_lookback_ms(step_ms: i64) -> i64 {
+    default_lookback_ms().max(step_ms.max(0))
+}
+
+/// Resample grain/collapse series onto the query_range step grid.
+fn matrix_from_grain_series(
+    series: &[MetricSeries],
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+    lookback_ms: i64,
+) -> MatrixResult {
+    let mut out = Vec::with_capacity(series.len());
+    for s in series {
+        let mut samples = Vec::new();
+        let mut t = start_ms;
+        while t <= end_ms {
+            if let Some(sample) = latest_sample_in_window(&s.samples, t - lookback_ms, t) {
+                if !sample.value.is_nan() {
+                    samples.push(Sample {
+                        timestamp_ms: t,
+                        value: sample.value,
+                    });
+                }
+            }
+            let next = t.saturating_add(step_ms);
+            if next <= t {
+                break;
+            }
+            t = next;
+        }
+        if !samples.is_empty() {
+            out.push(MetricSeries {
+                labels: s.labels.clone(),
+                samples,
+            });
+        }
+    }
+    MatrixResult { series: out }
 }
 
 /// Prometheus `offset` shifts the data timestamp: `metric offset 5m` reads data from 5m earlier.
@@ -417,6 +533,8 @@ async fn fetch_series(
                 start_ms: Some(start_ms),
                 end_ms: Some(eval_ms),
                 matchers: matchers.to_vec(),
+                step_ms: None,
+                collapse_metric: None,
             },
         )
         .await
@@ -434,11 +552,10 @@ fn truncate_to_window(series: Vec<MetricSeries>, start_ms: i64, end_ms: i64) -> 
         .collect()
 }
 
-fn instant_vector_at(series: &[MetricSeries], eval_ms: i64) -> VectorResult {
-    let lookback = default_lookback_ms();
+fn instant_vector_at(series: &[MetricSeries], eval_ms: i64, lookback_ms: i64) -> VectorResult {
     let mut samples = Vec::new();
     for s in series {
-        if let Some(sample) = latest_sample_in_window(&s.samples, eval_ms - lookback, eval_ms) {
+        if let Some(sample) = latest_sample_in_window(&s.samples, eval_ms - lookback_ms, eval_ms) {
             // Prometheus omits series whose latest lookback sample is stale/NaN.
             if sample.value.is_nan() {
                 continue;
@@ -2007,5 +2124,265 @@ mod tests {
             op: MatcherOp::Eq,
             value: "y".into(),
         };
+    }
+
+    /// AC-Q5 / AC-W3: long-window sum-by-job-rate must request collapse_metric on the live path.
+    #[tokio::test]
+    async fn range_eval_wires_collapse_for_sum_by_job_rate() {
+        use std::sync::Mutex;
+        struct CaptureBackend {
+            collapse: Mutex<Option<String>>,
+            last_sql_hint: Mutex<Option<String>>,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CaptureBackend {
+            async fn query_range(
+                &self,
+                _ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                *self.collapse.lock().unwrap() = request.collapse_metric.clone();
+                if let Some(ref m) = request.collapse_metric {
+                    let sql = crate::compaction::collapse::collapse_scan_sql(
+                        "softprobe",
+                        m,
+                        request.start_ms,
+                        request.end_ms,
+                        10_000,
+                    );
+                    assert!(
+                        crate::compaction::collapse::sql_is_collapse_prom_path(&sql),
+                        "live collapse SQL must reference metric_collapse_job_1h: {sql}"
+                    );
+                    *self.last_sql_hint.lock().unwrap() = Some(sql);
+                    let mut labels = BTreeMap::new();
+                    labels.insert("__name__".into(), m.clone());
+                    labels.insert("job".into(), "api".into());
+                    return Ok(vec![MetricSeries {
+                        labels,
+                        samples: vec![
+                            Sample {
+                                timestamp_ms: request.start_ms.unwrap_or(0),
+                                value: 100.0,
+                            },
+                            Sample {
+                                timestamp_ms: request.end_ms.unwrap_or(0),
+                                value: 200.0,
+                            },
+                        ],
+                    }]);
+                }
+                Ok(vec![])
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let backend = CaptureBackend {
+            collapse: Mutex::new(None),
+            last_sql_hint: Mutex::new(None),
+        };
+        let expr = parse_promql(r#"sum by (job) (rate(layout_http[5m]))"#).unwrap();
+        let end = 1_700_000_000_000i64;
+        let start = end - 30 * 24 * 3_600_000; // 30d ≥ 2h
+        let result = eval_range(&backend, &ctx(), &expr, start, end, 3_600_000)
+            .await
+            .expect("collapse range eval");
+        let got = backend.collapse.lock().unwrap().clone();
+        assert_eq!(
+            got.as_deref(),
+            Some("layout_http"),
+            "AC-Q5/W3: Prom path must set collapse_metric"
+        );
+        let sql = backend.last_sql_hint.lock().unwrap().clone().unwrap();
+        assert!(
+            sql.contains("metric_collapse_job_1h"),
+            "AC-Q5/W3 EXPLAIN/SQL must reference collapse table"
+        );
+        match result {
+            EvalResult::Matrix(m) => {
+                assert_eq!(m.series.len(), 1, "collapse short-circuit must keep job series");
+                assert!(
+                    !m.series[0].samples.is_empty(),
+                    "collapse short-circuit must emit points from grain samples"
+                );
+            }
+            other => panic!("expected matrix, got {other:?}"),
+        }
+
+        // Short window must NOT use collapse.
+        let backend2 = CaptureBackend {
+            collapse: Mutex::new(None),
+            last_sql_hint: Mutex::new(None),
+        };
+        let start_short = end - 30 * 60 * 1000; // 30m
+        let _ = eval_range(&backend2, &ctx(), &expr, start_short, end, 15_000)
+            .await;
+        assert!(
+            backend2.collapse.lock().unwrap().is_none(),
+            "window < 2h must not use collapse"
+        );
+    }
+
+    /// AC-Q2 / AC-W5: hourly 1h-grain samples must survive step=1h when eval
+    /// timestamps sit >5m after the hour bucket (EVAL_END misalignment).
+    #[tokio::test]
+    async fn range_eval_1h_step_sees_hourly_samples_past_5m_lookback() {
+        let end = 1_700_000_000_000i64; // 800s past hour → outside default 5m lookback
+        assert!(end % 3_600_000 > 5 * 60 * 1000);
+        let start = end - 30 * 24 * 3_600_000;
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "layout_tall".into());
+        let mut samples = Vec::new();
+        let mut ts = start - (start % 3_600_000);
+        while ts <= end {
+            samples.push(Sample {
+                timestamp_ms: ts,
+                value: 1.0,
+            });
+            ts += 3_600_000;
+        }
+        let backend = MemBackend {
+            series: vec![MetricSeries { labels, samples }],
+        };
+        let expr = parse_promql("layout_tall").unwrap();
+        let result = eval_range(&backend, &ctx(), &expr, start, end, 3_600_000)
+            .await
+            .unwrap();
+        match result {
+            EvalResult::Matrix(m) => {
+                assert_eq!(m.series.len(), 1, "AC-Q2: expected 1 series");
+                assert!(
+                    m.series[0].samples.len() >= 600,
+                    "AC-Q2: expected ≥600 points, got {}",
+                    m.series[0].samples.len()
+                );
+            }
+            other => panic!("expected matrix, got {other:?}"),
+        }
+    }
+
+    /// AC-Q5: collapse path must return J series without requiring rate[5m] on hourly points.
+    #[tokio::test]
+    async fn range_eval_collapse_returns_job_series_on_hourly_grain() {
+        struct CollapseBackend {
+            jobs: Vec<&'static str>,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CollapseBackend {
+            async fn query_range(
+                &self,
+                _ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                assert_eq!(request.collapse_metric.as_deref(), Some("layout_http"));
+                let start = request.start_ms.unwrap_or(0);
+                let end = request.end_ms.unwrap_or(0);
+                let mut out = Vec::new();
+                for (i, job) in self.jobs.iter().enumerate() {
+                    let mut labels = BTreeMap::new();
+                    labels.insert("__name__".into(), "layout_http".into());
+                    labels.insert("job".into(), (*job).into());
+                    let mut samples = Vec::new();
+                    let mut ts = start - (start % 3_600_000);
+                    while ts <= end {
+                        samples.push(Sample {
+                            timestamp_ms: ts,
+                            value: (i + 1) as f64 * 10.0,
+                        });
+                        ts += 3_600_000;
+                    }
+                    out.push(MetricSeries { labels, samples });
+                }
+                Ok(out)
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let backend = CollapseBackend {
+            jobs: vec!["j0", "j1", "j2", "j3", "j4", "j5", "j6", "j7", "j8", "j9"],
+        };
+        let expr = parse_promql(r#"sum by (job) (rate(layout_http[5m]))"#).unwrap();
+        let end = 1_700_000_000_000i64;
+        let start = end - 30 * 24 * 3_600_000;
+        let result = eval_range(&backend, &ctx(), &expr, start, end, 3_600_000)
+            .await
+            .unwrap();
+        match result {
+            EvalResult::Matrix(m) => {
+                assert_eq!(m.series.len(), 10, "AC-Q5: series count must equal J");
+                for s in &m.series {
+                    assert!(
+                        s.samples.len() >= 600,
+                        "AC-Q5: each job needs ≥600 points, got {}",
+                        s.samples.len()
+                    );
+                }
+            }
+            other => panic!("expected matrix, got {other:?}"),
+        }
     }
 }

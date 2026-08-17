@@ -9,8 +9,15 @@ with `THELAKE_CACHE_ROOT`) and starts **minimal + no demo observability stack**:
 docker compose -f compose.yaml -f <thelake>/compose.softprobe.yaml
 ```
 
-Collector extras ([`otelcol-config-extras.yml`](otelcol-config-extras.yml)) batch
-telemetry for 60s, then export traces/metrics/logs to Softprobe at
-`host.docker.internal:8090` with Bearer `local-dev-key`.
+Collector extras ([`otelcol-config-extras.yml`](otelcol-config-extras.yml)):
+
+- Export **metrics only** to Softprobe (`host.docker.internal:8090`, Bearer `local-dev-key`)
+- Receivers limited to GOLD sources: `otlp`, `prometheus/ad`, `span_metrics`
+  (not docker_stats / host_metrics / redis / postgres — those starve ingest)
+- Small batches (128–256) so DuckLake can keep up under Grafana refresh
+- Traces feed `span_metrics` only; logs stay on `debug`
+
+`grafana-up` waits until Prom series show **non-identical** samples (live scrapes),
+not flat lookback lines from a single point.
 
 Requires ~3 GB RAM and Docker. Store UI: http://127.0.0.1:8080

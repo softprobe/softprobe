@@ -22,6 +22,11 @@ make grafana-down
 
 Requires Docker + ~3 GB RAM. Demo cache: `~/.cache/thelake/otel-demo/3.0.0`.
 
+Collector extras send **metrics only** to Softprobe (OTLP + ad Prometheus + spanmetrics),
+in small batches, so Grafana GOLD panels get live non-flat scrapes. Traces/logs stay on
+the collector `debug` exporter (spanmetrics still produced). `grafana-up` refuses to
+declare ready on lookback-only flat series.
+
 ### Dashboard folders
 
 #### Astronomy Shop (service monitoring)

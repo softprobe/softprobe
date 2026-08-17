@@ -4,36 +4,60 @@
 # Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
 # Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — repeat upstream
 # receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
+#
+# Softprobe DuckLake cannot sustain the full demo metrics firehose (docker_stats,
+# host_metrics, redis, postgres, …) plus traces/logs while Grafana refreshes.
+# Keep GOLD-relevant metric sources only; leave traces/logs on debug (+ span_metrics).
 
 processors:
   batch/softprobe:
-    timeout: 60s
-    send_batch_size: 8192
+    timeout: 2s
+    send_batch_size: 128
+    send_batch_max_size: 256
+  memory_limiter/softprobe:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
 
 exporters:
   otlphttp/softprobe:
     endpoint: http://host.docker.internal:8090
     tls:
       insecure: true
+    timeout: 60s
+    compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 15s
+      max_elapsed_time: 120s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 64
 
 service:
   pipelines:
     traces:
+      receivers: [otlp]
       processors:
         [
           resourcedetection,
           memory_limiter,
           transform/sanitize_spans,
           gen_ai_normalizer,
-          batch/softprobe,
         ]
-      exporters: [debug, span_metrics, otlphttp/softprobe]
+      exporters: [debug, span_metrics]
     metrics:
-      processors: [resourcedetection, memory_limiter, batch/softprobe]
+      # GOLD / Astronomy Shop Prom boards: app OTLP + ad Prometheus bridge + spanmetrics.
+      # Drop docker_stats / host_metrics / redis / postgres / nginx / httpcheck — those
+      # dominate volume and starve Softprobe ingest (flat lookback lines in Grafana).
+      receivers: [otlp, prometheus/ad, span_metrics]
+      processors: [resourcedetection, memory_limiter/softprobe, batch/softprobe]
       exporters: [debug, otlphttp/softprobe]
     logs:
-      processors:
-        [resourcedetection, memory_limiter, transform/sanitize_logs, batch/softprobe]
-      exporters: [debug, otlphttp/softprobe]
+      receivers: [otlp]
+      processors: [resourcedetection, memory_limiter, transform/sanitize_logs]
+      exporters: [debug]

@@ -21,15 +21,16 @@ PY
 )"
   echo "==> applying metrics Prom hot-label promotion"
   local resp http
-  http="$(curl -sS -o /tmp/thelake-prom-hot-labels-apply.json -w '%{http_code}' \
+  # Layout metrics tables may not accept the legacy fat-table promotion; don't hang forever.
+  http="$(curl -sS --max-time 60 -o /tmp/thelake-prom-hot-labels-apply.json -w '%{http_code}' \
     -X POST "${base_url%/}/v1/promotions/apply" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
     -d "$payload" || true)"
   if [[ "$http" != "200" && "$http" != "201" ]]; then
-    echo "ERROR: promotions/apply returned HTTP ${http:-curl-fail}" >&2
+    echo "WARN: promotions/apply returned HTTP ${http:-curl-fail} — continuing (Prom still works via postings/labels)" >&2
     cat /tmp/thelake-prom-hot-labels-apply.json >&2 || true
-    return 1
+    return 0
   fi
   echo "==> hot-label promotion applied (HTTP $http)"
 }

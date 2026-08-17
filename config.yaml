@@ -21,7 +21,7 @@ maintenance:
   interval_seconds: 3600  # 1 hour
   metadata_enabled: true
   metadata_interval_seconds: 3600
-  max_snapshot_age_seconds: 604800
+  max_snapshot_age_seconds: 3600
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 3600
 

@@ -6,12 +6,17 @@
 // ============================================================================
 
 mod attach;
+mod metrics_layout_write;
 mod object_store;
 mod otlp;
 mod promotion;
 mod scores;
 mod util;
 mod writer;
+
+pub(crate) use metrics_layout_write::{
+    layout_catalog_prefix, write_metrics_layout_txn, DEFAULT_MAX_LABELS_PER_SERIES,
+};
 
 pub use object_store::{configure_httpfs_gcs_for_data_path, configure_object_store};
 pub use writer::DuckLakeWriter;

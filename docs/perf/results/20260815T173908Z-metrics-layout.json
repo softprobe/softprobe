@@ -1,0 +1,527 @@
+{
+  "schema_version": 1,
+  "suite": "metrics-layout",
+  "binary_profile": "dev",
+  "fixture_profile": "pr_floor",
+  "git_sha": "2b8e995",
+  "fixture_hash": "bb5b49d27d203084",
+  "stamp": "20260815T173908Z",
+  "versions": {
+    "softprobe": "2b8e995fd45bb36a03362588a8416463d139b633",
+    "greptime": "a8924bb95c43b562e4312af309d2a5e80c103185",
+    "duckdb": "v1.5.5",
+    "ducklake": "extension",
+    "postgres": "postgres:19beta3",
+    "machine_class": "linux-x86_64",
+    "R": 10
+  },
+  "preconditions": {
+    "AC-F2_bytes_before_merge": 0,
+    "AC-F5_precondition_met": false,
+    "sender_alive": true,
+    "greptime_sender_alive": false
+  },
+  "acs": {
+    "AC-D1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tables=['metric_hist_samples', 'metric_postings', 'metric_samples', 'metric_series'] http=200"
+    },
+    "AC-D2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "metric_hist_samples:part=1,sort=262; metric_series:part=1,sort=262; metric_postings:part=1,sort=262; metric_samples:part=1,sort=262"
+    },
+    "AC-D3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::prom_backend_is_ducklake_no_sidecar_writers ... ok"
+    },
+    "AC-D4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "union_http=200 rows=1 committed_http=200"
+    },
+    "AC-Q0": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "hb before=10 after=11 sender_alive=True"
+    },
+    "AC-Q1": {
+      "pass": true,
+      "p95_ms": 8.616432001872454,
+      "softprobe_p95_ms": 8.616432001872454,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "repeats=20 codes={200} series=1"
+    },
+    "AC-Q2": {
+      "pass": false,
+      "p95_ms": 1.6421879990957677,
+      "softprobe_p95_ms": 1.6421879990957677,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=0 points=0"
+    },
+    "AC-Q3": {
+      "pass": true,
+      "p95_ms": 225.32181599672185,
+      "softprobe_p95_ms": 225.32181599672185,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=1"
+    },
+    "AC-Q4": {
+      "pass": true,
+      "p95_ms": 125.47474099847022,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "http=400 ms=125 body_snip={\"error\": \"limit_exceeded: series count 10001 exceeds max_series 10000\", \"errortype\": \"bad_data\", \"status\": \"error\"}"
+    },
+    "AC-Q5": {
+      "pass": false,
+      "p95_ms": 2.028857998084277,
+      "softprobe_p95_ms": 2.028857998084277,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "J": 10
+      },
+      "explain_ok": null,
+      "notes": "series=0 want_J=10"
+    },
+    "AC-Q6": {
+      "pass": true,
+      "p95_ms": 3.6524070019368082,
+      "softprobe_p95_ms": 3.6524070019368082,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "repeats=20"
+    },
+    "AC-Q7": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::resolve_and_samples_sql_uses_postings_not_fat ... ok"
+    },
+    "AC-Q8": {
+      "pass": true,
+      "p95_ms": 485.6496190041071,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "all 15 exprs ok"
+    },
+    "AC-Q9": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "maintenance-under-load measure not fully automated in harness yet"
+    },
+    "AC-H1": {
+      "pass": true,
+      "p95_ms": 593.7113260006299,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "hist_rows=1200 sample_rows=0"
+    },
+    "AC-H2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::grain::tests::hist_selector_uses_hist_table_short_range ... ok"
+    },
+    "AC-C1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::churn_pod_values_differ_by_record_date ... ok"
+    },
+    "AC-C2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "N": 15000,
+        "count": 15000
+      },
+      "explain_ok": null,
+      "notes": "count=15000 want=15000"
+    },
+    "AC-C3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tall query_range series isolation"
+    },
+    "AC-C4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::churn_dead_pod_absent_from_today_postings ... ok"
+    },
+    "AC-W1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "180d http=200 365d http=200 unit=True"
+    },
+    "AC-W2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "30d accept"
+    },
+    "AC-W3": {
+      "pass": false,
+      "p95_ms": 342.0042959987768,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=0 want=10"
+    },
+    "AC-W4": {
+      "pass": true,
+      "p95_ms": 223.28689799905987,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "http=400 ms=223"
+    },
+    "AC-W5": {
+      "pass": false,
+      "p95_ms": 725.2790109996567,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "points=0"
+    },
+    "AC-W6": {
+      "pass": true,
+      "p95_ms": 7.26116300211288,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tall_days_loaded=30"
+    },
+    "AC-N1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test config::tests::default_max_snapshot_age_seconds_is_one_hour ... ok"
+    },
+    "AC-N2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::expire_snapshots_sql_honors_seconds ... ok"
+    },
+    "AC-N3": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "F-snap (120s commits) not run in this harness iteration"
+    },
+    "AC-N4": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "depends on F-snap / expiry pass"
+    },
+    "AC-N5": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::cleanup_old_files_sql_honors_seconds ... ok"
+    },
+    "AC-F1": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "F-files maintenance size bars not run in this harness iteration"
+    },
+    "AC-F2": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "F-files maintenance size bars not run in this harness iteration"
+    },
+    "AC-F3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::twcs::tests::twcs_partition_key_is_record_date_only ... ok"
+    },
+    "AC-F4": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "F-files maintenance size bars not run in this harness iteration"
+    },
+    "AC-F5": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "F-files maintenance size bars not run in this harness iteration"
+    },
+    "AC-F6": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::twcs::tests::twcs_merge_does_not_cross_record_date ... ok"
+    },
+    "AC-S1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test storage::ducklake::metrics_layout_write::tests::skinny_samples_smaller_than_fat_and_no_variant ... ok"
+    },
+    "AC-S2": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "downsample trigger not automated; raw_count=202376"
+    },
+    "AC-S3": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "grafana-manual-up.sh must build release binary"
+    },
+    "AC-M1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::maintenance_tables_include_metric_family ... ok"
+    },
+    "AC-M2": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "second maintenance watermark pass not automated"
+    },
+    "AC-G0": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G1": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G2": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G3": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G4": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G5": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    },
+    "AC-G6": {
+      "pass": false,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+    }
+  },
+  "blocker_notes": [
+    "pr_floor skipped F-collapse-90d full load (wall-clock); AC-W3 expected fail",
+    "prom 1h probe points=0 (want>=600)",
+    "prom collapse probe series=0 want>=10",
+    "GREPTIME_URL=http://127.0.0.1:14000 not healthy"
+  ]
+}

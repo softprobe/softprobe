@@ -209,7 +209,7 @@ fn default_interval_seconds() -> u64 {
 }
 
 fn default_max_snapshot_age_seconds() -> u64 {
-    7 * 24 * 3600
+    3600
 }
 
 fn default_remove_orphan_older_than_seconds() -> u64 {
@@ -469,6 +469,14 @@ mod tests {
         assert_eq!(c.maintenance.metadata_interval_seconds, 300);
         assert!(c.maintenance.enabled);
         assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
+    }
+
+    /// AC-N1 / T-N1: default snapshot retention is 1h, not 7d.
+    #[test]
+    fn default_max_snapshot_age_seconds_is_one_hour() {
+        let c = Config::default();
+        assert_eq!(c.maintenance.max_snapshot_age_seconds, 3600);
+        assert_ne!(c.maintenance.max_snapshot_age_seconds, 604800);
     }
 
     #[test]

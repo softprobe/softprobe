@@ -69,7 +69,7 @@ Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `gr
 
 | Limit | Behavior |
 |-------|----------|
-| `max_query_range_seconds` | `QueryLimits::validate_time_range_ms` (handlers + backend) |
+| `max_query_range_seconds` | `QueryLimits::validate_time_range_ms` (`0` = unlimited; handlers + backend) |
 | `max_series` | Hard fail on series / distinct label values over cap |
 | scan_cap (`max(max_series*10, 10000)`) | `LIMIT scan_cap+1` over the time window (or full table if unbounded); equality `__name__` / `job` matchers are pushed into SQL (classic `_bucket`/`_sum`/`_count` stripped to base storage name). Remaining matchers apply in-memory after projection. Overrun → `limit_exceeded`. |
 | `query_timeout` | Deadline via `TenantContext::remaining()` |

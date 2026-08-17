@@ -4,10 +4,18 @@ use crate::compat::backends::metrics::{
     labels_match, labels_match_any, LabelMatcher, MatcherOp, MetricMetadata, MetricSeries,
     MetricsDiscoveryRequest, MetricsQueryBackend, MetricsQueryRequest, Sample,
 };
+use crate::compat::backends::postings_resolve::{
+    discover_name_values_sql, enforce_resolved_series_cap, equality_postings,
+    intersect_equality_postings_from_sets, resolve_series_ids_sql, samples_scan_sql_for_window,
+    single_posting_sql, timestamptz_literal_ms, EqualityPosting, PostingCacheKey, PostingSetCache,
+    RecordDateRange,
+};
 use crate::compat::backends::prom_labels::{
-    binding_for_key, bindings_for_keys, metrics_promotion_by_source, parse_variant_stats_path,
+    bindings_for_keys, metrics_promotion_by_source, parse_variant_stats_path,
     reserved_identity_keys, LabelBinding,
 };
+use crate::compaction::collapse::{collapse_fetch_limit, collapse_scan_sql};
+use crate::storage::schema::variant::variant_varchar;
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::ordering::cmp_label_pairs;
 use crate::compat::projection::prometheus::{
@@ -42,10 +50,22 @@ static VARIANT_KEYS_CACHE: Lazy<Mutex<TimedCache<BTreeSet<String>>>> =
 static PROMOTIONS_CACHE: Lazy<Mutex<TimedCache<BTreeMap<String, String>>>> =
     Lazy::new(|| Mutex::new(TimedCache::default()));
 
-/// Grafana polls `/api/v1/label/__name__/values` on every refresh. One GROUP BY
+/// Grafana polls `/api/v1/label/__name__/values` on every refresh. One resolve
 /// at a time; later callers wait for the cached result instead of stampeding
-/// the 4 query workers and starving panel `query_range`.
-static NAME_VALUES_CACHE: Lazy<Mutex<TimedCache<Vec<String>>>> =
+/// the query workers and starving panel `query_range`.
+static NAME_VALUES_CACHE: Lazy<Mutex<TimedCache<Arc<Vec<String>>>>> =
+    Lazy::new(|| Mutex::new(TimedCache::default()));
+
+/// Day-scoped equality posting lists (§4.4 / AC-G3). Avoids re-INTERSECT in
+/// DuckDB on Grafana refresh storms; keyed by record_date so cross-day stale
+/// is impossible.
+static POSTING_SET_CACHE: Lazy<Mutex<PostingSetCache>> =
+    Lazy::new(|| Mutex::new(PostingSetCache::default()));
+
+/// Full equality-resolve result (§4.4 / AC-G3): one INTERSECT answer per
+/// `(engine, tenant, days, equality)` so cold multi-label resolves do not
+/// re-hit DuckDB on every Grafana refresh / harness repeat.
+static RESOLVE_RESULT_CACHE: Lazy<Mutex<TimedCache<Arc<Vec<u64>>>>> =
     Lazy::new(|| Mutex::new(TimedCache::default()));
 
 #[derive(Default)]
@@ -65,11 +85,11 @@ struct TimedCache<T> {
     expires: Option<Instant>,
 }
 
-const SCAN_CACHE_TTL: Duration = Duration::from_secs(15);
+const SCAN_CACHE_TTL: Duration = Duration::from_secs(30);
 const SCAN_CACHE_MAX: usize = 256;
-const META_CACHE_TTL: Duration = Duration::from_secs(30);
-/// Discovery GROUP BY over Grafana's full dashboard window was scanning every
-/// metric row and occupying a DuckDB worker for the whole 30s deadline.
+const META_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[cfg(test)]
 const DISCOVERY_LOOKBACK_MS: i64 = 5 * 60 * 1000;
 
 impl DuckLakeMetricsBackend {
@@ -77,9 +97,17 @@ impl DuckLakeMetricsBackend {
         Self { query }
     }
 
+    /// Catalog prefix for `metric_*` layout tables (includes metadata schema when not `main`).
+    fn layout_catalog(&self) -> String {
+        self.query.layout_catalog_prefix()
+    }
+
     fn scan_cache_key(
+        &self,
+        tenant_id: &str,
         start_ms: Option<i64>,
         end_ms: Option<i64>,
+        step_ms: Option<i64>,
         include_fidelity: bool,
         matcher_sql: &str,
         label_proj: &str,
@@ -87,8 +115,12 @@ impl DuckLakeMetricsBackend {
         // Bucket time bounds so Grafana refresh storms (near-identical windows) hit.
         let bucket = |ms: Option<i64>| ms.map(|v| v.div_euclid(5_000) * 5_000);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Engine identity: file-backed tests share one tenant id across AppStates.
+        (Arc::as_ptr(&self.query) as usize).hash(&mut hasher);
+        tenant_id.hash(&mut hasher);
         bucket(start_ms).hash(&mut hasher);
         bucket(end_ms).hash(&mut hasher);
+        step_ms.hash(&mut hasher);
         include_fidelity.hash(&mut hasher);
         matcher_sql.hash(&mut hasher);
         label_proj.hash(&mut hasher);
@@ -156,6 +188,13 @@ impl DuckLakeMetricsBackend {
                 if msg.contains("Table with name metrics does not exist")
                     || msg.contains("Table with name tm_all_metric does not exist")
                     || msg.contains("Table with name tm_cq_metric does not exist")
+                    || msg.contains("Table with name metric_samples does not exist")
+                    || msg.contains("Table with name metric_samples_5m does not exist")
+                    || msg.contains("Table with name metric_samples_1h does not exist")
+                    || msg.contains("Table with name metric_series does not exist")
+                    || msg.contains("Table with name metric_hist_samples does not exist")
+                    || msg.contains("Table with name metric_postings does not exist")
+                    || msg.contains("Table with name metric_collapse_job_1h does not exist")
                 {
                     return Ok(QueryResult {
                         columns: Vec::new(),
@@ -184,16 +223,10 @@ impl DuckLakeMetricsBackend {
     fn time_predicates(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
         let mut parts = Vec::new();
         if let Some(start) = start_ms {
-            parts.push(format!(
-                "timestamp >= to_timestamp({} / 1000.0)",
-                start as f64
-            ));
+            parts.push(format!("timestamp >= {}", timestamptz_literal_ms(start)));
         }
         if let Some(end) = end_ms {
-            parts.push(format!(
-                "timestamp <= to_timestamp({} / 1000.0)",
-                end as f64
-            ));
+            parts.push(format!("timestamp <= {}", timestamptz_literal_ms(end)));
         }
         if parts.is_empty() {
             String::new()
@@ -206,31 +239,44 @@ impl DuckLakeMetricsBackend {
         ctx.limits.max_series.saturating_mul(10).max(10_000)
     }
 
+    /// Classic hist/summary Prom name (`_bucket` / `_sum` / `_count`) for grain.
+    fn is_classic_hist_selector(matchers: &[LabelMatcher]) -> bool {
+        matchers.iter().any(|m| {
+            m.name == "__name__"
+                && m.op == MatcherOp::Eq
+                && (m.value.ends_with("_bucket")
+                    || m.value.ends_with("_sum")
+                    || m.value.ends_with("_count"))
+        })
+    }
+
     async fn scan_rows(
         &self,
         ctx: &TenantContext,
         start_ms: Option<i64>,
         end_ms: Option<i64>,
+        step_ms: Option<i64>,
         include_fidelity: bool,
         matchers: &[LabelMatcher],
     ) -> Result<Vec<RawMetricRow>, CompatError> {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
         let cap = Self::scan_cap(ctx);
-        // Fetch one past the cap so we can fail loud instead of silently truncating.
         let fetch_limit = cap.saturating_add(1);
-        let time = Self::time_predicates(start_ms, end_ms);
         let promotions = self.load_metrics_promotions(ctx).await;
-        let matcher_sql = Self::matcher_predicates(matchers, &promotions);
         let bindings = self
             .resolve_label_bindings(ctx, matchers, &promotions)
             .await;
-        let label_proj = Self::label_select_sql(&bindings);
-        let cache_key = Self::scan_cache_key(
+        let label_proj = Self::label_select_sql_from_series(&bindings);
+        let equality = equality_postings(matchers);
+        let resolve_key = format!("{equality:?}");
+        let cache_key = self.scan_cache_key(
+            ctx.tenant_id(),
             start_ms,
             end_ms,
+            step_ms,
             include_fidelity,
-            &matcher_sql,
+            &resolve_key,
             &label_proj,
         );
         if let Some(cached) = self.scan_cache_get(cache_key).await {
@@ -239,26 +285,38 @@ impl DuckLakeMetricsBackend {
             }
             return Ok((*cached).clone());
         }
-        // DuckDB's Rust binding cannot decode VARIANT cells. Project only the
-        // needed label keys as VARCHAR scalars (promoted columns preferred);
-        // never CAST entire attribute blobs to JSON.
-        let fidelity = if include_fidelity {
-            ", metric_type, count, sum, bucket_counts, explicit_bounds, quantiles"
-        } else {
-            ", metric_type, NULL::UBIGINT AS count, NULL::DOUBLE AS sum, NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles"
-        };
-        // No ORDER BY: expand_series sorts samples in Rust. Skipping the SQL sort
-        // avoids a full window sort on every Grafana panel refresh.
-        let sql = format!(
-            "SELECT metric_name, \
-             '' AS description, \
-             '' AS unit, \
-             {label_proj}, \
-             CAST((epoch(timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-             value{fidelity} \
-             FROM union_metrics \
-             WHERE 1=1{time}{matcher_sql} \
-             LIMIT {fetch_limit}"
+
+        let series_ids = self
+            .resolve_series_ids(ctx, start_ms, end_ms, matchers)
+            .await?;
+        if series_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let catalog = self.layout_catalog();
+        let is_histogram = Self::is_classic_hist_selector(matchers);
+        let sql = samples_scan_sql_for_window(
+            &catalog,
+            &series_ids,
+            start_ms,
+            end_ms,
+            step_ms,
+            &label_proj,
+            include_fidelity,
+            is_histogram,
+            fetch_limit,
+        );
+        debug_assert!(
+            (sql.contains("metric_samples")
+                || sql.contains("metric_hist_samples"))
+                && sql.contains("series_id IN")
+                && !sql.contains("FROM union_metrics")
+                && !sql.contains("FROM metrics "),
+            "Prom sample scan must use skinny layout tables: {sql}"
+        );
+        debug_assert!(
+            !sql.contains("to_timestamp("),
+            "Prom scan must use timestamptz literals, not to_timestamp: {sql}"
         );
         debug_assert!(
             !sql.contains("CAST(attributes AS JSON)")
@@ -275,9 +333,278 @@ impl DuckLakeMetricsBackend {
         Ok(rows)
     }
 
+    /// §9.1 step 5 / AC-Q5 / AC-W3: read pre-aggregated job series from collapse.
+    async fn query_collapse(
+        &self,
+        ctx: &TenantContext,
+        metric_name: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        matchers: &[LabelMatcher],
+    ) -> Result<Vec<MetricSeries>, CompatError> {
+        Self::check_deadline(ctx)?;
+        ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
+        // Hourly collapse rows are (job × hour), not raw series samples — budget by
+        // window length so 90d × J stays under LIMIT (AC-W3). Enforce max_series on
+        // parsed series count below; do not apply raw scan_cap to row count.
+        let fetch_limit =
+            collapse_fetch_limit(ctx.limits.max_series, start_ms, end_ms);
+        let catalog = self.layout_catalog();
+        let sql = collapse_scan_sql(&catalog, metric_name, start_ms, end_ms, fetch_limit);
+        debug_assert!(
+            sql.contains("metric_collapse_job_1h") && !sql.contains("to_timestamp("),
+            "collapse Prom scan must use metric_collapse_job_1h: {sql}"
+        );
+        let result = self.execute_soft(ctx, &sql).await?;
+        Self::check_deadline(ctx)?;
+        let series = parse_collapse_series(&result, metric_name)?;
+        let mut out = Vec::new();
+        for s in series {
+            if labels_match(&s.labels, matchers)? {
+                out.push(s);
+            }
+        }
+        if out.len() > ctx.limits.max_series {
+            return Err(CompatError::new(
+                CompatErrorCode::LimitExceeded,
+                format!(
+                    "series count {} exceeds max_series {}",
+                    out.len(),
+                    ctx.limits.max_series
+                ),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Postings intersect → series_id set. Fails loud at max_series before samples.
+    ///
+    /// Single calendar-day windows use the day-scoped posting cache (Greptime II
+    /// analog / AC-G3). Multi-day and unbounded windows use one DuckDB SQL with
+    /// `LIMIT max_series+1` so wide selectors fail loud (AC-Q4 / AC-W4).
+    async fn resolve_series_ids(
+        &self,
+        ctx: &TenantContext,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        matchers: &[LabelMatcher],
+    ) -> Result<Vec<u64>, CompatError> {
+        Self::check_deadline(ctx)?;
+        let catalog = self.layout_catalog();
+        let days = RecordDateRange::from_ms(start_ms, end_ms);
+        let equality = equality_postings(matchers);
+
+        // Day-scoped posting cache is for single-day Grafana refreshes (AC-G3 / Q3).
+        // Multi-day windows (AC-W4 31d) use SQL + LIMIT so wide `__name__` selectors
+        // fail loud at max_series. Filling N day caches with a 100k-id day is slow
+        // and eviction of that entry before intersect yields empty 200 instead of
+        // limit_exceeded.
+        if let Some(day_list) = days.inclusive_days() {
+            if !equality.is_empty() && day_list.len() == 1 {
+                let engine_id = Arc::as_ptr(&self.query) as usize;
+                let tenant_id = ctx.tenant_id().to_string();
+                let ids = self
+                    .resolve_series_ids_cached(
+                        ctx,
+                        &catalog,
+                        engine_id,
+                        &tenant_id,
+                        &day_list,
+                        &equality,
+                    )
+                    .await?;
+                enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
+                return Ok(ids);
+            }
+        }
+
+        let sql = resolve_series_ids_sql(&catalog, days, &equality, ctx.limits.max_series);
+        debug_assert!(
+            sql.contains("metric_postings") && !sql.contains("FROM union_metrics"),
+            "Prom resolve must use metric_postings: {sql}"
+        );
+        let result = self.execute_soft(ctx, &sql).await?;
+        Self::check_deadline(ctx)?;
+        let mut ids = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            if let Some(id) = cell_u64(row, 0) {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
+        Ok(ids)
+    }
+
+    /// Cache-backed resolve: warm path INTERSECTs day-scoped posting sets in
+    /// process. On any miss with ≥2 equalities, runs one DuckDB INTERSECT SQL
+    /// (avoids materializing F-wide `__name__` lists of 15k+ ids for AC-G3).
+    async fn resolve_series_ids_cached(
+        &self,
+        ctx: &TenantContext,
+        catalog: &str,
+        engine_id: usize,
+        tenant_id: &str,
+        days: &[chrono::NaiveDate],
+        equality: &[EqualityPosting],
+    ) -> Result<Vec<u64>, CompatError> {
+        let result_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            engine_id.hash(&mut hasher);
+            tenant_id.hash(&mut hasher);
+            for d in days {
+                d.hash(&mut hasher);
+            }
+            format!("{equality:?}").hash(&mut hasher);
+            hasher.finish()
+        };
+        {
+            let guard = RESOLVE_RESULT_CACHE.lock().await;
+            if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
+                if exp > Instant::now() && guard.key == Some(result_key) {
+                    return Ok((**v).clone());
+                }
+            }
+        }
+
+        let mut needed: Vec<(chrono::NaiveDate, String, String)> = Vec::new();
+        {
+            let mut guard = POSTING_SET_CACHE.lock().await;
+            let now = Instant::now();
+            for day in days {
+                for eq in equality {
+                    for value in &eq.values {
+                        let key = PostingCacheKey {
+                            engine_id,
+                            tenant_id: tenant_id.to_string(),
+                            record_date: *day,
+                            label_name: eq.label_name.clone(),
+                            label_value: value.clone(),
+                        };
+                        if guard.get(&key, now).is_none() {
+                            needed.push((*day, eq.label_name.clone(), value.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        needed.sort();
+        needed.dedup();
+
+        // Multi-equality cold/partial miss: one INTERSECT lets DuckDB prune via
+        // the selective label (instance) instead of shipping the full __name__ set.
+        if !needed.is_empty() && equality.len() >= 2 {
+            let days_range = RecordDateRange {
+                start: days.first().copied(),
+                end: days.last().copied(),
+            };
+            let sql =
+                resolve_series_ids_sql(catalog, days_range, equality, ctx.limits.max_series);
+            debug_assert!(
+                sql.contains("metric_postings"),
+                "cached miss INTERSECT must use postings: {sql}"
+            );
+            let result = self.execute_soft(ctx, &sql).await?;
+            Self::check_deadline(ctx)?;
+            let mut ids = Vec::with_capacity(result.rows.len());
+            for row in &result.rows {
+                if let Some(id) = cell_u64(row, 0) {
+                    ids.push(id);
+                }
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            {
+                let mut guard = RESOLVE_RESULT_CACHE.lock().await;
+                guard.key = Some(result_key);
+                guard.value = Some(Arc::new(ids.clone()));
+                guard.expires = Some(Instant::now() + META_CACHE_TTL);
+            }
+            return Ok(ids);
+        }
+
+        for (day, label_name, label_value) in needed {
+            Self::check_deadline(ctx)?;
+            let sql = single_posting_sql(catalog, day, &label_name, &label_value);
+            debug_assert!(
+                sql.contains("metric_postings") && sql.contains("record_date = DATE"),
+                "cached posting fill must be day-scoped: {sql}"
+            );
+            let result = self.execute_soft(ctx, &sql).await?;
+            let mut ids = Vec::with_capacity(result.rows.len());
+            for row in &result.rows {
+                if let Some(id) = cell_u64(row, 0) {
+                    ids.push(id);
+                }
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            let key = PostingCacheKey {
+                engine_id,
+                tenant_id: tenant_id.to_string(),
+                record_date: day,
+                label_name,
+                label_value,
+            };
+            let mut guard = POSTING_SET_CACHE.lock().await;
+            guard.put(key, Arc::new(ids), Instant::now());
+        }
+
+        let mut guard = POSTING_SET_CACHE.lock().await;
+        let now = Instant::now();
+        let ids = intersect_equality_postings_from_sets(equality, days, |day, name, value| {
+            let key = PostingCacheKey {
+                engine_id,
+                tenant_id: tenant_id.to_string(),
+                record_date: *day,
+                label_name: name.to_string(),
+                label_value: value.to_string(),
+            };
+            guard
+                .get(&key, now)
+                .unwrap_or_else(|| Arc::new(Vec::new()))
+        });
+        {
+            let mut guard = RESOLVE_RESULT_CACHE.lock().await;
+            guard.key = Some(result_key);
+            guard.value = Some(Arc::new(ids.clone()));
+            guard.expires = Some(Instant::now() + META_CACHE_TTL);
+        }
+        Ok(ids)
+    }
+
+    /// Project labels from `metric_series.labels` VARIANT (layout path).
+    fn label_select_sql_from_series(bindings: &[LabelBinding]) -> String {
+        if bindings.is_empty() {
+            return "NULL::VARCHAR AS lbl__empty".to_string();
+        }
+        bindings
+            .iter()
+            .map(|b| {
+                let mut parts = Vec::new();
+                parts.push(variant_varchar("s.labels", &b.prom_label));
+                for k in b.resource_keys.iter().chain(b.attribute_keys.iter()) {
+                    let expr = variant_varchar("s.labels", k);
+                    if !parts.contains(&expr) {
+                        parts.push(expr);
+                    }
+                }
+                let alias = b.sql_alias();
+                if parts.len() == 1 {
+                    format!("{} AS {alias}", parts[0])
+                } else {
+                    format!("COALESCE({}) AS {alias}", parts.join(", "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Legacy fat-view label projection (kept for matcher_predicates unit tests).
+    #[cfg(test)]
     fn label_select_sql(bindings: &[LabelBinding]) -> String {
         if bindings.is_empty() {
-            // Still need a placeholder so SELECT list stays valid.
             return "NULL::VARCHAR AS lbl__empty".to_string();
         }
         bindings
@@ -340,10 +667,16 @@ impl DuckLakeMetricsBackend {
     }
 
     async fn load_metrics_promotions(&self, ctx: &TenantContext) -> BTreeMap<String, String> {
+        let cache_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (Arc::as_ptr(&self.query) as usize).hash(&mut hasher);
+            ctx.tenant_id().hash(&mut hasher);
+            hasher.finish()
+        };
         {
             let guard = PROMOTIONS_CACHE.lock().await;
-            if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
-                if exp > Instant::now() {
+            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, guard.key) {
+                if exp > Instant::now() && k == cache_key {
                     return v.clone();
                 }
             }
@@ -369,16 +702,23 @@ impl DuckLakeMetricsBackend {
             Err(_) => BTreeMap::new(),
         };
         let mut guard = PROMOTIONS_CACHE.lock().await;
+        guard.key = Some(cache_key);
         guard.value = Some(map.clone());
         guard.expires = Some(Instant::now() + META_CACHE_TTL);
         map
     }
 
     async fn load_variant_identity_keys(&self, ctx: &TenantContext) -> BTreeSet<String> {
+        let cache_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (Arc::as_ptr(&self.query) as usize).hash(&mut hasher);
+            ctx.tenant_id().hash(&mut hasher);
+            hasher.finish()
+        };
         {
             let guard = VARIANT_KEYS_CACHE.lock().await;
-            if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
-                if exp > Instant::now() {
+            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, guard.key) {
+                if exp > Instant::now() && k == cache_key {
                     return v.clone();
                 }
             }
@@ -408,6 +748,7 @@ impl DuckLakeMetricsBackend {
             Err(_) => BTreeSet::new(),
         };
         let mut guard = VARIANT_KEYS_CACHE.lock().await;
+        guard.key = Some(cache_key);
         guard.value = Some(keys.clone());
         guard.expires = Some(Instant::now() + META_CACHE_TTL);
         keys
@@ -433,15 +774,8 @@ impl DuckLakeMetricsBackend {
             .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
     }
 
-    /// Push common equality matchers into SQL to avoid full-window table scans.
-    ///
-    /// Pushed today: `__name__` → typed `metric_name`; `job` / `instance` / safe
-    /// labels via promoted columns COALESCE VARIANT field access (never full JSON).
-    ///
-    /// Classic histogram/summary selectors use expanded Prometheus names
-    /// (`{base}_bucket` / `_sum` / `_count`) while DuckLake stores the OTel
-    /// base `metric_name`. Strip those suffixes before comparing so pushdown
-    /// does not empty the scan.
+    /// Legacy SQL matcher pushdown (unit-tested; Prom path uses postings resolve).
+    #[cfg(test)]
     fn matcher_predicates(
         matchers: &[LabelMatcher],
         promotions: &BTreeMap<String, String>,
@@ -457,7 +791,10 @@ impl DuckLakeMetricsBackend {
                 parts.push(format!("metric_name IN ({})", lits.join(", ")));
             } else if m.name == "job" || m.name == "instance" || is_safe_prom_label_name(&m.name) {
                 let lit = sql_string_literal(&m.value);
-                let binding = binding_for_key(&m.name, promotions);
+                let binding = crate::compat::backends::prom_labels::binding_for_key(
+                    &m.name,
+                    promotions,
+                );
                 parts.push(format!("({} = {lit})", binding.sql_value_expr()));
             }
         }
@@ -549,7 +886,8 @@ impl DuckLakeMetricsBackend {
         Ok(out)
     }
 
-    /// Label names without match[] — variant stats + promotions, no data scan.
+    /// Label names without match[] — variant stats + promotions, no full data scan.
+    /// Empty lake (no layout rows yet) returns `[]` so discovery matches the empty-tenant contract.
     async fn label_names_from_catalog(
         &self,
         ctx: &TenantContext,
@@ -557,6 +895,12 @@ impl DuckLakeMetricsBackend {
         _end_ms: Option<i64>,
     ) -> Result<Vec<String>, CompatError> {
         Self::check_deadline(ctx)?;
+        let probe = self
+            .execute_soft(ctx, "SELECT 1 FROM union_metrics LIMIT 1")
+            .await?;
+        if probe.row_count == 0 {
+            return Ok(Vec::new());
+        }
         let promotions = self.load_metrics_promotions(ctx).await;
         let mut names = BTreeSet::new();
         for k in reserved_identity_keys() {
@@ -572,7 +916,59 @@ impl DuckLakeMetricsBackend {
         Ok(names.into_iter().collect())
     }
 
-    async fn distinct_storage_metrics(
+    async fn label_values_prometheus_names(
+        &self,
+        ctx: &TenantContext,
+        req: &MetricsDiscoveryRequest,
+        sql_matchers: &[LabelMatcher],
+    ) -> Result<Vec<String>, CompatError> {
+        // Postings discovery is cheap — do not clamp to wall-clock lookback (that
+        // hid fixture/historical names). Honor client start/end when present.
+        let start_ms = req.start_ms;
+        let end_ms = req.end_ms;
+        let cache_key = discovery_cache_key(
+            Arc::as_ptr(&self.query) as usize,
+            ctx.tenant_id(),
+            start_ms,
+            end_ms,
+            sql_matchers,
+        );
+        {
+            let guard = NAME_VALUES_CACHE.lock().await;
+            if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
+                if exp > Instant::now() && guard.key == Some(cache_key) {
+                    return Ok((**v).clone());
+                }
+            }
+        }
+        // Do not hold the cache mutex across DuckDB execution (§9.1 step 9).
+        let groups = self
+            .distinct_metric_names_from_postings(ctx, start_ms, end_ms, sql_matchers)
+            .await?;
+        let mut values = BTreeSet::new();
+        for (raw_name, metric_type) in groups {
+            for prom_name in prometheus_names_for_storage_metric(&raw_name, &metric_type) {
+                let mut labels = BTreeMap::new();
+                labels.insert("__name__".into(), prom_name);
+                if !labels_match_any(&labels, &req.matchers)? {
+                    continue;
+                }
+                values.insert(labels.remove("__name__").unwrap_or_default());
+            }
+        }
+        let out: Vec<_> = values.into_iter().collect();
+        enforce_distinct_cap(out.len(), ctx.limits.max_series, "label values")?;
+        {
+            let mut guard = NAME_VALUES_CACHE.lock().await;
+            guard.key = Some(cache_key);
+            guard.value = Some(Arc::new(out.clone()));
+            guard.expires = Some(Instant::now() + META_CACHE_TTL);
+        }
+        Ok(out)
+    }
+
+    /// `__name__` discovery via `metric_postings` (AC-Q6), not GROUP BY samples.
+    async fn distinct_metric_names_from_postings(
         &self,
         ctx: &TenantContext,
         start_ms: Option<i64>,
@@ -580,24 +976,39 @@ impl DuckLakeMetricsBackend {
         sql_matchers: &[LabelMatcher],
     ) -> Result<Vec<(String, String)>, CompatError> {
         Self::check_deadline(ctx)?;
-        let (start_ms, end_ms) = clamp_discovery_window(start_ms, end_ms);
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
-        let time = Self::time_predicates(start_ms, end_ms);
-        let matcher_sql = if sql_matchers.is_empty() {
-            String::new()
-        } else {
-            let promotions = self.load_metrics_promotions(ctx).await;
-            Self::matcher_predicates(sql_matchers, &promotions)
-        };
-        let lim = ctx.limits.max_series.saturating_add(1);
-        let sql = format!(
-            "SELECT metric_name, \
-             any_value(metric_type) AS metric_type \
-             FROM union_metrics \
-             WHERE 1=1{time}{matcher_sql} \
-             GROUP BY metric_name \
-             ORDER BY metric_name \
-             LIMIT {lim}"
+        let catalog = self.layout_catalog();
+        let days = RecordDateRange::from_ms(start_ms, end_ms);
+        let mut sql = discover_name_values_sql(&catalog, days, ctx.limits.max_series);
+        // Optional equality pushdown on posting label values (e.g. exact __name__).
+        if !sql_matchers.is_empty() {
+            let mut extras = Vec::new();
+            for m in sql_matchers {
+                if m.name == "__name__" && m.op == MatcherOp::Eq {
+                    let vals = crate::compat::backends::postings_resolve::posting_name_values(
+                        &m.value,
+                    );
+                    let lits: Vec<_> = vals
+                        .iter()
+                        .map(|v| format!("'{}'", v.replace('\'', "''")))
+                        .collect();
+                    extras.push(format!("p.label_value IN ({})", lits.join(", ")));
+                }
+            }
+            if !extras.is_empty() {
+                sql = sql.replacen(
+                    "WHERE p.label_name = '__name__'",
+                    &format!(
+                        "WHERE p.label_name = '__name__' AND {}",
+                        extras.join(" AND ")
+                    ),
+                    1,
+                );
+            }
+        }
+        debug_assert!(
+            sql.contains("metric_postings") && sql.contains("label_name = '__name__'"),
+            "AC-Q6 discovery must use postings: {sql}"
         );
         let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
@@ -622,42 +1033,6 @@ impl DuckLakeMetricsBackend {
         }
         Ok(out)
     }
-
-    async fn label_values_prometheus_names(
-        &self,
-        ctx: &TenantContext,
-        req: &MetricsDiscoveryRequest,
-        sql_matchers: &[LabelMatcher],
-    ) -> Result<Vec<String>, CompatError> {
-        let (start_ms, end_ms) = clamp_discovery_window(req.start_ms, req.end_ms);
-        let cache_key = discovery_cache_key(start_ms, end_ms, sql_matchers);
-        let mut guard = NAME_VALUES_CACHE.lock().await;
-        if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
-            if exp > Instant::now() && guard.key == Some(cache_key) {
-                return Ok(v.clone());
-            }
-        }
-        let groups = self
-            .distinct_storage_metrics(ctx, start_ms, end_ms, sql_matchers)
-            .await?;
-        let mut values = BTreeSet::new();
-        for (raw_name, metric_type) in groups {
-            for prom_name in prometheus_names_for_storage_metric(&raw_name, &metric_type) {
-                let mut labels = BTreeMap::new();
-                labels.insert("__name__".into(), prom_name);
-                if !labels_match_any(&labels, &req.matchers)? {
-                    continue;
-                }
-                values.insert(labels.remove("__name__").unwrap_or_default());
-            }
-        }
-        let out: Vec<_> = values.into_iter().collect();
-        enforce_distinct_cap(out.len(), ctx.limits.max_series, "label values")?;
-        guard.key = Some(cache_key);
-        guard.value = Some(out.clone());
-        guard.expires = Some(Instant::now() + META_CACHE_TTL);
-        Ok(out)
-    }
 }
 
 #[async_trait]
@@ -667,11 +1042,23 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         ctx: &TenantContext,
         request: MetricsQueryRequest,
     ) -> Result<Vec<MetricSeries>, CompatError> {
+        if let Some(ref metric) = request.collapse_metric {
+            return self
+                .query_collapse(
+                    ctx,
+                    metric,
+                    request.start_ms,
+                    request.end_ms,
+                    &request.matchers,
+                )
+                .await;
+        }
         let rows = self
             .scan_rows(
                 ctx,
                 request.start_ms,
                 request.end_ms,
+                request.step_ms,
                 Self::wants_histogram_fidelity(&request.matchers),
                 &request.matchers,
             )
@@ -701,6 +1088,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 ctx,
                 req.start_ms,
                 req.end_ms,
+                None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
             )
@@ -748,6 +1136,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 ctx,
                 req.start_ms,
                 req.end_ms,
+                None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
             )
@@ -784,6 +1173,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 ctx,
                 req.start_ms,
                 req.end_ms,
+                None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
             )
@@ -830,6 +1220,9 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
         let time = Self::time_predicates(start_ms, end_ms);
+        // Review leftover: still scans union_metrics (layout JOIN view). Prefer
+        // metric_series / postings for metadata when converting; left as-is for
+        // this grain-planner slice (not on the Prom sample hot path).
         // Do not filter by raw storage metric_name in SQL — clients query projected
         // Prometheus names (e.g. http_requests for OTel http.requests).
         let lim = match limit {
@@ -910,6 +1303,46 @@ struct RawMetricRow {
     sum: Option<f64>,
     bucket_counts: Option<Vec<u64>>,
     explicit_bounds: Option<Vec<f64>>,
+}
+
+fn parse_collapse_series(
+    result: &QueryResult,
+    default_metric: &str,
+) -> Result<Vec<MetricSeries>, CompatError> {
+    let idx = |name: &str| result.columns.iter().position(|c| c == name);
+    let i_name = idx("metric_name");
+    let i_job = idx("job");
+    let i_ts = idx("timestamp_ms");
+    let i_val = idx("value");
+    let mut by_job: BTreeMap<String, (String, Vec<Sample>)> = BTreeMap::new();
+    for row in &result.rows {
+        let metric = i_name
+            .and_then(|i| cell_str(row, i))
+            .unwrap_or_else(|| default_metric.to_string());
+        let job = i_job
+            .and_then(|i| cell_str(row, i))
+            .unwrap_or_default();
+        let ts = i_ts.and_then(|i| cell_i64(row, i)).unwrap_or(0);
+        let value = i_val.and_then(|i| cell_f64(row, i)).unwrap_or(0.0);
+        by_job
+            .entry(job)
+            .or_insert_with(|| (metric, Vec::new()))
+            .1
+            .push(Sample {
+                timestamp_ms: ts,
+                value,
+            });
+    }
+    Ok(by_job
+        .into_iter()
+        .map(|(job, (metric_name, mut samples))| {
+            samples.sort_by_key(|s| s.timestamp_ms);
+            let mut labels = BTreeMap::new();
+            labels.insert("__name__".into(), metric_name);
+            labels.insert("job".into(), job);
+            MetricSeries { labels, samples }
+        })
+        .collect())
 }
 
 fn parse_raw_rows(result: &QueryResult, bindings: &[LabelBinding]) -> Vec<RawMetricRow> {
@@ -1055,10 +1488,12 @@ fn scan_cap_exceeded(cap: usize) -> CompatError {
     )
 }
 
+#[cfg(test)]
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[cfg(test)]
 fn is_safe_prom_label_name(name: &str) -> bool {
     !name.is_empty()
         && name != "__name__"
@@ -1076,6 +1511,7 @@ fn prom_label_to_otel_key(name: &str) -> String {
 /// Cap discovery scans so Grafana's 15–30m dashboard window does not GROUP BY
 /// every metric row. Names that only existed earlier than the lookback are
 /// omitted — acceptable for the live metric picker.
+#[cfg(test)]
 fn clamp_discovery_window(
     start_ms: Option<i64>,
     end_ms: Option<i64>,
@@ -1091,16 +1527,20 @@ fn clamp_discovery_window(
 }
 
 fn discovery_cache_key(
+    engine_token: usize,
+    tenant_id: &str,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     matchers: &[LabelMatcher],
 ) -> u64 {
-    if matchers.is_empty() {
-        // Grafana polls with shifting start/end; one slot + TTL is enough.
-        return 0;
-    }
     let bucket = |ms: Option<i64>| ms.map(|v| v.div_euclid(30_000) * 30_000);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    engine_token.hash(&mut hasher);
+    tenant_id.hash(&mut hasher);
+    if matchers.is_empty() {
+        // Grafana polls with shifting start/end; engine + tenant + TTL is enough.
+        return hasher.finish();
+    }
     bucket(start_ms).hash(&mut hasher);
     bucket(end_ms).hash(&mut hasher);
     for m in matchers {
@@ -1112,6 +1552,7 @@ fn discovery_cache_key(
 
 /// Map a Prometheus `__name__` matcher to the DuckLake storage `metric_name`
 /// identity used for SQL pushdown (classic histogram/summary suffixes removed).
+#[cfg(test)]
 fn classic_base_metric_name(prom_name: &str) -> &str {
     for suffix in ["_bucket", "_sum", "_count"] {
         if let Some(base) = prom_name.strip_suffix(suffix) {
@@ -1125,6 +1566,7 @@ fn classic_base_metric_name(prom_name: &str) -> &str {
 
 /// Equality candidates for DuckLake `metric_name` (underscored Prom + dotted OTel).
 /// Avoid `regexp_replace(metric_name, …)` in WHERE — that forces a full scan.
+#[cfg(test)]
 fn storage_metric_name_candidates(prom_name: &str) -> Vec<String> {
     let base = classic_base_metric_name(prom_name);
     let mut out = vec![base.to_string()];

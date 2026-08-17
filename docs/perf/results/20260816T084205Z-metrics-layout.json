@@ -1,0 +1,537 @@
+{
+  "schema_version": 1,
+  "suite": "metrics-layout",
+  "binary_profile": "release",
+  "fixture_profile": "release_full",
+  "git_sha": "2b8e995",
+  "fixture_hash": "2b83e7844e120ec8",
+  "stamp": "20260816T084205Z",
+  "versions": {
+    "softprobe": "2b8e995fd45bb36a03362588a8416463d139b633",
+    "greptime": "a8924bb95c43b562e4312af309d2a5e80c103185",
+    "duckdb": "v1.5.5",
+    "ducklake": "extension",
+    "postgres": "postgres:19beta3",
+    "machine_class": "linux-x86_64",
+    "R": 10
+  },
+  "preconditions": {
+    "AC-F2_bytes_before_merge": 21096512,
+    "AC-F5_precondition_met": true,
+    "sender_alive": true,
+    "greptime_sender_alive": true
+  },
+  "acs": {
+    "AC-D1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tables=['metric_hist_samples', 'metric_postings', 'metric_samples', 'metric_series'] http=200"
+    },
+    "AC-D2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "metric_samples:part=1,sort=1; metric_postings:part=1,sort=1; metric_series:part=1,sort=1; metric_hist_samples:part=1,sort=1"
+    },
+    "AC-D3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::prom_backend_is_ducklake_no_sidecar_writers ... ok"
+    },
+    "AC-D4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "union_http=200 rows=1 committed_http=200"
+    },
+    "AC-Q0": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "hb before=129 after=131 sender_alive=True"
+    },
+    "AC-Q1": {
+      "pass": true,
+      "p95_ms": 0.7733890088275075,
+      "softprobe_p95_ms": 0.7733890088275075,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "repeats=20 codes={200} series=1"
+    },
+    "AC-Q2": {
+      "pass": true,
+      "p95_ms": 0.9229999996023253,
+      "softprobe_p95_ms": 0.9229999996023253,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=1 points=721"
+    },
+    "AC-Q3": {
+      "pass": true,
+      "p95_ms": 4.847546006203629,
+      "softprobe_p95_ms": 4.847546006203629,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=1"
+    },
+    "AC-Q4": {
+      "pass": true,
+      "p95_ms": 521.2134800094645,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "http=400 ms=521 body_snip={\"error\": \"limit_exceeded: series count 100000 exceeds max_series 10000\", \"errortype\": \"bad_data\", \"status\": \"error\"}"
+    },
+    "AC-Q5": {
+      "pass": true,
+      "p95_ms": 24.007197993341833,
+      "softprobe_p95_ms": 24.007197993341833,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "J": 50
+      },
+      "explain_ok": null,
+      "notes": "series=50 want_J=50"
+    },
+    "AC-Q6": {
+      "pass": true,
+      "p95_ms": 2.7786470018327236,
+      "softprobe_p95_ms": 2.7786470018327236,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "repeats=20"
+    },
+    "AC-Q7": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::resolve_and_samples_sql_uses_postings_not_fat ... ok"
+    },
+    "AC-Q8": {
+      "pass": true,
+      "p95_ms": 941.5078220044961,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "all 15 exprs ok"
+    },
+    "AC-Q9": {
+      "pass": true,
+      "p95_ms": 13.432118008495308,
+      "softprobe_p95_ms": 13.432118008495308,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "p95=13.432118008495308 codes={200} maint=metric_samples:set=200:ok ms=11;metric_samples:merge1=200:ok ms=3700;metric_samples:merge2=200:ok ms=694;metric_samples:merge3=200:ok ms=1118;metric_postings:set=200:ok ms=15;metri"
+    },
+    "AC-H1": {
+      "pass": true,
+      "p95_ms": 589.0526580042206,
+      "softprobe_p95_ms": 589.0526580042206,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "hist_rows=2400 sample_rows=0 series=10 prom=layout_latency_count prom_series=10 prom_points=1200 (day=2023-11-14 series=10 hist=2400 samples=0)"
+    },
+    "AC-H2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::grain::tests::hist_selector_uses_hist_table_short_range ... ok"
+    },
+    "AC-C1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::churn_pod_values_differ_by_record_date ... ok"
+    },
+    "AC-C2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "N": 100000,
+        "count": 100000
+      },
+      "explain_ok": null,
+      "notes": "count=100000 want=100000"
+    },
+    "AC-C3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tall query_range series isolation"
+    },
+    "AC-C4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compat::backends::postings_resolve::tests::churn_dead_pod_absent_from_today_postings ... ok"
+    },
+    "AC-W1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "180d http=200 365d http=200 unit=True"
+    },
+    "AC-W2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "30d accept"
+    },
+    "AC-W3": {
+      "pass": true,
+      "p95_ms": 396.9128219905542,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "series=50 want=50"
+    },
+    "AC-W4": {
+      "pass": true,
+      "p95_ms": 101.00346899707802,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "http=400 ms=101 body_snip={\"error\": \"limit_exceeded: series count 10001 exceeds max_series 10000\", \"errortype\": \"bad_data\", \"status\": \"error\"}"
+    },
+    "AC-W5": {
+      "pass": true,
+      "p95_ms": 397.22229199833237,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "points=2161 want>=1800"
+    },
+    "AC-W6": {
+      "pass": true,
+      "p95_ms": 2.942256993264891,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "tall_days_loaded=180"
+    },
+    "AC-N1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test config::tests::default_max_snapshot_age_seconds_is_one_hour ... ok"
+    },
+    "AC-N2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::expire_snapshots_sql_honors_seconds ... ok"
+    },
+    "AC-N3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "snapshots": 56,
+        "snaps_before": 121,
+        "old": 0,
+        "bar": 80,
+        "expired_ids": 0
+      },
+      "explain_ok": null,
+      "notes": "snaps=56 before=121 old_gt_A+I=0 bar=80 expire_http=200/200 commits=120 expired_ids=0"
+    },
+    "AC-N4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "samples_before_snap=129 pre_expire=249 after=249"
+    },
+    "AC-N5": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::cleanup_old_files_sql_honors_seconds ... ok"
+    },
+    "AC-F1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "days_retained": 2,
+        "closed_files": 2
+      },
+      "explain_ok": null,
+      "notes": "closed_files=2 limit=4 stats=[('2026-08-14', 1, 10131805), ('2026-08-15', 1, 9872537)]"
+    },
+    "AC-F2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "bytes_before": 21096512,
+        "median_after": 9872537.0,
+        "n_files": 2
+      },
+      "explain_ok": null,
+      "notes": "bytes_before=21096512 median=9872537.0 sizes=[9872537, 10131805] pre=True"
+    },
+    "AC-F3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::twcs::tests::twcs_partition_key_is_record_date_only ... ok"
+    },
+    "AC-F4": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {
+        "today_files": 4
+      },
+      "explain_ok": null,
+      "notes": "today=2026-08-16 files=4 stats=[('2026-08-16', 4, 74941)]"
+    },
+    "AC-F5": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "precondition_met=True; metric_postings:files=2/4; metric_series:files=2/4; metric_hist_samples:files=2/4"
+    },
+    "AC-F6": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::twcs::tests::twcs_merge_does_not_cross_record_date ... ok"
+    },
+    "AC-S1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test storage::ducklake::metrics_layout_write::tests::skinny_samples_smaller_than_fat_and_no_variant ... ok"
+    },
+    "AC-S2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "raw_before=3227808 raw_after_downsample=3227808"
+    },
+    "AC-S3": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "grafana-manual-up.sh must build release binary"
+    },
+    "AC-M1": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "cargo: test compaction::executor::tests::maintenance_tables_include_metric_family ... ok"
+    },
+    "AC-M2": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "first={'metric_samples': 3227824, 'metric_samples_5m': 268145, 'metric_samples_1h': 214372, 'metric_collapse_job_1h': 112408} second={'metric_samples': 3227824, 'metric_samples_5m': 268145, 'metric_samples_1h': 214372, 'metric_collapse_job_1h': 112408} pass2=5m=200:ok ms=630;1h_from_raw=200:ok ms=715;collapse_from_1h=200:ok ms=434"
+    },
+    "AC-G0": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "sha=a8924bb95c43b562e4312af309d2a5e80c103185 hb_before=8 hb_after=12 hb_alive=True ingest=/v1/otlp/v1/metrics"
+    },
+    "AC-G1": {
+      "pass": true,
+      "p95_ms": 0.7733890088275075,
+      "softprobe_p95_ms": 0.7733890088275075,
+      "greptime_p95_ms": 19.98843200271949,
+      "ratio": 0.0387,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "T-Q1 layout_tall 30m; greptime_codes={200}"
+    },
+    "AC-G2": {
+      "pass": true,
+      "p95_ms": 0.9229999996023253,
+      "softprobe_p95_ms": 0.9229999996023253,
+      "greptime_p95_ms": 129.6079629973974,
+      "ratio": 0.0071,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "T-Q2 layout_tall 30d; greptime_codes={200}"
+    },
+    "AC-G3": {
+      "pass": true,
+      "p95_ms": 4.847546006203629,
+      "softprobe_p95_ms": 4.847546006203629,
+      "greptime_p95_ms": 75.30468200275209,
+      "ratio": 0.0644,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "T-Q3 wide resolve; greptime_codes={200}"
+    },
+    "AC-G4": {
+      "pass": true,
+      "p95_ms": 2.7786470018327236,
+      "softprobe_p95_ms": 2.7786470018327236,
+      "greptime_p95_ms": 0.9231290023308247,
+      "ratio": 3.01,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "T-Q6 __name__/values; greptime_names=30 greptime_codes={200}"
+    },
+    "AC-G5": {
+      "pass": true,
+      "p95_ms": 24.007197993341833,
+      "softprobe_p95_ms": 24.007197993341833,
+      "greptime_p95_ms": 1363.760602005641,
+      "ratio": 0.0176,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "T-Q5 collapse 30d; greptime_codes={200}"
+    },
+    "AC-G6": {
+      "pass": true,
+      "p95_ms": null,
+      "softprobe_p95_ms": null,
+      "greptime_p95_ms": null,
+      "ratio": null,
+      "fixture_scale": {},
+      "explain_ok": null,
+      "notes": "ingest_path=/v1/otlp/v1/metrics (must be OTLP /v1/otlp/v1/metrics, not remote_write)"
+    }
+  },
+  "blocker_notes": []
+}

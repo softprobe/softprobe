@@ -17,6 +17,8 @@ pub enum ProtocolScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLimits {
+    /// Softprobe Prom range ceiling. `0` = unlimited (AC-W1 / §9.2); retention TTL
+    /// bounds readable history, not this field.
     pub max_query_range_seconds: u64,
     pub max_series: usize,
     pub max_response_bytes: usize,
@@ -72,7 +74,8 @@ impl QueryLimits {
                     secs as u64
                 }
             };
-            if range_secs > self.max_query_range_seconds {
+            // 0 = unlimited (§9.2 / AC-W1): do not reject on window length.
+            if self.max_query_range_seconds > 0 && range_secs > self.max_query_range_seconds {
                 return Err(CompatError::new(
                     CompatErrorCode::LimitExceeded,
                     format!(
@@ -221,16 +224,49 @@ mod tests {
         assert_eq!(limits, QueryLimits::from(&manifest.limits));
         assert_eq!(limits.max_labels_per_series, 40);
         assert_eq!(limits.query_timeout, Duration::from_secs(30));
+        assert_eq!(
+            limits.max_query_range_seconds, 0,
+            "AC-W1: embedded capability must set unlimited (0)"
+        );
+    }
+
+    /// T-W1 / AC-W1: max_query_range_seconds = 0 → no Softprobe length reject.
+    #[test]
+    fn max_query_range_is_unlimited() {
+        let limits = QueryLimits::default();
+        assert_eq!(limits.max_query_range_seconds, 0);
+        let day_ms = 86_400_000i64;
+        // 180d and 365d must not fail with range exceeds.
+        limits
+            .validate_time_range_ms(Some(0), Some(180 * day_ms))
+            .expect("180d must be accepted");
+        limits
+            .validate_time_range_ms(Some(0), Some(365 * day_ms))
+            .expect("365d must be accepted");
+        // Extreme span previously overflowed; with unlimited it must still be Ok
+        // (only end < start is rejected).
+        limits
+            .validate_time_range_ms(Some(i64::MIN / 2), Some(i64::MAX / 2))
+            .expect("unlimited must accept extreme span");
     }
 
     #[test]
-    fn validate_time_range_rejects_extreme_span_without_overflow() {
-        let limits = QueryLimits::default();
-        // Extreme i64 endpoints previously overflowed end-start and could bypass the cap.
+    fn validate_time_range_rejects_when_cap_configured() {
+        let mut limits = QueryLimits::default();
+        limits.max_query_range_seconds = 86_400;
         let err = limits
-            .validate_time_range_ms(Some(i64::MIN / 2), Some(i64::MAX / 2))
-            .expect_err("must reject huge range");
+            .validate_time_range_ms(Some(0), Some(200_000_000))
+            .expect_err("must reject when cap > 0");
         assert_eq!(err.code, CompatErrorCode::LimitExceeded);
         assert!(err.message.contains("max_query_range_seconds"));
+    }
+
+    #[test]
+    fn validate_time_range_still_rejects_end_before_start() {
+        let limits = QueryLimits::default();
+        let err = limits
+            .validate_time_range_ms(Some(1000), Some(0))
+            .expect_err("end < start");
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
     }
 }

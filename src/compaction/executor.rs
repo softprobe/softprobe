@@ -1,10 +1,34 @@
 use crate::catalog::DropdownCatalog;
+use crate::compaction::collapse::{collapse_job_1h_from_raw_sql, collapse_job_1h_sql};
+use crate::compaction::downsample::{
+    downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
+};
+use crate::compaction::twcs::{
+    partition_live_file_stats_sql, plan_twcs_merges, PartitionFileStats,
+    TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+};
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
+use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
+use crate::storage::schema::MAINTENANCE_METRICS_FAMILY_TABLES;
 use anyhow::{anyhow, Result};
+use chrono::{NaiveDate, Utc};
 use duckdb::Connection;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+/// Metrics-family tables compacted/expired before traces/logs/scores (AC-M1).
+pub fn maintenance_metrics_family_tables() -> &'static [&'static str] {
+    MAINTENANCE_METRICS_FAMILY_TABLES
+}
+
+/// Full ordered maintenance table list: metrics family first, then other telemetry.
+pub fn maintenance_table_names() -> Vec<&'static str> {
+    let mut tables = Vec::with_capacity(MAINTENANCE_METRICS_FAMILY_TABLES.len() + 3);
+    tables.extend_from_slice(MAINTENANCE_METRICS_FAMILY_TABLES);
+    tables.extend_from_slice(&["traces", "logs", "scores"]);
+    tables
+}
 
 #[derive(Clone)]
 pub struct MaintenanceExecutor {
@@ -100,9 +124,12 @@ impl MaintenanceExecutor {
     }
 
     async fn run_once_ducklake(&self) -> Result<MaintenanceSummary> {
-        // Metrics first: Prom/Grafana load is usually the loudest small-file
-        // victim under continuous OTLP. Traces/logs/scores follow.
-        let tables = ["metrics", "traces", "logs", "scores"];
+        // §7.2 pass order per tenant scope:
+        // 1 ensure PARTITIONED BY / SORTED BY
+        // 2 TWCS merge (metrics family first, partition-scoped plans)
+        // 3–5 downsample 5m → 1h → collapse
+        // 6–7 expire snapshots + orphan cleanup (once per scope)
+        let tables = maintenance_table_names();
         let mut results = Vec::new();
 
         for (label, ducklake) in self.maintenance_scopes().await? {
@@ -119,82 +146,84 @@ impl MaintenanceExecutor {
             }
 
             let files_before = count_parquet_files_under(&ducklake.data_path);
-            for table in tables {
+
+            // §7.2 step 1 — idempotent layout DDL for metrics family.
+            let layout_catalog = crate::storage::ducklake::layout_catalog_prefix(
+                &ducklake.catalog_alias,
+                &ducklake.metadata_schema,
+            );
+            if let Err(err) = ensure_metrics_layout_family_tables(&conn, &layout_catalog) {
+                warn!(
+                    "Maintenance ensure layout tables failed ({}): {}",
+                    label, err
+                );
+            }
+
+            let mut compact_status: std::collections::HashMap<String, CompactionStatus> =
+                std::collections::HashMap::new();
+
+            if self.config.maintenance.enabled {
+                for table in MAINTENANCE_METRICS_FAMILY_TABLES {
+                    let status = match self.ducklake_twcs_compact_table(&conn, &ducklake, table)
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            warn!(
+                                "Maintenance TWCS merge failed for {}.{} ({}): {}",
+                                ducklake.metadata_schema, table, label, err
+                            );
+                            CompactionStatus::Skipped
+                        }
+                    };
+                    compact_status.insert((*table).to_string(), status);
+                }
+
+                if let Err(err) = self.run_metrics_ladder(&conn, &ducklake) {
+                    warn!(
+                        "Maintenance downsample/collapse ladder failed ({}): {}",
+                        label, err
+                    );
+                }
+
+                for table in ["traces", "logs", "scores"] {
+                    let status = match self.ducklake_compact_table(&conn, &ducklake, table) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            warn!(
+                                "Maintenance compaction failed for {}.{} ({}): {}",
+                                ducklake.metadata_schema, table, label, err
+                            );
+                            CompactionStatus::Skipped
+                        }
+                    };
+                    compact_status.insert(table.to_string(), status);
+                }
+            }
+
+            // Expire + orphan cleanup once per scope (not once per table).
+            let (metadata, remove_orphan_files) =
+                self.run_scope_metadata_cleanup(&conn, &ducklake, &label);
+
+            for table in &tables {
                 let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
-                let compaction = if self.config.maintenance.enabled {
-                    CompactionResult {
-                        status: match self.ducklake_compact_table(&conn, &ducklake, table) {
-                            Ok(status) => status,
-                            Err(err) => {
-                                warn!(
-                                    "Maintenance compaction failed for {} ({}): {}",
-                                    table_ident, label, err
-                                );
-                                CompactionStatus::Skipped
-                            }
-                        },
-                    }
-                } else {
-                    CompactionResult {
-                        status: CompactionStatus::Skipped,
-                    }
+                let compaction = CompactionResult {
+                    status: if self.config.maintenance.enabled {
+                        compact_status
+                            .get(*table)
+                            .cloned()
+                            .unwrap_or(CompactionStatus::Skipped)
+                    } else {
+                        CompactionStatus::Skipped
+                    },
                 };
-
-                let metadata = if self.config.maintenance.metadata_enabled {
-                    match self.ducklake_expire_snapshots(&conn, &ducklake) {
-                        Ok(expired) => MetadataMaintenanceResult {
-                            expired_snapshots: expired,
-                            skipped: false,
-                        },
-                        Err(err) => {
-                            warn!(
-                                "Maintenance metadata failed for {} ({}): {}",
-                                table_ident, label, err
-                            );
-                            MetadataMaintenanceResult {
-                                expired_snapshots: 0,
-                                skipped: true,
-                            }
-                        }
-                    }
-                } else {
-                    MetadataMaintenanceResult {
-                        expired_snapshots: 0,
-                        skipped: true,
-                    }
-                };
-
-                let remove_orphan_files = if self.config.maintenance.metadata_enabled
-                    && self.config.maintenance.remove_orphan_files_enabled
-                {
-                    match self.ducklake_cleanup_files(&conn, &ducklake) {
-                        Ok(()) => ActionResult {
-                            status: ActionStatus::Completed,
-                        },
-                        Err(err) => {
-                            warn!(
-                                "Maintenance orphan cleanup failed for {} ({}): {}",
-                                table_ident, label, err
-                            );
-                            ActionResult {
-                                status: ActionStatus::Skipped,
-                            }
-                        }
-                    }
-                } else {
-                    ActionResult {
-                        status: ActionStatus::Skipped,
-                    }
-                };
-
                 results.push(TableMaintenanceResult {
                     table: table_ident,
-                    metadata,
+                    metadata: metadata.clone(),
                     compaction,
                     rewrite_manifests: ActionResult {
                         status: ActionStatus::Unsupported,
                     },
-                    remove_orphan_files,
+                    remove_orphan_files: remove_orphan_files.clone(),
                 });
             }
             let files_after = count_parquet_files_under(&ducklake.data_path);
@@ -214,6 +243,258 @@ impl MaintenanceExecutor {
         }
 
         Ok(MaintenanceSummary { tables: results })
+    }
+
+    fn run_scope_metadata_cleanup(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+        label: &str,
+    ) -> (MetadataMaintenanceResult, ActionResult) {
+        let metadata = if self.config.maintenance.metadata_enabled {
+            match self.ducklake_expire_snapshots(conn, ducklake) {
+                Ok(expired) => MetadataMaintenanceResult {
+                    expired_snapshots: expired,
+                    skipped: false,
+                },
+                Err(err) => {
+                    warn!("Maintenance metadata failed ({}): {}", label, err);
+                    MetadataMaintenanceResult {
+                        expired_snapshots: 0,
+                        skipped: true,
+                    }
+                }
+            }
+        } else {
+            MetadataMaintenanceResult {
+                expired_snapshots: 0,
+                skipped: true,
+            }
+        };
+
+        let remove_orphan_files = if self.config.maintenance.metadata_enabled
+            && self.config.maintenance.remove_orphan_files_enabled
+        {
+            match self.ducklake_cleanup_files(conn, ducklake) {
+                Ok(()) => ActionResult {
+                    status: ActionStatus::Completed,
+                },
+                Err(err) => {
+                    warn!("Maintenance orphan cleanup failed ({}): {}", label, err);
+                    ActionResult {
+                        status: ActionStatus::Skipped,
+                    }
+                }
+            }
+        } else {
+            ActionResult {
+                status: ActionStatus::Skipped,
+            }
+        };
+        (metadata, remove_orphan_files)
+    }
+
+    /// §7.2 steps 3–5: incremental 5m → 1h → collapse (AC-S2 / AC-M2).
+    fn run_metrics_ladder(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<()> {
+        let catalog = crate::storage::ducklake::layout_catalog_prefix(
+            &ducklake.catalog_alias,
+            &ducklake.metadata_schema,
+        );
+        for (label, sql) in [
+            ("downsample_5m", downsample_5m_sql(&catalog)),
+            ("downsample_1h_from_5m", downsample_1h_from_5m_sql(&catalog)),
+            ("collapse_job_1h", collapse_job_1h_sql(&catalog)),
+        ] {
+            // DuckLake publishes snapshots on COMMIT — wrap each ladder step.
+            let run = |s: &str| -> Result<()> {
+                let body = s.trim().trim_end_matches(';');
+                conn.execute_batch(&format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;"))?;
+                Ok(())
+            };
+            if let Err(err) = run(&sql) {
+                // Empty source / missing arg_max edge cases: try fallbacks where defined.
+                warn!(
+                    "Metrics ladder step {} soft-failed (will try fallback if any): {}",
+                    label, err
+                );
+                if label == "downsample_1h_from_5m" {
+                    let fb = downsample_1h_from_raw_sql(&catalog);
+                    if let Err(err2) = run(&fb) {
+                        warn!("downsample_1h_from_raw fallback failed: {}", err2);
+                    }
+                } else if label == "collapse_job_1h" {
+                    let fb = collapse_job_1h_from_raw_sql(&catalog);
+                    if let Err(err2) = run(&fb) {
+                        warn!("collapse_job_1h_from_raw fallback failed: {}", err2);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// TWCS-shaped merge: plan per `record_date`, then one bounded wave (AC-F6 / AC-Q9).
+    ///
+    /// Softprobe plans which calendar days need merge. Execution is a single
+    /// unscoped `ducklake_merge_adjacent_files` wave — DuckLake has no day filter
+    /// API here, and merges within `PARTITIONED BY (record_date)` (T-F6).
+    fn ducklake_twcs_compact_table(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+        table: &str,
+    ) -> Result<CompactionStatus> {
+        let today = Utc::now().date_naive();
+        let partitions = self
+            .load_partition_stats(conn, &ducklake.catalog_alias, table)
+            .unwrap_or_default();
+        let size_pressure = partitions.iter().any(|p| {
+            p.total_bytes > 0 && p.live_file_count > 1 && p.total_bytes < 8 * 1024 * 1024
+        });
+        let actions = plan_twcs_merges(
+            table,
+            &ducklake.catalog_alias,
+            &ducklake.metadata_schema,
+            &partitions,
+            today,
+            size_pressure,
+            TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+        );
+        if actions.is_empty() && !partitions.is_empty() {
+            // Quiet partitions — nothing to do.
+            return Ok(CompactionStatus::Skipped);
+        }
+        if actions.is_empty() {
+            // No stats yet (inline-only / empty): still attempt a bounded merge.
+            return self.ducklake_compact_table_wave(
+                conn,
+                ducklake,
+                table,
+                TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+            );
+        }
+        info!(
+            "TWCS merge {} day(s) need work for {}.{} (first day {}); executing partition-local wave",
+            actions.len(),
+            ducklake.metadata_schema,
+            table,
+            actions[0].record_date
+        );
+        // Prefer short waves so interactive queries are not starved (AC-Q9).
+        self.ducklake_compact_table_wave(
+            conn,
+            ducklake,
+            table,
+            TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+        )
+    }
+
+    fn load_partition_stats(
+        &self,
+        conn: &Connection,
+        catalog_alias: &str,
+        table: &str,
+    ) -> Result<Vec<PartitionFileStats>> {
+        let sql = partition_live_file_stats_sql(catalog_alias, table);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let date_str: String = row.get(0)?;
+            let record_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                duckdb::Error::FromSqlConversionFailure(0, duckdb::types::Type::Text, Box::new(e))
+            })?;
+            let live_file_count: i64 = row.get(1)?;
+            let total_bytes: i64 = row.get(2)?;
+            Ok(PartitionFileStats {
+                record_date,
+                live_file_count: live_file_count.max(0) as usize,
+                total_bytes: total_bytes.max(0) as u64,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    fn ducklake_compact_table_wave(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+        table: &str,
+        max_compacted_files: u64,
+    ) -> Result<CompactionStatus> {
+        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
+        let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
+        let target_file_size =
+            crate::storage::ducklake::size_literal(self.config.maintenance.target_file_size_bytes);
+        let set_target = format!(
+            "CALL {}.set_option('target_file_size', '{}', {});",
+            ducklake.catalog_alias, target_file_size, scope
+        );
+        if let Err(err) = execute_batch_with_serialization_retry(
+            conn,
+            &set_target,
+            COMPACTION_SERIALIZATION_ATTEMPTS,
+            &format!("ducklake set_option target_file_size {}", qualified),
+        ) {
+            if is_ducklake_serialization_conflict(&err) {
+                warn!(
+                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                    qualified, err
+                );
+                return Ok(CompactionStatus::Skipped);
+            }
+            return Err(anyhow!(
+                "DuckLake set_option failed for {}: {}",
+                qualified,
+                err
+            ));
+        }
+        let sql = format!(
+            "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}', max_compacted_files => {});",
+            ducklake.catalog_alias, table, ducklake.metadata_schema, max_compacted_files
+        );
+        for wave in 1..=2 {
+            match execute_batch_with_serialization_retry(
+                conn,
+                &sql,
+                COMPACTION_SERIALIZATION_ATTEMPTS,
+                &format!("ducklake_merge_adjacent_files {} wave{}", qualified, wave),
+            ) {
+                Ok(_) => return Ok(CompactionStatus::Completed),
+                Err(err) if is_ducklake_serialization_conflict(&err) && wave < 2 => {
+                    warn!(
+                        "DuckLake compaction conflict on {} wave {}; backing off before retry: {}",
+                        qualified, wave, err
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(err) if is_ducklake_serialization_conflict(&err) => {
+                    warn!(
+                        "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                        qualified, err
+                    );
+                    return Ok(CompactionStatus::Skipped);
+                }
+                Err(err) if is_ducklake_unsupported(&err) => {
+                    return Ok(CompactionStatus::Unsupported);
+                }
+                Err(err) => {
+                    return Err(anyhow!(
+                        "DuckLake compaction failed for {}.{}: {}",
+                        ducklake.metadata_schema,
+                        table,
+                        err
+                    ));
+                }
+            }
+        }
+        Ok(CompactionStatus::Skipped)
     }
 
     fn open_ducklake_connection(
@@ -334,19 +615,10 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<usize> {
-        let days = std::cmp::max(
-            1,
-            self.config.maintenance.max_snapshot_age_seconds / (24 * 3600),
-        );
-        let dry_run_sql = format!(
-            "CALL ducklake_expire_snapshots('{}', dry_run => true, older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
-            ducklake.catalog_alias, days
-        );
+        let age_seconds = self.config.maintenance.max_snapshot_age_seconds;
+        let dry_run_sql = expire_snapshots_sql(&ducklake.catalog_alias, age_seconds, true);
         let planned = count_returned_rows(conn, &dry_run_sql)?;
-        let sql = format!(
-            "CALL ducklake_expire_snapshots('{}', older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
-            ducklake.catalog_alias, days
-        );
+        let sql = expire_snapshots_sql(&ducklake.catalog_alias, age_seconds, false);
         conn.execute_batch(&sql)?;
         Ok(planned)
     }
@@ -356,21 +628,48 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<()> {
-        let older_than_seconds = self.config.maintenance.remove_orphan_older_than_seconds;
-        let sql = if older_than_seconds == 0 {
-            format!(
-                "CALL ducklake_cleanup_old_files('{}', cleanup_all => true);",
-                ducklake.catalog_alias
-            )
-        } else {
-            let days = std::cmp::max(1, older_than_seconds / (24 * 3600));
-            format!(
-                "CALL ducklake_cleanup_old_files('{}', older_than => CAST(now() AS TIMESTAMP) - INTERVAL '{} days');",
-                ducklake.catalog_alias, days
-            )
-        };
+        let sql = cleanup_old_files_sql(
+            &ducklake.catalog_alias,
+            self.config.maintenance.remove_orphan_older_than_seconds,
+        );
         conn.execute_batch(&sql)?;
         Ok(())
+    }
+}
+
+/// DuckLake `older_than` interval from an age in seconds (no day flooring).
+fn ducklake_older_than_interval(age_seconds: u64) -> String {
+    format!("INTERVAL '{} seconds'", age_seconds)
+}
+
+pub(crate) fn expire_snapshots_sql(catalog_alias: &str, max_snapshot_age_seconds: u64, dry_run: bool) -> String {
+    let interval = ducklake_older_than_interval(max_snapshot_age_seconds);
+    // older_than is TIMESTAMP WITH TIME ZONE — use now(), not CAST(... AS TIMESTAMP).
+    if dry_run {
+        format!(
+            "CALL ducklake_expire_snapshots('{}', dry_run => true, older_than => now() - {});",
+            catalog_alias, interval
+        )
+    } else {
+        format!(
+            "CALL ducklake_expire_snapshots('{}', older_than => now() - {});",
+            catalog_alias, interval
+        )
+    }
+}
+
+pub(crate) fn cleanup_old_files_sql(catalog_alias: &str, older_than_seconds: u64) -> String {
+    if older_than_seconds == 0 {
+        format!(
+            "CALL ducklake_cleanup_old_files('{}', cleanup_all => true);",
+            catalog_alias
+        )
+    } else {
+        let interval = ducklake_older_than_interval(older_than_seconds);
+        format!(
+            "CALL ducklake_cleanup_old_files('{}', older_than => now() - {});",
+            catalog_alias, interval
+        )
     }
 }
 
@@ -484,8 +783,28 @@ mod tests {
 
     #[test]
     fn maintenance_compacts_metrics_before_other_tables() {
-        let tables = ["metrics", "traces", "logs", "scores"];
-        assert_eq!(tables[0], "metrics");
+        let tables = maintenance_table_names();
+        assert_eq!(tables[0], "metric_samples");
+        assert!(tables.contains(&"traces"));
+        assert!(tables.iter().position(|t| *t == "metric_samples").unwrap()
+            < tables.iter().position(|t| *t == "traces").unwrap());
+    }
+
+    #[test]
+    fn maintenance_tables_include_metric_family() {
+        assert_eq!(
+            maintenance_metrics_family_tables(),
+            &[
+                "metric_samples",
+                "metric_postings",
+                "metric_series",
+                "metric_hist_samples",
+                "metric_samples_5m",
+                "metric_samples_1h",
+                "metric_collapse_job_1h",
+            ]
+        );
+        assert!(!maintenance_metrics_family_tables().contains(&"metrics"));
     }
 
     #[test]
@@ -504,5 +823,60 @@ mod tests {
     fn parquet_warn_threshold_is_sane() {
         assert!(PARQUET_FILE_WARN_THRESHOLD >= 50);
         assert_eq!(COMPACTION_SERIALIZATION_ATTEMPTS, 8);
+    }
+
+    /// AC-N2 / T-N2: 3600s must become a seconds interval, not `INTERVAL '1 days'`.
+    #[test]
+    fn expire_snapshots_sql_honors_seconds() {
+        let dry = expire_snapshots_sql("softprobe", 3600, true);
+        let live = expire_snapshots_sql("softprobe", 3600, false);
+        for sql in [&dry, &live] {
+            assert!(
+                sql.contains("INTERVAL '3600 seconds'"),
+                "expected seconds interval, got: {sql}"
+            );
+            assert!(
+                !sql.contains("days"),
+                "must not day-floor snapshot expiry: {sql}"
+            );
+        }
+        assert!(dry.contains("dry_run => true"));
+        assert!(!live.contains("dry_run"));
+
+        // Strengthen AC-N2/N5: sub-hour ages stay in seconds (no day floor).
+        for age in [60u64, 1u64] {
+            let sql = expire_snapshots_sql("softprobe", age, false);
+            assert!(
+                sql.contains(&format!("INTERVAL '{age} seconds'")),
+                "expected INTERVAL '{age} seconds', got: {sql}"
+            );
+            assert!(!sql.contains("days"), "must not contain days: {sql}");
+        }
+    }
+
+    /// AC-N5 / T-N5: orphan cleanup older_than uses seconds, not day floor.
+    #[test]
+    fn cleanup_old_files_sql_honors_seconds() {
+        let sql = cleanup_old_files_sql("softprobe", 3600);
+        assert!(
+            sql.contains("INTERVAL '3600 seconds'"),
+            "expected seconds interval, got: {sql}"
+        );
+        assert!(
+            !sql.contains("days"),
+            "must not day-floor orphan cleanup: {sql}"
+        );
+        let all = cleanup_old_files_sql("softprobe", 0);
+        assert!(all.contains("cleanup_all => true"));
+        assert!(!all.contains("older_than"));
+
+        for age in [60u64, 1u64] {
+            let sql = cleanup_old_files_sql("softprobe", age);
+            assert!(
+                sql.contains(&format!("INTERVAL '{age} seconds'")),
+                "expected INTERVAL '{age} seconds', got: {sql}"
+            );
+            assert!(!sql.contains("days"), "must not contain days: {sql}");
+        }
     }
 }
