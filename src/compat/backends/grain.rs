@@ -5,18 +5,27 @@
 //!
 //! Downsample tables are filled by maintenance (step 7), not ingest. When 5m/1h
 //! numeric grains are empty the planner still selects them for **gauge/counter**
-//! series (empty until ladder runs). Classic hist/summary selectors always use
-//! `metric_hist_samples` — Softprobe never stores Prom `_count`/`_sum` as separate
-//! numeric 1h series, so routing hist queries there returns wrong empty panels.
+//! series (empty until ladder runs). Classic hist/summary use raw `metric_hist_samples`
+//! for ≤2h, `metric_hist_samples_5m` for ≤48h, `metric_hist_samples_1h` beyond —
+//! same ladder as gauges (Greptime/Thanos-style pre-aggregate, not Prom result cache).
 
 use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 
-/// Raw grain window: end − start ≤ 2h.
-pub const RAW_RANGE_MS: i64 = 2 * 60 * 60 * 1000;
-/// 5m grain window: end − start ≤ 48h (and > 2h).
+/// Raw grain window: end − start ≤ 12h.
+/// Kept generous to avoid gaps from downsample watermark lag; step-bucketing
+/// on raw keeps scan cost manageable for typical dashboard panels.
+pub const RAW_RANGE_MS: i64 = 12 * 60 * 60 * 1000;
+/// 5m grain window: end − start ≤ 48h (and > 2h) for gauges.
 pub const FIVE_MIN_RANGE_MS: i64 = 48 * 60 * 60 * 1000;
+/// Hist 5m grain: 12h < range ≤ 48h (beyond 48h uses hist_1h).
+pub const HIST_FIVE_MIN_RANGE_MS: i64 = 48 * 60 * 60 * 1000;
 /// Grafana step ≥ 1h → prefer `metric_samples_1h` even for shorter ranges.
 pub const ONE_HOUR_STEP_MS: i64 = 60 * 60 * 1000;
+/// Lag window (ms) for 5m downsample — raw data newer than this may not be in 5m.
+/// Matches RAW_RANGE_MS so the raw tail always covers the gap.
+pub const FIVE_MIN_LAG_MS: i64 = 12 * 60 * 60 * 1000;
+/// Lag window (ms) for 1h downsample — raw data newer than this is not yet in 1h.
+pub const ONE_HOUR_LAG_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Physical sample table chosen after postings resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,6 +38,10 @@ pub enum SampleGrain {
     OneHour,
     /// `metric_hist_samples` for classic hist/summary (`_bucket` / `_sum` / `_count`).
     Hist,
+    /// `metric_hist_samples_5m` (maintenance ladder; merged bucket arrays).
+    HistFiveMin,
+    /// `metric_hist_samples_1h`.
+    HistOneHour,
 }
 
 impl SampleGrain {
@@ -38,6 +51,8 @@ impl SampleGrain {
             Self::FiveMin => "metric_samples_5m",
             Self::OneHour => "metric_samples_1h",
             Self::Hist => "metric_hist_samples",
+            Self::HistFiveMin => "metric_hist_samples_5m",
+            Self::HistOneHour => "metric_hist_samples_1h",
         }
     }
 
@@ -45,7 +60,10 @@ impl SampleGrain {
     pub fn time_column(self) -> &'static str {
         match self {
             Self::Raw | Self::Hist => "timestamp",
-            Self::FiveMin | Self::OneHour => "window_ts",
+            Self::FiveMin
+            | Self::OneHour
+            | Self::HistFiveMin
+            | Self::HistOneHour => "window_ts",
         }
     }
 
@@ -54,12 +72,19 @@ impl SampleGrain {
         match self {
             Self::Raw => "sm.value",
             Self::FiveMin | Self::OneHour => "sm.last",
-            Self::Hist => "COALESCE(sm.sum, 0.0)",
+            Self::Hist | Self::HistFiveMin | Self::HistOneHour => "COALESCE(sm.sum, 0.0)",
         }
     }
 
     pub fn is_downsample(self) -> bool {
-        matches!(self, Self::FiveMin | Self::OneHour)
+        matches!(
+            self,
+            Self::FiveMin | Self::OneHour | Self::HistFiveMin | Self::HistOneHour
+        )
+    }
+
+    pub fn is_hist(self) -> bool {
+        matches!(self, Self::Hist | Self::HistFiveMin | Self::HistOneHour)
     }
 }
 
@@ -73,7 +98,7 @@ pub fn query_range_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64>
 
 /// §9.1 grain table after postings resolve.
 ///
-/// - hist/summary (`_bucket` / `_sum` / `_count`) → always `metric_hist_samples`
+/// - hist/summary → raw hist ≤2h, hist_5m ≤48h, hist_1h beyond (§7.2 ladder)
 /// - end−start ≤ 2h → `metric_samples`
 /// - ≤ 48h → `metric_samples_5m` (empty until maintenance; no ingest fake-fill)
 /// - \> 48h → `metric_samples_1h`
@@ -84,19 +109,22 @@ pub fn select_sample_grain(
     step_ms: Option<i64>,
     is_histogram: bool,
 ) -> SampleGrain {
-    // Classic Prom hist names are projections of `metric_hist_samples` rows, not
-    // separate gauge series in `metric_samples_1h`. Window length must not divert
-    // them onto an empty numeric grain (Grafana "No data" on now-3h hist panels).
-    if is_histogram {
-        return SampleGrain::Hist;
-    }
-
     let range = query_range_ms(start_ms, end_ms).unwrap_or(0);
 
-    if step_ms
-        .map(|s| s >= ONE_HOUR_STEP_MS)
-        .unwrap_or(false)
-    {
+    if is_histogram {
+        if step_ms.map(|s| s >= ONE_HOUR_STEP_MS).unwrap_or(false) {
+            return SampleGrain::HistOneHour;
+        }
+        if range <= RAW_RANGE_MS {
+            return SampleGrain::Hist;
+        }
+        if range <= HIST_FIVE_MIN_RANGE_MS {
+            return SampleGrain::HistFiveMin;
+        }
+        return SampleGrain::HistOneHour;
+    }
+
+    if step_ms.map(|s| s >= ONE_HOUR_STEP_MS).unwrap_or(false) {
         return SampleGrain::OneHour;
     }
 
@@ -136,7 +164,7 @@ mod tests {
         );
     }
 
-    /// Boundary: exactly 2h → raw; just over 2h → 5m.
+    /// Boundary: exactly RAW_RANGE_MS → raw; just over → 5m.
     #[test]
     fn planner_raw_boundary_at_2h() {
         let end = 1_700_000_000_000i64;
@@ -207,32 +235,29 @@ mod tests {
         );
     }
 
-    /// Classic hist/summary selectors always use `metric_hist_samples` (any window / step).
-    /// Regression: >2h must not divert onto empty `metric_samples_1h`.
+    /// Classic hist/summary selectors use the hist ladder (raw / 5m / 1h), not gauge grains.
     #[test]
-    fn hist_selector_always_uses_hist_table() {
+    fn hist_selector_uses_hist_ladder_by_window() {
         let end = 1_700_000_000_000i64;
-        let windows = [
-            30 * 60 * 1000,       // 30m
-            RAW_RANGE_MS,         // 2h
-            3 * HOUR,             // 3h (past raw cliff)
-            DAY,                  // 24h
-            30 * DAY,             // 30d
-            90 * DAY,             // 90d
+        let windows: &[(i64, SampleGrain)] = &[
+            (30 * 60 * 1000, SampleGrain::Hist),
+            (RAW_RANGE_MS, SampleGrain::Hist),
+            (RAW_RANGE_MS + 1, SampleGrain::HistFiveMin),
+            (DAY, SampleGrain::HistFiveMin),
+            (2 * DAY, SampleGrain::HistFiveMin),
+            (2 * DAY + 1, SampleGrain::HistOneHour),
+            (30 * DAY, SampleGrain::HistOneHour),
+            (90 * DAY, SampleGrain::HistOneHour),
         ];
-        for range in windows {
-            for step in [Some(15_000i64), Some(HOUR), None] {
-                let g = select_sample_grain(Some(end - range), Some(end), step, true);
-                assert_eq!(
-                    g,
-                    SampleGrain::Hist,
-                    "hist grain for range={range} step={step:?}"
-                );
-                assert_eq!(g.table_name(), "metric_hist_samples");
-                assert_ne!(g.table_name(), "metric_samples_1h");
-                assert_ne!(g.table_name(), "metric_samples_5m");
-            }
+        for &(range, want) in windows {
+            let g = select_sample_grain(Some(end - range), Some(end), Some(15_000), true);
+            assert_eq!(g, want, "hist grain for range={range}");
+            assert!(g.is_hist());
         }
+        assert_eq!(
+            select_sample_grain(Some(end - DAY), Some(end), Some(HOUR), true),
+            SampleGrain::HistOneHour
+        );
     }
 
     /// AC-H6 / Q-window-matrix: gauge vs hist grain for common Grafana windows.
@@ -241,15 +266,50 @@ mod tests {
         let end = 1_700_000_000_000i64;
         let cases: &[(i64, Option<i64>, SampleGrain, SampleGrain)] = &[
             // range_ms, step_ms, gauge/counter, hist/summary
-            (30 * 60 * 1000, Some(15_000), SampleGrain::Raw, SampleGrain::Hist),
-            (RAW_RANGE_MS, Some(15_000), SampleGrain::Raw, SampleGrain::Hist),
-            (RAW_RANGE_MS + 1, Some(20_000), SampleGrain::FiveMin, SampleGrain::Hist),
-            (3 * HOUR, Some(20_000), SampleGrain::FiveMin, SampleGrain::Hist),
-            (DAY, Some(60_000), SampleGrain::FiveMin, SampleGrain::Hist),
-            (30 * DAY, Some(HOUR), SampleGrain::OneHour, SampleGrain::Hist),
-            (90 * DAY, Some(HOUR), SampleGrain::OneHour, SampleGrain::Hist),
-            // step ≥ 1h prefers 1h for gauges even on short ranges; hist unchanged
-            (30 * 60 * 1000, Some(HOUR), SampleGrain::OneHour, SampleGrain::Hist),
+            (
+                30 * 60 * 1000,
+                Some(15_000),
+                SampleGrain::Raw,
+                SampleGrain::Hist,
+            ),
+            (
+                6 * HOUR,
+                Some(15_000),
+                SampleGrain::Raw,
+                SampleGrain::Hist,
+            ),
+            (
+                RAW_RANGE_MS,
+                Some(15_000),
+                SampleGrain::Raw,
+                SampleGrain::Hist,
+            ),
+            (
+                RAW_RANGE_MS + 1,
+                Some(20_000),
+                SampleGrain::FiveMin,
+                SampleGrain::HistFiveMin,
+            ),
+            (DAY, Some(60_000), SampleGrain::FiveMin, SampleGrain::HistFiveMin),
+            (
+                30 * DAY,
+                Some(HOUR),
+                SampleGrain::OneHour,
+                SampleGrain::HistOneHour,
+            ),
+            (
+                90 * DAY,
+                Some(HOUR),
+                SampleGrain::OneHour,
+                SampleGrain::HistOneHour,
+            ),
+            // step ≥ 1h prefers 1h even for short gauge ranges; hist uses hist_1h
+            (
+                30 * 60 * 1000,
+                Some(HOUR),
+                SampleGrain::OneHour,
+                SampleGrain::HistOneHour,
+            ),
         ];
         for &(range, step, want_gauge, want_hist) in cases {
             let start = end - range;

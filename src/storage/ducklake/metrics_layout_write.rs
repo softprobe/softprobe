@@ -143,11 +143,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 metric_type: m.metric_type.clone(),
                 unit: m.unit.clone(),
                 description: m.description.clone(),
-                labels_json: labels_to_json(
-                    &labels,
-                    &m.resource_attributes,
-                    &m.attributes,
-                ),
+                labels_json: labels_to_json(&labels, &m.resource_attributes, &m.attributes),
                 record_date,
             });
         }
@@ -201,10 +197,7 @@ fn sql_date(d: NaiveDate) -> String {
 }
 
 fn sql_ts(ts: DateTime<Utc>) -> String {
-    format!(
-        "TIMESTAMPTZ '{}'",
-        ts.format("%Y-%m-%d %H:%M:%S%.6f+00")
-    )
+    format!("TIMESTAMPTZ '{}'", ts.format("%Y-%m-%d %H:%M:%S%.6f+00"))
 }
 
 fn sql_f64(v: f64) -> String {
@@ -317,9 +310,7 @@ fn insert_samples_sql(catalog: &str, rows: &[SampleRow]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!(
-        "INSERT INTO {table} (series_id, timestamp, value, record_date) VALUES\n{values};"
-    )
+    format!("INSERT INTO {table} (series_id, timestamp, value, record_date) VALUES\n{values};")
 }
 
 fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
@@ -331,10 +322,7 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
                 .count
                 .map(|c| format!("{c}::UBIGINT"))
                 .unwrap_or_else(|| "NULL".to_string());
-            let sum = r
-                .sum
-                .map(sql_f64)
-                .unwrap_or_else(|| "NULL".to_string());
+            let sum = r.sum.map(sql_f64).unwrap_or_else(|| "NULL".to_string());
             format!(
                 "({id}::UBIGINT, {ts}, {count}, {sum}, {buckets}, {bounds}, {rd})",
                 id = r.series_id,
@@ -352,7 +340,10 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
     )
 }
 
-const INSERT_CHUNK: usize = 256;
+/// Rows per INSERT. DuckLake with `data_inlining_row_limit=0` writes one
+/// Parquet file per INSERT. 256 turned a single OTLP batch (~80k postings)
+/// into ~320 tiny files and made Grafana hist queries miss the 2s bar.
+const INSERT_CHUNK: usize = 8192;
 
 fn exec_chunked<T>(
     conn: &Connection,
@@ -364,8 +355,12 @@ fn exec_chunked<T>(
             continue;
         }
         let sql = build(chunk);
-        conn.execute_batch(&sql)
-            .map_err(|e| anyhow!("metrics layout insert failed: {e}\nSQL head: {}", &sql[..sql.len().min(400)]))?;
+        conn.execute_batch(&sql).map_err(|e| {
+            anyhow!(
+                "metrics layout insert failed: {e}\nSQL head: {}",
+                &sql[..sql.len().min(400)]
+            )
+        })?;
     }
     Ok(())
 }
@@ -387,7 +382,9 @@ pub fn write_metrics_layout_txn(
     let prepared = prepare_ingest(metrics, max_labels);
     conn.execute_batch("BEGIN TRANSACTION;")?;
     let write = (|| -> Result<()> {
-        exec_chunked(conn, &prepared.series, |c| insert_series_sql(catalog_alias, c))?;
+        exec_chunked(conn, &prepared.series, |c| {
+            insert_series_sql(catalog_alias, c)
+        })?;
         exec_chunked(conn, &prepared.postings, |c| {
             insert_postings_sql(catalog_alias, c)
         })?;
@@ -511,9 +508,7 @@ pub fn write_legacy_fat_metrics_throwaway(
     let ddl = format!(
         "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{escaped}') LIMIT 0;"
     );
-    let insert = format!(
-        "INSERT INTO {table} BY NAME {select} FROM read_parquet('{escaped}');"
-    );
+    let insert = format!("INSERT INTO {table} BY NAME {select} FROM read_parquet('{escaped}');");
     conn.execute_batch("BEGIN TRANSACTION;")?;
     let result = (|| -> Result<()> {
         conn.execute_batch(&ddl)?;
@@ -565,6 +560,14 @@ mod tests {
     };
     use chrono::TimeZone;
     use tempfile::TempDir;
+
+    #[test]
+    fn insert_chunk_is_one_parquet_per_otlp_batch_not_hundreds() {
+        assert!(
+            INSERT_CHUNK >= 8192,
+            "each INSERT is a DuckLake parquet file; 256 chunks explode postings on demo ingest"
+        );
+    }
 
     fn attach_ducklake(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
         let meta = temp.path().join("metadata.sqlite");
@@ -653,25 +656,19 @@ mod tests {
             );
         }
         let series_n: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM softprobe.metric_series",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT count(*) FROM softprobe.metric_series", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let samples_n: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM softprobe.metric_samples",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT count(*) FROM softprobe.metric_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let postings_n: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM softprobe.metric_postings",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT count(*) FROM softprobe.metric_postings", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(series_n, 1);
         assert_eq!(samples_n, 1);
@@ -703,11 +700,9 @@ mod tests {
         assert_eq!(series_n, N, "AC-C2: expected {N} series rows for today");
 
         let samples_n: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM softprobe.metric_samples",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT count(*) FROM softprobe.metric_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(samples_n, N);
 
@@ -849,6 +844,8 @@ mod tests {
                 "metric_hist_samples",
                 "metric_samples_5m",
                 "metric_samples_1h",
+                "metric_hist_samples_5m",
+                "metric_hist_samples_1h",
                 "metric_collapse_job_1h",
             ]
         );
@@ -922,7 +919,10 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("read nan");
-        assert!(is_nan, "NO_RECORDED_VALUE / NaN must round-trip in metric_samples");
+        assert!(
+            is_nan,
+            "NO_RECORDED_VALUE / NaN must round-trip in metric_samples"
+        );
     }
 
     #[test]

@@ -55,7 +55,8 @@ staged durability tier.
 DuckLake data inlining decides where committed rows live:
 
 - batches at or below `ducklake.data_inlining_row_limit` may stay in the
-  metadata catalog;
+  metadata catalog (default is **0** so skinny metrics tables write Parquet
+  TWCS can merge; VARIANT shredding already required Parquet);
 - larger writes become Parquet files under `ducklake.data_path`.
 
 Both forms are committed DuckLake data and are queried through the same
@@ -261,7 +262,7 @@ Important DuckLake settings:
 - `data_path`: local, `s3://`, or `gs://` data location
 - `catalog_alias`
 - `metadata_schema`
-- `data_inlining_row_limit` (default `10000`)
+- `data_inlining_row_limit` (default `0`; opt-in `10000` for scores/inlined-reader tests)
 - `writer_pool_size` (default `4`, clamped to `1..=16`)
 
 Non-secret object-store settings live in the `object_store` section (`region`

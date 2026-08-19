@@ -158,11 +158,11 @@ bench overlay documents the anti-pattern (1s scrape + `send_batch_size: 8`).
 
 **C1. Confirm cache_httpfs + external_file_cache are active** in the demo/deploy config (`query.cache_dir` writable).
 
-**C2. Short-TTL Prom query cache** (optional, tenant-scoped): cache `(tenant, query, start, end, step)` → encoded result for 5–30s to absorb Grafana refresh storms. Invalidate on short TTL only (no cross-tenant state). Keep correctness caps.
+**C2. Do not cache PromQL HTTP answers.** Repeating Grafana's last `query_range` JSON is not a scan. Each request must hit postings + skinny samples (Greptime analog: DataFusion plan + SST inverted index, not a response TTL). DuckDB object/parquet metadata caches are engine page caches, not query-result reuse. **Allowed:** day-scoped posting lists and `series_id` → labels (series metadata / inverted index), which are not PromQL answers.
 
 **C3. Dashboard guidance:** prefer `rate()` / narrow matchers; document expensive patterns (unmatched high-cardinality `sum(rate(...))` over long ranges).
 
-**Exit criteria:** Repeated identical `query_range` within TTL is cheap; demo host remains stable with Astronomy Shop + Softprobe PromQL folders.
+**Exit criteria:** Cold `query_range` on a few-hundred-MB lake is milliseconds to low hundreds of ms; demo host remains stable with Astronomy Shop + Softprobe PromQL folders.
 
 ### Phase D — Explicit non-goals (unless ADR revisited)
 
@@ -287,7 +287,7 @@ Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decodin
 1. **Done (Option A):** `make bench-prom-baseline` harness + results dir + high-card loadgen (`BENCH_CARDINALITY`).
 2. **Done:** labeled `baseline` / `killcase-before` runs before lean-scan changes.
 3. **Done:** VARIANT pushdown for `job` / `instance` / safe equality labels; unit tests; kill-case remeasure.
-4. **Done:** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY; 15s scan cache + Prom `query_range` result cache.
+4. **Done:** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY. Prom `query_range` HTTP/scan-result TTL caches were removed — they hid DuckDB cost instead of paying it.
 5. **Done:** lean scalar Prom SELECT (no `CAST(... AS JSON)`); resolve \(N\) from variant stats + promotions + aliases; promotion-aware matchers.
 6. **Done:** canonical metrics hot-label manifest + apply in bench/grafana-up before ingest.
 7. **Done (partial):** compaction interval 300s, metrics-first merge, retries (see Phase B).

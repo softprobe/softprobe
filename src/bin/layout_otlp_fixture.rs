@@ -118,7 +118,10 @@ fn resource_metrics_for_cmd(cmd: &Cmd) -> Result<ResourceMetrics> {
             let mut dps = Vec::new();
             for p in &cmd.points {
                 let arr = p.as_array().context("gauge point array")?;
-                let ts = arr[0].as_u64().or_else(|| arr[0].as_i64().map(|v| v as u64)).context("ts")?;
+                let ts = arr[0]
+                    .as_u64()
+                    .or_else(|| arr[0].as_i64().map(|v| v as u64))
+                    .context("ts")?;
                 let val = arr[1].as_f64().context("val")?;
                 dps.push(NumberDataPoint {
                     attributes: pattrs.clone(),
@@ -135,7 +138,10 @@ fn resource_metrics_for_cmd(cmd: &Cmd) -> Result<ResourceMetrics> {
             let mut dps = Vec::new();
             for p in &cmd.points {
                 let arr = p.as_array().context("sum point array")?;
-                let ts = arr[0].as_u64().or_else(|| arr[0].as_i64().map(|v| v as u64)).context("ts")?;
+                let ts = arr[0]
+                    .as_u64()
+                    .or_else(|| arr[0].as_i64().map(|v| v as u64))
+                    .context("ts")?;
                 let val = arr[1].as_f64().context("val")?;
                 dps.push(NumberDataPoint {
                     attributes: pattrs.clone(),
@@ -156,7 +162,10 @@ fn resource_metrics_for_cmd(cmd: &Cmd) -> Result<ResourceMetrics> {
             let mut dps = Vec::new();
             for p in &cmd.points {
                 let arr = p.as_array().context("hist point")?;
-                let ts = arr[0].as_u64().or_else(|| arr[0].as_i64().map(|v| v as u64)).context("ts")?;
+                let ts = arr[0]
+                    .as_u64()
+                    .or_else(|| arr[0].as_i64().map(|v| v as u64))
+                    .context("ts")?;
                 let buckets: Vec<u64> = arr[1]
                     .as_array()
                     .context("buckets")?

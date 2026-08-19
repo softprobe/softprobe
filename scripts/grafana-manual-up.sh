@@ -311,18 +311,19 @@ object_store:
   endpoint: null
 
 query:
-  max_connections: 4
+  max_connections: 10
   cache_dir: "$STATE_DIR/cache"
 
-# Demo ingest + Grafana refresh: skip maintenance storms (small-file thrash).
+# Demo ingest + Grafana: keep maintenance on so snapshots expire and TWCS merges.
 maintenance:
-  enabled: false
+  enabled: true
   target_file_size_bytes: 67108864
   interval_seconds: 300
-  metadata_enabled: false
-  metadata_interval_seconds: 300
-  remove_orphan_files_enabled: false
-  remove_orphan_older_than_seconds: 0
+  metadata_enabled: true
+  metadata_interval_seconds: 60
+  max_snapshot_age_seconds: 60
+  remove_orphan_files_enabled: true
+  remove_orphan_older_than_seconds: 60
 
 ducklake:
   catalog_type: "postgres"
@@ -330,7 +331,7 @@ ducklake:
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: 0
   writer_pool_size: 4
 
 dropdown_catalog:

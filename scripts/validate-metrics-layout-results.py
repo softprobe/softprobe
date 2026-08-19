@@ -24,15 +24,15 @@ REQUIRED_AC_IDS: tuple[str, ...] = (
     *(f"AC-H{i}" for i in range(1, 7)),
     *(f"AC-C{i}" for i in range(1, 5)),
     *(f"AC-W{i}" for i in range(1, 7)),
-    *(f"AC-N{i}" for i in range(1, 6)),
-    *(f"AC-F{i}" for i in range(1, 7)),
+    *(f"AC-N{i}" for i in range(1, 7)),
+    *(f"AC-F{i}" for i in range(1, 9)),
     *(f"AC-S{i}" for i in range(1, 4)),
     "AC-M1",
     "AC-M2",
     *(f"AC-G{i}" for i in range(0, 7)),
 )
 
-assert len(REQUIRED_AC_IDS) == 53, len(REQUIRED_AC_IDS)
+assert len(REQUIRED_AC_IDS) == 56, len(REQUIRED_AC_IDS)
 
 G_RATIO_IDS = ("AC-G1", "AC-G2", "AC-G3", "AC-G4", "AC-G5")
 

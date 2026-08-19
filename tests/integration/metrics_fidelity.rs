@@ -195,7 +195,7 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
     assert_eq!(qsum, Some(500.0));
     // Quantile expansion stays out of scope for metric_hist_samples (§6.4).
 
-        // AC-H1 Prom path: classic `_count` / `_bucket` query_range over hist table.
+    // AC-H1 Prom path: classic `_count` / `_bucket` query_range over hist table.
     // Fixture timestamp is 2022-01-01T00:00:00Z (1_640_995_200s).
     // Short (30m) and mid (3h) windows must both return series — mid used to divert
     // onto empty metric_samples_1h (AC-H3 regression).
@@ -209,9 +209,7 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
             "http_server_duration_bucket",
             "rpc_latency_count",
         ] {
-            let uri = format!(
-                "/api/v1/query_range?query={query}&start={start}&end={end}&step=15"
-            );
+            let uri = format!("/api/v1/query_range?query={query}&start={start}&end={end}&step=15");
             let resp = router
                 .clone()
                 .oneshot(

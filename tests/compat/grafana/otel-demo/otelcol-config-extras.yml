@@ -11,9 +11,10 @@
 
 processors:
   batch/softprobe:
-    timeout: 2s
-    send_batch_size: 128
-    send_batch_max_size: 256
+    # Timeout must dominate send_batch_size or commit rate stays ~1s (snapshot storm).
+    timeout: 15s
+    send_batch_size: 8192
+    send_batch_max_size: 8192
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512

@@ -107,7 +107,7 @@ ducklake:
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: 0
   writer_pool_size: 4
 ```
 

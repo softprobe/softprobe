@@ -65,3 +65,6 @@ warehouse/
 
 __pycache__/
 mooncake/
+
+# Cursor stop-hook local cache/logs (HEAD test stamp, gate output)
+.cursor/hooks/.state/

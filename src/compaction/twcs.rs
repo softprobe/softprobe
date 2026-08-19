@@ -10,8 +10,8 @@
 
 use chrono::NaiveDate;
 
-/// Greptime-analog `trigger_file_num` for closed calendar-day partitions.
-pub const TWCS_TRIGGER_FILE_NUM: usize = 4;
+/// Closed-day merge if more than this many live files (complete compact → 1 file).
+pub const TWCS_TRIGGER_FILE_NUM: usize = 2;
 /// After a maintenance pass, today's open-day live sample files must be ≤ this (AC-F4).
 pub const TWCS_OPEN_DAY_FILE_CAP: usize = 20;
 
@@ -41,13 +41,18 @@ pub fn day_kind(record_date: NaiveDate, today: NaiveDate) -> DayKind {
 }
 
 /// Whether TWCS should merge this partition on this pass (§7.1).
+///
+/// Closed days keep merging until the AC-F8 file bar (1 file, or 2 if that
+/// day's bytes exceed 64 MiB). Open day is a soft cap only (AC-F4).
 pub fn should_merge_partition(
     stats: &PartitionFileStats,
     kind: DayKind,
     size_pressure: bool,
 ) -> bool {
     match kind {
-        DayKind::Closed => stats.live_file_count >= TWCS_TRIGGER_FILE_NUM || size_pressure,
+        DayKind::Closed => {
+            !closed_day_meets_file_bar(stats.live_file_count, stats.total_bytes) || size_pressure
+        }
         DayKind::Open => stats.live_file_count > TWCS_OPEN_DAY_FILE_CAP || size_pressure,
     }
 }
@@ -161,8 +166,109 @@ pub fn live_data_file_paths_sql(catalog_alias: &str, table: &str) -> String {
     )
 }
 
-/// Max compacted files per merge wave — keeps partition waves short (AC-Q9).
+/// Small open-day CALL when already close to the AC-F4 cap (AC-Q9).
 pub const TWCS_MAX_COMPACTED_FILES_PER_WAVE: u64 = 32;
+/// Open-day wave cap per table per maintenance pass (AC-F4).
+/// Must drain a live ingest storm (~2k files) in one pass; do not stop at 8×32.
+pub const TWCS_MAX_WAVES_PER_TABLE: usize = 32;
+
+/// Closed-day files per merge CALL. Must be ≥ open-day 32 so leftover thousands
+/// can finish in one pass (AC-F8). DuckLake merge is still bounded per CALL.
+pub const TWCS_CLOSED_DAY_MAX_COMPACTED_FILES: u64 = 256;
+/// Closed-day waves per table per pass. `64 × 256 = 16384` covers ~10k leftover
+/// files in one maintenance pass without an unbounded loop.
+pub const TWCS_CLOSED_DAY_MAX_WAVES: usize = 64;
+
+/// Files one closed-day pass can compact (`waves × files/wave`).
+pub fn closed_day_file_capacity() -> u64 {
+    TWCS_CLOSED_DAY_MAX_WAVES as u64 * TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+}
+
+/// Files one open-day pass can compact. Uses the large CALL size when the
+/// table is over 256 live files so Grafana demos cannot outrun TWCS.
+pub fn open_day_file_capacity() -> u64 {
+    TWCS_MAX_WAVES_PER_TABLE as u64 * TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+}
+
+/// Per-CALL bound for an open-day wave. Tiny leftover (≤256 files) keeps the
+/// small 32-file CALL; a storm uses the closed-day 256-file CALL.
+pub fn open_day_max_compacted_files(live_files: usize) -> u64 {
+    if live_files > TWCS_CLOSED_DAY_MAX_COMPACTED_FILES as usize {
+        TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+    } else {
+        TWCS_MAX_COMPACTED_FILES_PER_WAVE
+    }
+}
+
+/// Live open-day file total. Per-day partition stats can undercount right
+/// after a merge (JOIN miss); use max(open-from-parts, live − closed) so a
+/// stale undercount cannot look like the AC-F4 cap is already met.
+pub fn open_day_files_for_merge(
+    partitions: &[PartitionFileStats],
+    today: NaiveDate,
+    live_file_fallback: Option<usize>,
+) -> usize {
+    let open = open_day_live_file_count(partitions, today);
+    let closed = closed_day_live_file_count(partitions, today);
+    match live_file_fallback {
+        None => open,
+        Some(live) => open.max(live.saturating_sub(closed)),
+    }
+}
+
+/// Count live data files for a table (no partition JOIN). Fallback when
+/// per-day stats come back empty after merge.
+pub fn live_file_count_sql(catalog_alias: &str, table: &str) -> String {
+    let meta = format!("__ducklake_metadata_{catalog_alias}");
+    format!(
+        "SELECT count(*)::BIGINT \
+         FROM {meta}.ducklake_data_file df \
+         JOIN {meta}.ducklake_table t \
+           ON df.table_id = t.table_id \
+         WHERE t.table_name = '{table}' \
+           AND t.end_snapshot IS NULL \
+           AND df.end_snapshot IS NULL"
+    )
+}
+
+/// AC-F8: closed-day live files are 1, or 2 when that day's bytes exceed 64 MiB.
+pub fn closed_day_meets_file_bar(live_file_count: usize, total_bytes: u64) -> bool {
+    const TARGET: u64 = 64 * 1024 * 1024;
+    match live_file_count {
+        1 => true,
+        2 => total_bytes > TARGET,
+        _ => false,
+    }
+}
+
+/// True when any closed `record_date` still fails the AC-F8 file bar.
+pub fn closed_days_need_complete_merge(
+    partitions: &[PartitionFileStats],
+    today: NaiveDate,
+) -> bool {
+    partitions.iter().any(|p| {
+        day_kind(p.record_date, today) == DayKind::Closed
+            && !closed_day_meets_file_bar(p.live_file_count, p.total_bytes)
+    })
+}
+
+/// Live-file total for closed partitions only (progress guard ignores open-day ingest).
+pub fn closed_day_live_file_count(partitions: &[PartitionFileStats], today: NaiveDate) -> usize {
+    partitions
+        .iter()
+        .filter(|p| day_kind(p.record_date, today) == DayKind::Closed)
+        .map(|p| p.live_file_count)
+        .sum()
+}
+
+/// Live-file total for the open day only.
+pub fn open_day_live_file_count(partitions: &[PartitionFileStats], today: NaiveDate) -> usize {
+    partitions
+        .iter()
+        .filter(|p| day_kind(p.record_date, today) == DayKind::Open)
+        .map(|p| p.live_file_count)
+        .sum()
+}
 
 #[cfg(test)]
 mod tests {
@@ -174,22 +280,40 @@ mod tests {
     }
 
     #[test]
-    fn closed_day_triggers_at_four_files() {
+    fn closed_day_triggers_at_two_files() {
         let today = d(2026, 8, 15);
         let day = d(2026, 8, 14);
-        let low = PartitionFileStats {
+        let one = PartitionFileStats {
             record_date: day,
-            live_file_count: 3,
+            live_file_count: 1,
             total_bytes: 1_000,
         };
-        let hit = PartitionFileStats {
+        let two = PartitionFileStats {
             record_date: day,
-            live_file_count: 4,
+            live_file_count: 2,
             total_bytes: 1_000,
         };
-        assert!(!should_merge_partition(&low, day_kind(day, today), false));
-        assert!(should_merge_partition(&hit, day_kind(day, today), false));
-        assert!(should_merge_partition(&low, day_kind(day, today), true));
+        assert_eq!(TWCS_TRIGGER_FILE_NUM, 2);
+        assert!(!should_merge_partition(&one, day_kind(day, today), false));
+        assert!(should_merge_partition(&two, day_kind(day, today), false));
+        assert!(should_merge_partition(&one, day_kind(day, today), true));
+        let two_over_target = PartitionFileStats {
+            record_date: day,
+            live_file_count: 2,
+            total_bytes: 65 * 1024 * 1024,
+        };
+        assert!(
+            !should_merge_partition(&two_over_target, day_kind(day, today), false),
+            "AC-F8: two files over 64 MiB already meet the bar"
+        );
+    }
+
+    #[test]
+    fn closed_day_file_bar_allows_two_only_over_target() {
+        assert!(closed_day_meets_file_bar(1, 1_000));
+        assert!(!closed_day_meets_file_bar(2, 1_000));
+        assert!(closed_day_meets_file_bar(2, 65 * 1024 * 1024));
+        assert!(!closed_day_meets_file_bar(3, 100_000_000));
     }
 
     #[test]
@@ -258,6 +382,25 @@ mod tests {
                 "do not emit unused record_date= filter theater"
             );
         }
+        let closed_actions = plan_twcs_merges(
+            "metric_samples",
+            "softprobe",
+            "main",
+            &parts,
+            today,
+            false,
+            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+        );
+        assert_eq!(
+            closed_actions.len(),
+            2,
+            "AC-F6: still one action per record_date"
+        );
+        assert_eq!(closed_actions[0].record_date, d(2026, 8, 13));
+        assert_eq!(closed_actions[1].record_date, d(2026, 8, 14));
+        assert!(closed_actions[0].sql.contains(&format!(
+            "max_compacted_files => {TWCS_CLOSED_DAY_MAX_COMPACTED_FILES}"
+        )));
     }
 
     /// AC-F3: samples partition key is `record_date` only (policy constant).
@@ -274,7 +417,7 @@ mod tests {
         let today = d(2026, 8, 15);
         let parts = vec![PartitionFileStats {
             record_date: d(2026, 8, 14),
-            live_file_count: 2,
+            live_file_count: 1,
             total_bytes: 100,
         }];
         let actions = plan_twcs_merges(
@@ -287,5 +430,105 @@ mod tests {
             32,
         );
         assert!(actions.is_empty());
+    }
+
+    /// AC-F8: 64 × 256 files/wave can compact ~10k leftover closed-day files.
+    #[test]
+    fn closed_day_wave_budget_covers_ten_thousand_files() {
+        assert!(
+            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES >= TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+            "closed-day files/wave must be ≥ open-day 32"
+        );
+        let cap = closed_day_file_capacity();
+        assert!(
+            cap >= 10_000,
+            "AC-F8: closed-day cap {cap} cannot finish 10k leftover files \
+             ({} waves × {} files)",
+            TWCS_CLOSED_DAY_MAX_WAVES,
+            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+        );
+        assert!(cap > open_day_file_capacity());
+        assert!(
+            open_day_file_capacity() >= 2000,
+            "AC-F4: open-day cap {} cannot drain a ~2k-file ingest storm in one pass",
+            open_day_file_capacity()
+        );
+        assert_eq!(TWCS_MAX_WAVES_PER_TABLE, 32);
+        assert_eq!(TWCS_MAX_COMPACTED_FILES_PER_WAVE, 32);
+        assert_eq!(open_day_max_compacted_files(25), 32);
+        assert_eq!(open_day_max_compacted_files(1774), 256);
+    }
+
+    #[test]
+    fn open_day_empty_partition_stats_use_live_file_fallback() {
+        let today = d(2026, 8, 15);
+        assert_eq!(open_day_files_for_merge(&[], today, None), 0);
+        assert_eq!(open_day_files_for_merge(&[], today, Some(1774)), 1774);
+        let undercount = vec![PartitionFileStats {
+            record_date: today,
+            live_file_count: 10,
+            total_bytes: 1_000,
+        }];
+        assert_eq!(
+            open_day_files_for_merge(&undercount, today, Some(141)),
+            141,
+            "stale partition undercount must not hide live files"
+        );
+        let mixed = vec![
+            PartitionFileStats {
+                record_date: d(2026, 8, 14),
+                live_file_count: 2,
+                total_bytes: 1_000,
+            },
+            PartitionFileStats {
+                record_date: today,
+                live_file_count: 15,
+                total_bytes: 1_000,
+            },
+        ];
+        assert_eq!(open_day_files_for_merge(&mixed, today, Some(17)), 15);
+    }
+
+    #[test]
+    fn live_file_count_sql_has_no_partition_join() {
+        let sql = live_file_count_sql("softprobe", "metric_postings");
+        assert!(sql.contains("ducklake_data_file"));
+        assert!(!sql.contains("ducklake_file_partition_value"));
+    }
+
+    #[test]
+    fn closed_day_needs_complete_merge_until_file_bar() {
+        let today = d(2026, 8, 15);
+        let closed = d(2026, 8, 14);
+        let many = vec![PartitionFileStats {
+            record_date: closed,
+            live_file_count: 10_000,
+            total_bytes: 20_000_000,
+        }];
+        assert!(closed_days_need_complete_merge(&many, today));
+        assert_eq!(closed_day_live_file_count(&many, today), 10_000);
+        let done = vec![PartitionFileStats {
+            record_date: closed,
+            live_file_count: 1,
+            total_bytes: 20_000_000,
+        }];
+        assert!(!closed_days_need_complete_merge(&done, today));
+        let two_over = vec![PartitionFileStats {
+            record_date: closed,
+            live_file_count: 2,
+            total_bytes: 65 * 1024 * 1024,
+        }];
+        assert!(!closed_days_need_complete_merge(&two_over, today));
+        let open_only = vec![PartitionFileStats {
+            record_date: today,
+            live_file_count: 50,
+            total_bytes: 1_000,
+        }];
+        assert!(
+            !closed_days_need_complete_merge(&open_only, today),
+            "open-day files must not keep the closed-day complete-merge loop running"
+        );
+        assert_eq!(open_day_live_file_count(&open_only, today), 50);
+        assert_eq!(closed_day_live_file_count(&open_only, today), 0);
     }
 }

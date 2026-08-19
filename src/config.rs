@@ -168,7 +168,7 @@ pub struct MaintenanceConfig {
     pub interval_seconds: u64,
     #[serde(default = "default_true")]
     pub metadata_enabled: bool,
-    #[serde(default = "default_interval_seconds")]
+    #[serde(default = "default_metadata_interval_seconds")]
     pub metadata_interval_seconds: u64,
     #[serde(default = "default_max_snapshot_age_seconds")]
     pub max_snapshot_age_seconds: u64,
@@ -186,7 +186,7 @@ impl Default for MaintenanceConfig {
             target_file_size_bytes: default_target_file_size_bytes(),
             interval_seconds: default_interval_seconds(),
             metadata_enabled: true,
-            metadata_interval_seconds: default_interval_seconds(),
+            metadata_interval_seconds: default_metadata_interval_seconds(),
             max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
             remove_orphan_files_enabled: true,
             remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
@@ -208,12 +208,18 @@ fn default_interval_seconds() -> u64 {
     300
 }
 
+fn default_metadata_interval_seconds() -> u64 {
+    // Expire unused snapshot history often; Prom does not time-travel.
+    60
+}
+
 fn default_max_snapshot_age_seconds() -> u64 {
-    3600
+    // Prom does not use DuckLake time-travel; keep a short overlap for in-flight readers.
+    60
 }
 
 fn default_remove_orphan_older_than_seconds() -> u64 {
-    3600
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,7 +237,7 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
-    /// Prefer inlining small collector batches into the catalog over tiny Parquet files.
+    /// Prefer Parquet (TWCS can merge). Opt-in `Some(10000)` only for scores/inlined-reader tests.
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
     /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
@@ -274,7 +280,9 @@ fn default_ducklake_metadata_schema() -> String {
 }
 
 fn default_data_inlining_row_limit() -> Option<u64> {
-    Some(10_000)
+    // VARIANT shredding (series.labels, traces) only works on Parquet. Skinny
+    // samples/postings/hist used to inline into Postgres and skip TWCS merge.
+    Some(0)
 }
 
 fn default_writer_pool_size() -> usize {
@@ -466,17 +474,26 @@ mod tests {
     fn maintenance_defaults_favor_frequent_compaction() {
         let c = Config::default();
         assert_eq!(c.maintenance.interval_seconds, 300);
-        assert_eq!(c.maintenance.metadata_interval_seconds, 300);
+        assert_eq!(c.maintenance.metadata_interval_seconds, 60);
         assert!(c.maintenance.enabled);
         assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
     }
 
-    /// AC-N1 / T-N1: default snapshot retention is 1h, not 7d.
+    /// AC-N1 / T-N1: default snapshot retention is 60s, not 7d (or 1h).
     #[test]
-    fn default_max_snapshot_age_seconds_is_one_hour() {
+    fn default_max_snapshot_age_seconds_is_one_minute() {
         let c = Config::default();
-        assert_eq!(c.maintenance.max_snapshot_age_seconds, 3600);
+        assert_eq!(c.maintenance.max_snapshot_age_seconds, 60);
         assert_ne!(c.maintenance.max_snapshot_age_seconds, 604800);
+        assert_ne!(c.maintenance.max_snapshot_age_seconds, 3600);
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(0));
+    }
+
+    /// AC-F7 / T-F7: skinny tables write Parquet; inlining is opt-in.
+    #[test]
+    fn default_data_inlining_row_limit_is_zero() {
+        let c = Config::default();
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(0));
     }
 
     #[test]

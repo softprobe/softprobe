@@ -67,6 +67,16 @@ record_date DATE",
 ];
 
 /// Maintenance ladder tables (same PARTITIONED BY; distinct SORTED BY). Not required for AC-D2.
+const HIST_DOWNSAMPLE_COLUMNS_SQL: &str = "\
+series_id UBIGINT, \
+window_ts TIMESTAMPTZ, \
+record_date DATE, \
+count UBIGINT, \
+sum DOUBLE, \
+bucket_counts UBIGINT[], \
+explicit_bounds DOUBLE[], \
+last_ts TIMESTAMPTZ";
+
 pub const METRICS_LAYOUT_DOWNSAMPLE_TABLES: &[MetricsLayoutTable] = &[
     MetricsLayoutTable {
         name: "metric_samples_5m",
@@ -76,6 +86,16 @@ pub const METRICS_LAYOUT_DOWNSAMPLE_TABLES: &[MetricsLayoutTable] = &[
     MetricsLayoutTable {
         name: "metric_samples_1h",
         columns_sql: DOWNSAMPLE_COLUMNS_SQL,
+        sorted_by: "series_id, window_ts",
+    },
+    MetricsLayoutTable {
+        name: "metric_hist_samples_5m",
+        columns_sql: HIST_DOWNSAMPLE_COLUMNS_SQL,
+        sorted_by: "series_id, window_ts",
+    },
+    MetricsLayoutTable {
+        name: "metric_hist_samples_1h",
+        columns_sql: HIST_DOWNSAMPLE_COLUMNS_SQL,
         sorted_by: "series_id, window_ts",
     },
 ];
@@ -220,6 +240,8 @@ pub const MAINTENANCE_METRICS_FAMILY_TABLES: &[&str] = &[
     "metric_hist_samples",
     "metric_samples_5m",
     "metric_samples_1h",
+    "metric_hist_samples_5m",
+    "metric_hist_samples_1h",
     "metric_collapse_job_1h",
 ];
 
@@ -399,8 +421,7 @@ mod tests {
         ensure_metrics_layout_core_tables(&conn, &catalog).expect("ensure core tables");
 
         for table in METRICS_LAYOUT_CORE_TABLES {
-            let partitions =
-                catalog_count(&conn, &catalog, "ducklake_partition_info", table.name);
+            let partitions = catalog_count(&conn, &catalog, "ducklake_partition_info", table.name);
             let sorts = catalog_count(&conn, &catalog, "ducklake_sort_info", table.name);
             assert!(
                 partitions > 0,
@@ -429,9 +450,8 @@ mod tests {
         let (conn, catalog) = attach_ducklake(&temp);
 
         ensure_metrics_layout_family_tables(&conn, &catalog).expect("ensure family");
-        let snap_sql = format!(
-            "SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot"
-        );
+        let snap_sql =
+            format!("SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot");
         let before: i64 = conn
             .query_row(&snap_sql, [], |row| row.get(0))
             .expect("snap count before");

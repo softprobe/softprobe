@@ -107,11 +107,7 @@ async fn seed_f_gold(router: &Router) {
         ("http.client.request.duration", "frontend"),
         ("demo.cart.add.item.latency", "cart"),
     ] {
-        ingest_metrics(
-            router,
-            histogram_series_otlp(name, job, &[], &hists),
-        )
-        .await;
+        ingest_metrics(router, histogram_series_otlp(name, job, &[], &hists)).await;
     }
 
     // Sum / counter panels (job or category labels).
@@ -194,7 +190,11 @@ async fn ingest_heartbeat(router: &Router, seq: i64) {
     let ts = (EVAL_END_S + seq) as u64 * 1_000_000_000;
     ingest_metrics(
         router,
-        gauge_series_otlp("layout_ingest_heartbeat", "layout-sender", &[(ts, seq as f64)]),
+        gauge_series_otlp(
+            "layout_ingest_heartbeat",
+            "layout-sender",
+            &[(ts, seq as f64)],
+        ),
     )
     .await;
 }

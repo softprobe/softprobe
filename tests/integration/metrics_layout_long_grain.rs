@@ -151,7 +151,10 @@ async fn long_grain_prom_1h_and_collapse_nonempty_after_materialize() {
     ]);
     let (status, body) = get_json(&router, &format!("/api/v1/query_range?{q}")).await;
     assert_eq!(status, StatusCode::OK, "Q2 http: {body}");
-    let result = body["data"]["result"].as_array().cloned().unwrap_or_default();
+    let result = body["data"]["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(result.len(), 1, "AC-Q2: expected 1 series, body={body}");
     let points = result[0]["values"].as_array().map(|v| v.len()).unwrap_or(0);
     let want_pts = (TALL_DAYS * 24 - 2) as usize;

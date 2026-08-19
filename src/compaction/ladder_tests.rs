@@ -1,13 +1,11 @@
 //! DuckLake-backed maintenance ladder tests (AC-S2, AC-M2, AC-N3, AC-N4, AC-Q9).
 
 use crate::compaction::collapse::{collapse_job_1h_sql, collapse_scan_sql};
-use crate::compaction::downsample::{
-    count_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
-};
-use crate::compaction::executor::{expire_snapshots_sql, cleanup_old_files_sql};
+use crate::compaction::downsample::{count_sql, downsample_1h_from_raw_sql, downsample_5m_sql};
+use crate::compaction::executor::{cleanup_old_files_sql, expire_snapshots_sql};
 use crate::compaction::twcs::{
-    live_data_file_paths_sql, live_files_spanning_record_dates_sql, plan_twcs_merges, twcs_merge_sql,
-    PartitionFileStats, TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+    live_data_file_paths_sql, live_files_spanning_record_dates_sql, plan_twcs_merges,
+    twcs_merge_sql, PartitionFileStats, TWCS_MAX_COMPACTED_FILES_PER_WAVE,
 };
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use chrono::{Duration, NaiveDate, Utc};
@@ -221,7 +219,12 @@ fn twcs_merge_keeps_files_single_record_date() {
         "T-F6 precondition: need many live files before merge, got {files_before}"
     );
 
-    let merge = twcs_merge_sql(&catalog, "metric_samples", "main", TWCS_MAX_COMPACTED_FILES_PER_WAVE);
+    let merge = twcs_merge_sql(
+        &catalog,
+        "metric_samples",
+        "main",
+        TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+    );
     conn.execute_batch(&merge)
         .unwrap_or_else(|e| panic!("T-F6 merge failed: {e}"));
     // Second wave if first left leftovers (bounded max_compacted_files).
@@ -277,14 +280,15 @@ fn twcs_merge_keeps_files_single_record_date() {
     // Both days still present after merge.
     let days_left: i64 = conn
         .query_row(
-            &format!(
-                "SELECT count(DISTINCT record_date) FROM {catalog}.metric_samples"
-            ),
+            &format!("SELECT count(DISTINCT record_date) FROM {catalog}.metric_samples"),
             [],
             |r| r.get(0),
         )
         .expect("days left");
-    assert_eq!(days_left, 2, "T-F6: both closed days must remain after merge");
+    assert_eq!(
+        days_left, 2,
+        "T-F6: both closed days must remain after merge"
+    );
 }
 
 /// Resolve a DuckLake-relative data file path under the ATTACH DATA_PATH.
@@ -339,14 +343,15 @@ fn snapshot_expiry_bounds_count_and_keeps_samples() {
 
     let snaps_before: i64 = conn
         .query_row(
-            &format!(
-                "SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot"
-            ),
+            &format!("SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot"),
             [],
             |r| r.get(0),
         )
         .unwrap_or(0);
-    assert!(snaps_before >= 40, "expected many snaps, got {snaps_before}");
+    assert!(
+        snaps_before >= 40,
+        "expected many snaps, got {snaps_before}"
+    );
 
     // Age 1s: everything older than ~1s is eligible (AC-N3 shape with small A).
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -357,9 +362,7 @@ fn snapshot_expiry_bounds_count_and_keeps_samples() {
 
     let snaps_after: i64 = conn
         .query_row(
-            &format!(
-                "SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot"
-            ),
+            &format!("SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_snapshot"),
             [],
             |r| r.get(0),
         )
@@ -388,7 +391,13 @@ fn snapshot_expiry_bounds_count_and_keeps_samples() {
 /// AC-Q5/W3 SQL path references collapse table.
 #[test]
 fn collapse_scan_sql_references_collapse_table() {
-    let sql = collapse_scan_sql("softprobe", "layout_http", Some(0), Some(90 * 86_400_000), 1000);
+    let sql = collapse_scan_sql(
+        "softprobe",
+        "layout_http",
+        Some(0),
+        Some(90 * 86_400_000),
+        1000,
+    );
     assert!(sql.contains("metric_collapse_job_1h"));
     assert!(!sql.contains("to_timestamp("));
     assert!(crate::compaction::collapse::sql_is_collapse_prom_path(&sql));

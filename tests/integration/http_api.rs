@@ -1081,8 +1081,9 @@ async fn spans_without_events_are_readable() {
 }
 
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
-/// 2026-08-03 production outage shape. Collector-sized batches are meant to
-/// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),
+/// 2026-08-03 production outage shape. Collector-sized batches can be inlined
+/// into the catalog (`data_inlining_row_limit`, opt-in 10_000; production
+/// default is 0 so skinny metrics write Parquet TWCS can merge),
 /// and reads of inlined rows go through the ducklake extension's inlined-data
 /// reader; in production (postgres catalog) that reader crashed with
 /// "INTERNAL Error: Attempted to access index 0 within vector of size 0" and

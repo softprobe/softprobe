@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use super::attach::{
-    apply_ducklake_retry_settings, catalog_is_attached, ducklake_attach_options,
-    ducklake_attach_target, ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified,
-    prepare_local_ducklake_paths,
+    apply_ducklake_retry_settings, catalog_is_attached, configure_duckdb_resources,
+    ducklake_attach_options, ducklake_attach_target, ducklake_qualified_table_name,
+    ducklake_set_option_scope_for_qualified, prepare_local_ducklake_paths, WRITER_DUCKDB_MEMORY,
+    WRITER_DUCKDB_THREADS,
 };
 use super::object_store::configure_object_store;
 use super::util::{
@@ -441,6 +442,11 @@ impl DuckLakeWriter {
         }
         if dk.catalog_type == "sqlite" {
             conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
+        }
+        if let Err(err) =
+            configure_duckdb_resources(&conn, WRITER_DUCKDB_THREADS, WRITER_DUCKDB_MEMORY)
+        {
+            warn!("Failed to cap DuckDB writer threads/memory: {}", err);
         }
         Ok(conn)
     }

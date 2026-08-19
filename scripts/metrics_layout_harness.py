@@ -802,7 +802,7 @@ class Harness:
         tables: list[str] | None = None,
         *,
         max_compacted_files: int = 32,
-        waves: int = 3,
+        waves: int = 8,
     ) -> list[str]:
         """Force bounded ducklake_merge_adjacent_files waves (Softprobe TWCS)."""
         tables = tables or [
@@ -1688,11 +1688,13 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
         profile_flag = os.environ.get("CARGO_PROFILE_FLAG", "").strip()
         mapping = [
             ("AC-D3", "prom_backend_is_ducklake_no_sidecar_writers"),
-            ("AC-N1", "default_max_snapshot_age_seconds_is_one_hour"),
+            ("AC-N1", "default_max_snapshot_age_seconds_is_one_minute"),
             ("AC-N2", "expire_snapshots_sql_honors_seconds"),
             ("AC-N5", "cleanup_old_files_sql_honors_seconds"),
             ("AC-F3", "twcs_partition_key_is_record_date_only"),
             ("AC-F6", "twcs_merge_does_not_cross_record_date"),
+            ("AC-F7", "default_data_inlining_row_limit_is_zero"),
+            ("AC-F8", "closed_day_file_bar_allows_two_only_over_target"),
             ("AC-M1", "maintenance_tables_include_metric_family"),
             ("AC-W1", "max_query_range_is_unlimited"),
             ("AC-Q7", "resolve_and_samples_sql_uses_postings_not_fat"),
@@ -2326,6 +2328,7 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
             self.mark("AC-F2", pass_=False, notes="F-files days missing")
             self.mark("AC-F4", pass_=False, notes="F-files days missing")
             self.mark("AC-F5", pass_=False, notes="F-files days missing")
+            self.mark("AC-F8", pass_=False, notes="F-files days missing")
         else:
             bytes_before = int(self.preconditions.get("AC-F2_bytes_before_merge") or 0)
             if bytes_before <= 0:
@@ -2396,9 +2399,66 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
                 notes=f"precondition_met={f5_pre}; " + "; ".join(f5_notes),
             )
 
+            f8_notes = []
+            f8_ok = True
+            for t in (
+                "metric_samples",
+                "metric_postings",
+                "metric_series",
+                "metric_hist_samples",
+            ):
+                st = self.live_partition_stats(t, closed)
+                for day, nfiles, nbytes in st:
+                    bar = nfiles == 1 or (nfiles == 2 and nbytes > 64 * 1024 * 1024)
+                    day_sizes = self.live_file_sizes(t, [day])
+                    median = pct([float(s) for s in day_sizes], 50) if day_sizes else None
+                    size_ok = nbytes < 8 * 1024 * 1024 or (
+                        median is not None and median >= 8 * 1024 * 1024
+                    )
+                    if not bar or not size_ok:
+                        f8_ok = False
+                    f8_notes.append(
+                        f"{t}@{day}:files={nfiles} bytes={nbytes} median={median} bar={bar}"
+                    )
+            self.mark(
+                "AC-F8",
+                pass_=f8_ok and bool(closed),
+                notes="; ".join(f8_notes)[:400],
+            )
+
         # AC-N3/N4 already measured during early F-snap in load_fixtures.
         if (self.acs["AC-N3"].notes or "not measured") == "not measured":
             self.run_f_snap(manage_heartbeat=True)
+
+        # AC-N6: after expire, live snapshot count ≤ 50 and none older than A+I.
+        a_sec = 60
+        i_sec = 60
+        exp_code, exp_note = self.force_expire_snapshots(a_sec)
+        meta = self.meta()
+        snap_count = self.sql_scalar(f"SELECT count(*) FROM {meta}.ducklake_snapshot")
+        old_snaps = self.sql_scalar(
+            f"SELECT count(*) FROM {meta}.ducklake_snapshot "
+            f"WHERE snapshot_time < now() - INTERVAL '{a_sec + i_sec} seconds'"
+        )
+        self.mark(
+            "AC-N6",
+            pass_=snap_count >= 0 and snap_count <= 50 and old_snaps == 0,
+            fixture_scale={"snapshots": snap_count, "older_than_A_plus_I": old_snaps},
+            notes=f"snaps={snap_count} older={old_snaps} expire={exp_code}:{exp_note[:80]}",
+        )
+
+        # AC-F7: skinny rows must live in Parquet (not catalog-only inlined).
+        unit_f7 = bool(self.acs["AC-F7"].pass_)
+        f7_notes = [f"unit_inlining_default_0={unit_f7}"]
+        f7_ok = unit_f7
+        for t in ("metric_samples", "metric_hist_samples", "metric_postings"):
+            rows = self.sql_scalar(f"SELECT count(*) FROM {qtable(t)}")
+            files = sum(c for _, c, _ in self.live_partition_stats(t))
+            inlined = rows > 0 and files == 0
+            if inlined:
+                f7_ok = False
+            f7_notes.append(f"{t}:rows={rows} parquet_files={files}")
+        self.mark("AC-F7", pass_=f7_ok, notes="; ".join(f7_notes)[:400])
 
     def run_f_snap(self, *, manage_heartbeat: bool = True) -> None:
         """F-snap: ≥120 commits at C=1s, A=60, then expire; assert N3/N4."""

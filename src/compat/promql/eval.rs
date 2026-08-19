@@ -93,47 +93,560 @@ pub async fn eval_range(
             end_ms,
             step_ms,
             ONE_HOUR_LOOKBACK_MS,
+            0,
         )));
     }
 
     let lookback = range_lookback_ms(step_ms);
-    // Matrix output: for each series identity, collect (ts, value) at each step.
-    let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
+    // One pass over the AST and prefetched samples. Instant-eval-per-step cloned
+    // every Grafana point (240–1100×) and blew the 100ms dashboard SLO.
+    match eval_over_range(&prefetch, expr, start_ms, end_ms, step_ms, lookback)? {
+        RangeVal::Scalar(value) => Ok(EvalResult::Matrix(scalar_to_matrix(
+            value, start_ms, end_ms, step_ms,
+        ))),
+        RangeVal::Matrix(matrix) => Ok(EvalResult::Matrix(matrix)),
+    }
+}
+
+enum RangeVal {
+    Scalar(f64),
+    Matrix(MatrixResult),
+}
+
+fn scalar_to_matrix(value: f64, start_ms: i64, end_ms: i64, step_ms: i64) -> MatrixResult {
+    let mut samples = Vec::new();
+    for_each_step(start_ms, end_ms, step_ms, |t| {
+        samples.push(Sample {
+            timestamp_ms: t,
+            value,
+        });
+    });
+    MatrixResult {
+        series: vec![MetricSeries {
+            labels: BTreeMap::new(),
+            samples,
+        }],
+    }
+}
+
+fn for_each_step(start_ms: i64, end_ms: i64, step_ms: i64, mut f: impl FnMut(i64)) {
     let mut t = start_ms;
     while t <= end_ms {
-        let instant = eval_expr(&prefetch, ctx, expr, t, Some(lookback)).await?;
-        match instant {
-            EvalResult::Vector(v) => {
-                for s in v.samples {
-                    by_labels.entry(s.labels).or_default().push(Sample {
-                        timestamp_ms: s.timestamp_ms,
-                        value: s.value,
-                    });
-                }
-            }
-            EvalResult::Scalar {
-                timestamp_ms,
-                value,
-            } => {
-                by_labels.entry(BTreeMap::new()).or_default().push(Sample {
-                    timestamp_ms,
-                    value,
-                });
-            }
-            EvalResult::Matrix(_) => {
-                return Err(CompatError::unsupported(
-                    "promql: range query over matrix result",
-                ));
-            }
-        }
-        t = t.saturating_add(step_ms);
-        if t == start_ms {
-            // guard against zero step already handled; avoid infinite if overflow
+        f(t);
+        let next = t.saturating_add(step_ms);
+        if next <= t {
             break;
         }
+        t = next;
     }
+}
 
-    Ok(EvalResult::Matrix(MatrixResult {
+fn eval_over_range(
+    prefetch: &PrefetchBackend,
+    expr: &Expr,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+    lookback_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    match expr {
+        Expr::Paren(p) => eval_over_range(
+            prefetch, &p.expr, start_ms, end_ms, step_ms, lookback_ms,
+        ),
+        Expr::Unary(u) => {
+            let inner = eval_over_range(
+                prefetch, &u.expr, start_ms, end_ms, step_ms, lookback_ms,
+            )?;
+            negate_range(inner)
+        }
+        Expr::NumberLiteral(n) => Ok(RangeVal::Scalar(n.val)),
+        Expr::StringLiteral(_) => Err(CompatError::unsupported("promql: string literal")),
+        Expr::VectorSelector(vs) => {
+            let matchers = extract_selector_matchers(vs)?;
+            let off = offset_shift_ms(&vs.offset);
+            let series = prefetch.series_for(&matchers)?;
+            Ok(RangeVal::Matrix(matrix_from_grain_series(
+                series, start_ms, end_ms, step_ms, lookback_ms, off,
+            )))
+        }
+        Expr::MatrixSelector(_) => Err(CompatError::unsupported(
+            "promql: range query over matrix result",
+        )),
+        Expr::Call(c) => eval_call_over_range(prefetch, c, start_ms, end_ms, step_ms, lookback_ms),
+        Expr::Aggregate(a) => {
+            let inner = eval_over_range(
+                prefetch, &a.expr, start_ms, end_ms, step_ms, lookback_ms,
+            )?;
+            let matrix = range_as_matrix(inner, start_ms, end_ms, step_ms);
+            let op = a.op.id();
+            if op == T_TOPK || op == T_BOTTOMK {
+                let param = a.param.as_ref().ok_or_else(|| {
+                    CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
+                })?;
+                let k_val = eval_over_range(
+                    prefetch, param, start_ms, end_ms, step_ms, lookback_ms,
+                )?;
+                let k = match k_val {
+                    RangeVal::Scalar(v) => expect_scalar_k(EvalResult::Scalar {
+                        timestamp_ms: start_ms,
+                        value: v,
+                    })?,
+                    RangeVal::Matrix(_) => {
+                        return Err(CompatError::new(
+                            CompatErrorCode::BadRequest,
+                            "topk/bottomk k must be a scalar",
+                        ))
+                    }
+                };
+                Ok(RangeVal::Matrix(aggregate_topk_matrix(
+                    k,
+                    op == T_BOTTOMK,
+                    &a.modifier,
+                    matrix,
+                    start_ms,
+                    end_ms,
+                    step_ms,
+                )?))
+            } else {
+                Ok(RangeVal::Matrix(aggregate_matrix(op, &a.modifier, matrix)?))
+            }
+        }
+        Expr::Binary(b) => {
+            let lhs = eval_over_range(
+                prefetch, &b.lhs, start_ms, end_ms, step_ms, lookback_ms,
+            )?;
+            let rhs = eval_over_range(
+                prefetch, &b.rhs, start_ms, end_ms, step_ms, lookback_ms,
+            )?;
+            let id = b.op.id();
+            if id == T_LAND || id == T_LOR || id == T_LUNLESS {
+                eval_set_op_over_range(id, lhs, rhs, start_ms, end_ms, step_ms)
+            } else {
+                eval_binary_over_range(id, b.return_bool(), lhs, rhs, start_ms, end_ms, step_ms)
+            }
+        }
+        Expr::Subquery(_) => Err(CompatError::unsupported("promql: subquery")),
+        Expr::Extension(_) => Err(CompatError::unsupported("promql: extension")),
+    }
+}
+
+fn range_as_matrix(value: RangeVal, start_ms: i64, end_ms: i64, step_ms: i64) -> MatrixResult {
+    match value {
+        RangeVal::Scalar(v) => scalar_to_matrix(v, start_ms, end_ms, step_ms),
+        RangeVal::Matrix(m) => m,
+    }
+}
+
+fn negate_range(value: RangeVal) -> Result<RangeVal, CompatError> {
+    match value {
+        RangeVal::Scalar(v) => Ok(RangeVal::Scalar(-v)),
+        RangeVal::Matrix(mut m) => {
+            for s in &mut m.series {
+                s.labels.remove("__name__");
+                for sm in &mut s.samples {
+                    sm.value = -sm.value;
+                }
+            }
+            Ok(RangeVal::Matrix(m))
+        }
+    }
+}
+
+fn eval_call_over_range(
+    prefetch: &PrefetchBackend,
+    call: &promql_parser::parser::Call,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+    lookback_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    let name = call.func.name.to_ascii_lowercase();
+    if super::funcs::is_range_vector_fn(&name) {
+        let arg = call.args.args.first().ok_or_else(|| {
+            CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
+        })?;
+        return eval_range_fn_over_range(prefetch, &name, arg, start_ms, end_ms, step_ms);
+    }
+    if super::funcs::is_math_fn(&name) {
+        let arg = call.args.args.first().ok_or_else(|| {
+            CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
+        })?;
+        let to_nearest = if name == "round" && call.args.args.len() == 2 {
+            match eval_over_range(
+                prefetch,
+                &call.args.args[1],
+                start_ms,
+                end_ms,
+                step_ms,
+                lookback_ms,
+            )? {
+                RangeVal::Scalar(v) => Some(v),
+                RangeVal::Matrix(_) => {
+                    return Err(CompatError::new(
+                        CompatErrorCode::BadRequest,
+                        "round() nearest must be a scalar",
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        let inner = eval_over_range(prefetch, arg, start_ms, end_ms, step_ms, lookback_ms)?;
+        return apply_math_fn_range(&name, inner, to_nearest, start_ms, end_ms, step_ms);
+    }
+    Err(CompatError::unsupported(format!("promql: function {name}")))
+}
+
+fn eval_range_fn_over_range(
+    prefetch: &PrefetchBackend,
+    name: &str,
+    arg: &Expr,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    let ms = match unwrap_expr_parens(arg) {
+        Expr::MatrixSelector(ms) => ms,
+        _ => {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                format!("{name}() requires range vector"),
+            ))
+        }
+    };
+    let matchers = extract_selector_matchers(&ms.vs)?;
+    let off = offset_shift_ms(&ms.vs.offset);
+    let range_ms = matrix_range(ms).as_millis() as i64;
+    let series = prefetch.series_for(&matchers)?;
+    let keep_name = name == "last_over_time";
+    let mut out = Vec::with_capacity(series.len());
+    for s in series {
+        let mut labels = s.labels.clone();
+        if !keep_name {
+            labels.remove("__name__");
+        }
+        let mut samples = Vec::new();
+        let mut lo = 0usize;
+        let mut hi = 0usize;
+        for_each_step(start_ms, end_ms, step_ms, |t| {
+            let range_end_ms = t - off;
+            let range_start_ms = range_end_ms - range_ms.max(1);
+            while lo < s.samples.len() && s.samples[lo].timestamp_ms < range_start_ms {
+                lo += 1;
+            }
+            while hi < s.samples.len() && s.samples[hi].timestamp_ms <= range_end_ms {
+                hi += 1;
+            }
+            if lo >= hi {
+                return;
+            }
+            let window = &s.samples[lo..hi];
+            if let Some(v) = apply_range_fn(name, window, range_start_ms, range_end_ms) {
+                samples.push(Sample {
+                    timestamp_ms: t,
+                    value: v,
+                });
+            }
+        });
+        if !samples.is_empty() {
+            out.push(MetricSeries { labels, samples });
+        }
+    }
+    Ok(RangeVal::Matrix(MatrixResult { series: out }))
+}
+
+fn apply_range_fn(
+    name: &str,
+    window: &[Sample],
+    range_start_ms: i64,
+    range_end_ms: i64,
+) -> Option<f64> {
+    match name {
+        "rate" => extrapolated_rate(window, range_start_ms, range_end_ms, true, true),
+        "irate" => counter_irate(window),
+        "increase" => extrapolated_rate(window, range_start_ms, range_end_ms, true, false),
+        "delta" => extrapolated_rate(window, range_start_ms, range_end_ms, false, false),
+        "idelta" => gauge_idelta(window),
+        "sum_over_time" => over_time_sum(window),
+        "avg_over_time" => over_time_avg(window),
+        "min_over_time" => over_time_min(window),
+        "max_over_time" => over_time_max(window),
+        "count_over_time" => Some(window.len() as f64),
+        "last_over_time" => window.last().map(|x| x.value).filter(|v| !v.is_nan()),
+        _ => None,
+    }
+}
+
+fn apply_math_fn_range(
+    name: &str,
+    value: RangeVal,
+    to_nearest: Option<f64>,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    let map_one = |v: f64| -> f64 {
+        match name {
+            "abs" => v.abs(),
+            "ceil" => v.ceil(),
+            "floor" => v.floor(),
+            "round" => {
+                let nearest = to_nearest.unwrap_or(1.0);
+                if nearest == 0.0 {
+                    v
+                } else {
+                    (v / nearest + 0.5).floor() * nearest
+                }
+            }
+            _ => v,
+        }
+    };
+    match value {
+        RangeVal::Scalar(v) => Ok(RangeVal::Scalar(map_one(v))),
+        RangeVal::Matrix(mut m) => {
+            for s in &mut m.series {
+                s.labels.remove("__name__");
+                for sm in &mut s.samples {
+                    sm.value = map_one(sm.value);
+                }
+            }
+            let _ = (start_ms, end_ms, step_ms);
+            Ok(RangeVal::Matrix(m))
+        }
+    }
+}
+
+fn aggregate_matrix(
+    op: u16,
+    modifier: &Option<LabelModifier>,
+    inner: MatrixResult,
+) -> Result<MatrixResult, CompatError> {
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<f64>>> = BTreeMap::new();
+    for s in inner.series {
+        let key = group_labels(&s.labels, modifier);
+        let slot = groups.entry(key).or_default();
+        for sm in s.samples {
+            slot.entry(sm.timestamp_ms).or_default().push(sm.value);
+        }
+    }
+    let mut series = Vec::with_capacity(groups.len());
+    for (labels, by_t) in groups {
+        let mut samples = Vec::with_capacity(by_t.len());
+        for (timestamp_ms, values) in by_t {
+            let value = match op {
+                x if x == T_SUM => values.iter().sum(),
+                x if x == T_MIN => values.iter().cloned().fold(f64::INFINITY, f64::min),
+                x if x == T_MAX => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                x if x == T_AVG => {
+                    if values.is_empty() {
+                        continue;
+                    }
+                    values.iter().sum::<f64>() / values.len() as f64
+                }
+                x if x == T_COUNT => values.len() as f64,
+                _ => {
+                    return Err(CompatError::unsupported(format!(
+                        "promql: aggregation token {op}"
+                    )))
+                }
+            };
+            samples.push(Sample {
+                timestamp_ms,
+                value,
+            });
+        }
+        if !samples.is_empty() {
+            series.push(MetricSeries { labels, samples });
+        }
+    }
+    Ok(MatrixResult { series })
+}
+
+fn aggregate_topk_matrix(
+    k: usize,
+    bottom: bool,
+    modifier: &Option<LabelModifier>,
+    inner: MatrixResult,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+) -> Result<MatrixResult, CompatError> {
+    if k == 0 {
+        return Ok(MatrixResult { series: vec![] });
+    }
+    let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
+    for_each_step(start_ms, end_ms, step_ms, |t| {
+        let vector = VectorResult {
+            samples: instant_values_at(&inner.series, t),
+        };
+        if let Ok(v) = aggregate_topk(k, bottom, modifier, vector, t) {
+            for s in v.samples {
+                by_labels.entry(s.labels).or_default().push(Sample {
+                    timestamp_ms: s.timestamp_ms,
+                    value: s.value,
+                });
+            }
+        }
+    });
+    Ok(MatrixResult {
+        series: by_labels
+            .into_iter()
+            .map(|(labels, samples)| MetricSeries { labels, samples })
+            .collect(),
+    })
+}
+
+fn instant_values_at(series: &[MetricSeries], t: i64) -> Vec<InstantSample> {
+    let mut out = Vec::new();
+    for s in series {
+        if let Ok(idx) = s
+            .samples
+            .binary_search_by_key(&t, |sm| sm.timestamp_ms)
+        {
+            let sm = &s.samples[idx];
+            if sm.value.is_nan() {
+                continue;
+            }
+            out.push(InstantSample {
+                labels: s.labels.clone(),
+                timestamp_ms: t,
+                value: sm.value,
+            });
+        }
+    }
+    out
+}
+
+fn eval_binary_over_range(
+    op: u16,
+    return_bool: bool,
+    lhs: RangeVal,
+    rhs: RangeVal,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    match (lhs, rhs) {
+        (RangeVal::Scalar(lv), RangeVal::Scalar(rv)) => match apply_scalar_op(op, lv, rv, return_bool)?
+        {
+            Some(v) => Ok(RangeVal::Scalar(v)),
+            None => Ok(RangeVal::Matrix(MatrixResult { series: vec![] })),
+        },
+        (RangeVal::Matrix(m), RangeVal::Scalar(scalar)) => Ok(RangeVal::Matrix(map_matrix_scalar(
+            op, m, scalar, true, return_bool,
+        )?)),
+        (RangeVal::Scalar(scalar), RangeVal::Matrix(m)) => Ok(RangeVal::Matrix(map_matrix_scalar(
+            op, m, scalar, false, return_bool,
+        )?)),
+        (RangeVal::Matrix(lv), RangeVal::Matrix(rv)) => {
+            let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
+            for_each_step(start_ms, end_ms, step_ms, |t| {
+                let l = VectorResult {
+                    samples: instant_values_at(&lv.series, t),
+                };
+                let r = VectorResult {
+                    samples: instant_values_at(&rv.series, t),
+                };
+                if let Ok(samples) = apply_vector_vector(op, l, r, return_bool, t) {
+                    for s in samples {
+                        by_labels.entry(s.labels).or_default().push(Sample {
+                            timestamp_ms: s.timestamp_ms,
+                            value: s.value,
+                        });
+                    }
+                }
+            });
+            Ok(RangeVal::Matrix(MatrixResult {
+                series: by_labels
+                    .into_iter()
+                    .map(|(labels, samples)| MetricSeries { labels, samples })
+                    .collect(),
+            }))
+        }
+    }
+}
+
+fn map_matrix_scalar(
+    op: u16,
+    mut matrix: MatrixResult,
+    scalar: f64,
+    vector_is_lhs: bool,
+    return_bool: bool,
+) -> Result<MatrixResult, CompatError> {
+    let drop_name = drops_metric_name(op, return_bool);
+    let mut out = Vec::new();
+    for mut s in matrix.series.drain(..) {
+        if drop_name {
+            s.labels.remove("__name__");
+        }
+        let mut samples = Vec::with_capacity(s.samples.len());
+        for sm in s.samples {
+            let (lv, rv) = if vector_is_lhs {
+                (sm.value, scalar)
+            } else {
+                (scalar, sm.value)
+            };
+            if let Some(v) = apply_scalar_op(op, lv, rv, return_bool)? {
+                samples.push(Sample {
+                    timestamp_ms: sm.timestamp_ms,
+                    value: v,
+                });
+            }
+        }
+        if !samples.is_empty() {
+            out.push(MetricSeries {
+                labels: s.labels,
+                samples,
+            });
+        }
+    }
+    Ok(MatrixResult { series: out })
+}
+
+fn eval_set_op_over_range(
+    op: u16,
+    lhs: RangeVal,
+    rhs: RangeVal,
+    start_ms: i64,
+    end_ms: i64,
+    step_ms: i64,
+) -> Result<RangeVal, CompatError> {
+    let lv = match lhs {
+        RangeVal::Matrix(m) => m,
+        RangeVal::Scalar(_) => {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "promql: set operators require instant vectors",
+            ))
+        }
+    };
+    let rv = match rhs {
+        RangeVal::Matrix(m) => m,
+        RangeVal::Scalar(_) => {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "promql: set operators require instant vectors",
+            ))
+        }
+    };
+    let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
+    for_each_step(start_ms, end_ms, step_ms, |t| {
+        let l = EvalResult::Vector(VectorResult {
+            samples: instant_values_at(&lv.series, t),
+        });
+        let r = EvalResult::Vector(VectorResult {
+            samples: instant_values_at(&rv.series, t),
+        });
+        if let Ok(EvalResult::Vector(v)) = eval_set_op(op, l, r, t) {
+            for s in v.samples {
+                by_labels.entry(s.labels).or_default().push(Sample {
+                    timestamp_ms: s.timestamp_ms,
+                    value: s.value,
+                });
+            }
+        }
+    });
+    Ok(RangeVal::Matrix(MatrixResult {
         series: by_labels
             .into_iter()
             .map(|(labels, samples)| MetricSeries { labels, samples })
@@ -149,6 +662,8 @@ struct SelectorNeed {
     window_ms: i64,
     /// Prometheus `offset` shift applied to the eval timestamp before the window.
     offset_ms: i64,
+    /// True when this comes from a MatrixSelector (explicit `[range]`).
+    is_range: bool,
 }
 
 /// In-memory backend fed by a single DuckDB fetch per unique matcher set.
@@ -167,6 +682,19 @@ impl PrefetchBackend {
         out
     }
 
+    fn series_for(&self, matchers: &[LabelMatcher]) -> Result<&[MetricSeries], CompatError> {
+        self.entries
+            .iter()
+            .find(|(m, _)| m == matchers)
+            .map(|(_, series)| series.as_slice())
+            .ok_or_else(|| {
+                CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "promql range prefetch miss: selector was not prefetched",
+                )
+            })
+    }
+
     async fn load(
         backend: &dyn MetricsQueryBackend,
         ctx: &TenantContext,
@@ -178,12 +706,13 @@ impl PrefetchBackend {
         let range_ms = (end_ms - start_ms).abs();
         // §9.1 step 5: sum by (job) (rate|irate|increase) over ≥2h → collapse table.
         if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
-            let metric = crate::compaction::collapse::collapse_metric_name(expr).ok_or_else(|| {
-                CompatError::new(
-                    CompatErrorCode::BadRequest,
-                    "collapse path requires a metric __name__ selector",
-                )
-            })?;
+            let metric =
+                crate::compaction::collapse::collapse_metric_name(expr).ok_or_else(|| {
+                    CompatError::new(
+                        CompatErrorCode::BadRequest,
+                        "collapse path requires a metric __name__ selector",
+                    )
+                })?;
             let mut needs = Vec::new();
             collect_selector_needs(expr, &mut needs)?;
             let matchers = needs
@@ -210,6 +739,8 @@ impl PrefetchBackend {
 
         let mut needs = Vec::new();
         collect_selector_needs(expr, &mut needs)?;
+        // Check if any selector has an explicit range window (e.g. [5m]) before expansion.
+        let has_explicit_range = needs.iter().any(|n| n.is_range);
         // Expand plain-selector lookback to cover Grafana step on 1h grain (AC-Q2).
         let step_lookback = range_lookback_ms(step_ms);
         for need in &mut needs {
@@ -234,6 +765,14 @@ impl PrefetchBackend {
             }
         }
 
+        // If any selector has an explicit range window (i.e. [5m]),
+        // disable step-bucketing so range-vector functions get raw samples.
+        let effective_step = if has_explicit_range {
+            None
+        } else {
+            Some(step_ms)
+        };
+
         let mut entries = Vec::with_capacity(merged.len());
         for (matchers, fetch_start, fetch_end) in merged {
             let series = backend
@@ -243,7 +782,7 @@ impl PrefetchBackend {
                         start_ms: Some(fetch_start),
                         end_ms: Some(fetch_end),
                         matchers: matchers.clone(),
-                        step_ms: Some(step_ms),
+                        step_ms: effective_step,
                         collapse_metric: None,
                     },
                 )
@@ -343,6 +882,7 @@ fn collect_selector_needs(expr: &Expr, out: &mut Vec<SelectorNeed>) -> Result<()
                 matchers: extract_selector_matchers(vs)?,
                 window_ms: default_lookback_ms(),
                 offset_ms: offset_shift_ms(&vs.offset),
+                is_range: false,
             });
             Ok(())
         }
@@ -351,6 +891,7 @@ fn collect_selector_needs(expr: &Expr, out: &mut Vec<SelectorNeed>) -> Result<()
                 matchers: extract_selector_matchers(&ms.vs)?,
                 window_ms: matrix_range(ms).as_millis() as i64,
                 offset_ms: offset_shift_ms(&ms.vs.offset),
+                is_range: true,
             });
             Ok(())
         }
@@ -479,26 +1020,29 @@ fn matrix_from_grain_series(
     end_ms: i64,
     step_ms: i64,
     lookback_ms: i64,
+    offset_ms: i64,
 ) -> MatrixResult {
     let mut out = Vec::with_capacity(series.len());
     for s in series {
         let mut samples = Vec::new();
-        let mut t = start_ms;
-        while t <= end_ms {
-            if let Some(sample) = latest_sample_in_window(&s.samples, t - lookback_ms, t) {
-                if !sample.value.is_nan() {
-                    samples.push(Sample {
-                        timestamp_ms: t,
-                        value: sample.value,
-                    });
-                }
+        let mut hi = 0usize;
+        for_each_step(start_ms, end_ms, step_ms, |t| {
+            let data_t = t - offset_ms;
+            let win_start = data_t - lookback_ms;
+            while hi < s.samples.len() && s.samples[hi].timestamp_ms <= data_t {
+                hi += 1;
             }
-            let next = t.saturating_add(step_ms);
-            if next <= t {
-                break;
+            if hi == 0 {
+                return;
             }
-            t = next;
-        }
+            let cand = &s.samples[hi - 1];
+            if cand.timestamp_ms >= win_start && !cand.value.is_nan() {
+                samples.push(Sample {
+                    timestamp_ms: t,
+                    value: cand.value,
+                });
+            }
+        });
         if !samples.is_empty() {
             out.push(MetricSeries {
                 labels: s.labels.clone(),
@@ -784,26 +1328,26 @@ fn expect_scalar_k(value: EvalResult) -> Result<usize, CompatError> {
     Ok(v.floor() as usize)
 }
 
-/// Counter reset: treat decreases as resets (non-decreasing then drop).
-fn adjusted_delta(samples: &[Sample]) -> Option<(f64, i64)> {
-    if samples.len() < 2 {
-        return None;
-    }
-    let first_ts = samples.first()?.timestamp_ms;
-    let last_ts = samples.last()?.timestamp_ms;
-    if last_ts <= first_ts {
-        return None;
-    }
+fn adjusted_delta_skip_nan(samples: &[Sample]) -> Option<(f64, i64)> {
+    let mut iter = samples.iter().filter(|s| !s.value.is_nan());
+    let first = iter.next()?;
+    let mut prev = first.value;
+    let first_ts = first.timestamp_ms;
+    let mut last_ts = first_ts;
     let mut total = 0.0;
-    let mut prev = samples[0].value;
-    for s in samples.iter().skip(1) {
+    let mut n = 1usize;
+    for s in iter {
+        n += 1;
+        last_ts = s.timestamp_ms;
         if s.value < prev {
-            // reset: contribute new value from 0
             total += s.value;
         } else {
             total += s.value - prev;
         }
         prev = s.value;
+    }
+    if n < 2 || last_ts <= first_ts {
+        return None;
     }
     Some((total, last_ts - first_ts))
 }
@@ -817,20 +1361,31 @@ fn extrapolated_rate(
     is_rate: bool,
 ) -> Option<f64> {
     // Stale/NaN points are not part of rate/increase/delta sample math.
-    let samples: Vec<&Sample> = samples.iter().filter(|s| !s.value.is_nan()).collect();
-    if samples.len() < 2 {
+    let mut first: Option<&Sample> = None;
+    let mut last: Option<&Sample> = None;
+    let mut n_finite = 0usize;
+    for s in samples {
+        if s.value.is_nan() {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(s);
+        }
+        last = Some(s);
+        n_finite += 1;
+    }
+    if n_finite < 2 {
         return None;
     }
-    let first = samples.first()?;
-    let last = samples.last()?;
+    let first = first?;
+    let last = last?;
     let first_t = first.timestamp_ms;
     let last_t = last.timestamp_ms;
     if last_t <= first_t {
         return None;
     }
-    let owned: Vec<Sample> = samples.iter().map(|s| (*s).clone()).collect();
     let mut result = if is_counter {
-        adjusted_delta(&owned)?.0
+        adjusted_delta_skip_nan(samples)?.0
     } else {
         last.value - first.value
     };
@@ -840,7 +1395,7 @@ fn extrapolated_rate(
     if sampled_interval <= 0.0 {
         return None;
     }
-    let num_samples_minus_one = (samples.len() - 1) as f64;
+    let num_samples_minus_one = (n_finite - 1) as f64;
     let average_duration_between_samples = sampled_interval / num_samples_minus_one;
     let extrapolation_threshold = average_duration_between_samples * 1.1;
     let mut extrapolate_to_interval = sampled_interval;
@@ -2232,7 +2787,11 @@ mod tests {
         );
         match result {
             EvalResult::Matrix(m) => {
-                assert_eq!(m.series.len(), 1, "collapse short-circuit must keep job series");
+                assert_eq!(
+                    m.series.len(),
+                    1,
+                    "collapse short-circuit must keep job series"
+                );
                 assert!(
                     !m.series[0].samples.is_empty(),
                     "collapse short-circuit must emit points from grain samples"
@@ -2247,8 +2806,7 @@ mod tests {
             last_sql_hint: Mutex::new(None),
         };
         let start_short = end - 30 * 60 * 1000; // 30m
-        let _ = eval_range(&backend2, &ctx(), &expr, start_short, end, 15_000)
-            .await;
+        let _ = eval_range(&backend2, &ctx(), &expr, start_short, end, 15_000).await;
         assert!(
             backend2.collapse.lock().unwrap().is_none(),
             "window < 2h must not use collapse"

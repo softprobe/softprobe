@@ -4,9 +4,7 @@
 //! `metric_samples` / `metric_hist_samples` scan. Does not scan fat `metrics`
 //! or full `union_metrics` for resolve.
 
-use crate::compat::backends::grain::{
-    grain_table_sql, select_sample_grain, SampleGrain,
-};
+use crate::compat::backends::grain::{grain_table_sql, select_sample_grain, SampleGrain};
 use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::prometheus::sanitize_label_name;
@@ -199,7 +197,14 @@ pub fn resolve_series_ids_sql(
              LIMIT {lim}"
         );
     }
-    let parts: Vec<String> = equality
+    // INTERSECT smallest posting first (__name__ is usually tighter than job/service).
+    let mut ordered = equality.to_vec();
+    ordered.sort_by(|a, b| {
+        let ar = if a.label_name == "__name__" { 0 } else { 1 };
+        let br = if b.label_name == "__name__" { 0 } else { 1 };
+        ar.cmp(&br).then_with(|| a.label_name.cmp(&b.label_name))
+    });
+    let parts: Vec<String> = ordered
         .iter()
         .map(|eq| {
             let vals = sql_in_list(&eq.values);
@@ -246,10 +251,7 @@ pub fn discover_name_values_sql(catalog: &str, days: RecordDateRange, max_series
 /// Timestamptz literal for zone-map-friendly predicates (§9.1 step 8).
 pub fn timestamptz_literal_ms(ms: i64) -> String {
     let dt = ms_to_utc(ms).unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap());
-    format!(
-        "TIMESTAMPTZ '{}'",
-        dt.format("%Y-%m-%d %H:%M:%S%.3f+00")
-    )
+    format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.3f+00"))
 }
 
 pub fn samples_time_predicates(
@@ -283,6 +285,16 @@ pub fn samples_time_predicates(
     }
 }
 
+/// Grafana floor is 15s. Bucket raw/hist scans to `step` so a 1h panel does not
+/// materialize 1s scrape rows into PromQL eval (not a query-result cache).
+const STEP_BUCKET_MIN_MS: i64 = 15_000;
+
+fn step_bucket_interval_sql(step_ms: Option<i64>) -> Option<String> {
+    let step = step_ms.filter(|s| *s >= STEP_BUCKET_MIN_MS)?;
+    let secs = (step / 1000).max(1);
+    Some(format!("INTERVAL '{secs} seconds'"))
+}
+
 /// Skinny sample scan after resolve (AC-Q7). No fat `metrics` / full `union_metrics`.
 ///
 /// `grain` selects raw / 5m / 1h / hist (§9.1). Downsample empty tables yield empty
@@ -292,14 +304,209 @@ pub fn samples_scan_sql(
     series_ids: &[u64],
     start_ms: Option<i64>,
     end_ms: Option<i64>,
-    label_proj: &str,
+    _label_proj: &str,
     include_fidelity: bool,
     fetch_limit: usize,
     grain: SampleGrain,
+    step_ms: Option<i64>,
+    hist_arrays: bool,
 ) -> String {
-    let series = qualified_metrics_layout_table(catalog, "metric_series");
     let time = samples_time_predicates(start_ms, end_ms, grain.time_column());
-    let ids = if series_ids.is_empty() {
+    let ids = sql_series_id_list(series_ids);
+    let bucket = step_bucket_interval_sql(step_ms);
+
+    if grain.is_hist() || (include_fidelity && grain == SampleGrain::Raw) {
+        return hist_or_union_scan_sql(
+            catalog,
+            &ids,
+            &time,
+            include_fidelity,
+            fetch_limit,
+            grain,
+            start_ms,
+            end_ms,
+            bucket.as_deref(),
+            hist_arrays,
+        );
+    }
+
+    if grain.is_downsample() && !grain.is_hist() {
+        return gauge_downsample_with_raw_tail(
+            catalog,
+            &ids,
+            start_ms,
+            end_ms,
+            fetch_limit,
+            grain,
+            step_ms,
+        );
+    }
+
+    let samples = grain_table_sql(catalog, grain);
+    let value = grain.value_expr();
+    let ts_col = grain.time_column();
+    if let Some(iv) = bucket {
+        if grain == SampleGrain::Raw {
+            return format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
+                 arg_max({value}, sm.{ts_col}) AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {samples} sm \
+                 WHERE sm.series_id IN ({ids}){time} \
+                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col}) \
+                 LIMIT {fetch_limit}"
+            );
+        }
+    }
+    format!(
+        "SELECT sm.series_id, \
+         CAST((epoch(sm.{ts_col}) * 1000) AS BIGINT) AS timestamp_ms, \
+         {value} AS value, \
+         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+         FROM {samples} sm \
+         WHERE sm.series_id IN ({ids}){time} \
+         LIMIT {fetch_limit}"
+    )
+}
+
+/// For gauge FiveMin/OneHour grains: scan raw with step-bucketing for correctness.
+///
+/// Downsample tables may have gaps due to watermark lag and late-arriving data.
+/// Rather than UNION (which introduces duplicate-handling complexity), we scan
+/// raw with step-bucketing applied — this guarantees correctness for all windows.
+/// For OneHour grain on very long ranges (>48h) where raw scan would be expensive,
+/// we fall back to the downsample table for historical data and raw for the recent tail.
+fn gauge_downsample_with_raw_tail(
+    catalog: &str,
+    ids: &str,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    fetch_limit: usize,
+    grain: SampleGrain,
+    step_ms: Option<i64>,
+) -> String {
+    use crate::compat::backends::grain::ONE_HOUR_LAG_MS;
+
+    let bucket = step_bucket_interval_sql(step_ms);
+    let raw_table = grain_table_sql(catalog, SampleGrain::Raw);
+
+    if grain == SampleGrain::FiveMin {
+        // Use 5m downsample for data older than RAW_RANGE_MS from now (guaranteed
+        // complete), raw with step-bucketing for the recent window.
+        use crate::compat::backends::grain::FIVE_MIN_LAG_MS;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let end = end_ms.unwrap_or(now_ms);
+        let start = start_ms.unwrap_or(i64::MIN);
+        let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
+
+        let ds_table = grain_table_sql(catalog, SampleGrain::FiveMin);
+        let ds_time = samples_time_predicates(Some(start), Some(cutoff.min(end)), "window_ts");
+        let ds_sql = format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(sm.window_ts) * 1000) AS BIGINT) AS timestamp_ms, \
+             sm.last AS value, \
+             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+             FROM {ds_table} sm \
+             WHERE sm.series_id IN ({ids}){ds_time}"
+        );
+
+        if end <= cutoff {
+            return format!("{ds_sql} LIMIT {fetch_limit}");
+        }
+
+        let raw_start = start.max(cutoff);
+        let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+        let raw_sql = if let Some(ref iv) = bucket {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
+                 arg_max(sm.value, sm.timestamp) AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {raw_table} sm \
+                 WHERE sm.series_id IN ({ids}){raw_time} \
+                 GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp)"
+            )
+        } else {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
+                 sm.value AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {raw_table} sm \
+                 WHERE sm.series_id IN ({ids}){raw_time}"
+            )
+        };
+
+        if start >= cutoff {
+            return format!("{raw_sql} LIMIT {fetch_limit}");
+        }
+        return format!("({ds_sql}) UNION ALL ({raw_sql}) LIMIT {fetch_limit}");
+    }
+
+    // OneHour grain: use 1h table for historical, raw for recent 24h tail.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let end = end_ms.unwrap_or(now_ms);
+    let start = start_ms.unwrap_or(i64::MIN);
+    let cutoff = now_ms.saturating_sub(ONE_HOUR_LAG_MS);
+
+    let ds_table = grain_table_sql(catalog, grain);
+    let ds_time_col = grain.time_column();
+    let ds_value = grain.value_expr();
+    let ds_time = samples_time_predicates(Some(start), Some(cutoff.min(end)), ds_time_col);
+    let ds_sql = format!(
+        "SELECT sm.series_id, \
+         CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
+         {ds_value} AS value, \
+         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+         FROM {ds_table} sm \
+         WHERE sm.series_id IN ({ids}){ds_time}"
+    );
+
+    if end <= cutoff {
+        return format!("{ds_sql} LIMIT {fetch_limit}");
+    }
+
+    let raw_start = start.max(cutoff);
+    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+    let raw_sql = if let Some(ref iv) = bucket {
+        format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
+             arg_max(sm.value, sm.timestamp) AS value, \
+             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+             FROM {raw_table} sm \
+             WHERE sm.series_id IN ({ids}){raw_time} \
+             GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp)"
+        )
+    } else {
+        format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
+             sm.value AS value, \
+             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+             FROM {raw_table} sm \
+             WHERE sm.series_id IN ({ids}){raw_time}"
+        )
+    };
+
+    if start >= cutoff {
+        format!("{raw_sql} LIMIT {fetch_limit}")
+    } else {
+        format!("({ds_sql}) UNION ALL ({raw_sql}) LIMIT {fetch_limit}")
+    }
+}
+
+fn sql_series_id_list(series_ids: &[u64]) -> String {
+    if series_ids.is_empty() {
         "NULL".to_string()
     } else {
         series_ids
@@ -307,104 +514,247 @@ pub fn samples_scan_sql(
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(", ")
-    };
-
-    if grain == SampleGrain::Hist || (include_fidelity && grain == SampleGrain::Raw) {
-        return hist_or_union_scan_sql(
-            catalog,
-            &series,
-            &ids,
-            &time,
-            label_proj,
-            include_fidelity,
-            fetch_limit,
-            grain,
-            start_ms,
-            end_ms,
-        );
     }
+}
 
-    let samples = grain_table_sql(catalog, grain);
-    let value = grain.value_expr();
-    let ts_col = grain.time_column();
+/// Series identity + labels once per `series_id` (Greptime series metadata,
+/// not VARIANT extracts on every sample row).
+pub fn series_meta_sql(
+    catalog: &str,
+    series_ids: &[u64],
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+) -> String {
+    let series = qualified_metrics_layout_table(catalog, "metric_series");
+    let ids = sql_series_id_list(series_ids);
+    let day_pred = RecordDateRange::from_ms(start_ms, end_ms).sql_predicate("s.");
+    let day_and = if day_pred.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {day_pred}")
+    };
     format!(
-        "SELECT s.metric_name, \
-         s.description, \
-         s.unit, \
-         {label_proj}, \
-         CAST((epoch(sm.{ts_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-         {value} AS value, \
-         s.metric_type, NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-         FROM {samples} sm \
-         JOIN {series} s \
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
-         WHERE sm.series_id IN ({ids}){time} \
-         LIMIT {fetch_limit}"
+        "SELECT s.series_id, s.metric_name, s.description, s.unit, s.metric_type, \
+         CAST(s.labels AS JSON) AS labels_json \
+         FROM {series} s \
+         WHERE s.series_id IN ({ids}){day_and}"
     )
+}
+
+fn hist_row_select_sql(
+    catalog: &str,
+    table: &str,
+    ts_col: &str,
+    ids: &str,
+    time: &str,
+    hist_arrays: bool,
+    bucket_iv: Option<&str>,
+) -> String {
+    let hist = qualified_metrics_layout_table(catalog, table);
+    let (count_expr, sum_expr, buckets_expr, bounds_expr) = if hist_arrays {
+        (
+            "sm.count",
+            "sm.sum",
+            "sm.bucket_counts",
+            "sm.explicit_bounds",
+        )
+    } else {
+        (
+            "sm.count",
+            "sm.sum",
+            "NULL::UBIGINT[]",
+            "NULL::DOUBLE[]",
+        )
+    };
+    if let Some(iv) = bucket_iv {
+        if hist_arrays {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
+                 arg_max(COALESCE(sm.sum, 0.0), sm.{ts_col}) AS value, \
+                 arg_max(sm.count, sm.{ts_col}) AS count, arg_max(sm.sum, sm.{ts_col}) AS sum, \
+                 arg_max(sm.bucket_counts, sm.{ts_col}) AS bucket_counts, \
+                 arg_max(sm.explicit_bounds, sm.{ts_col}) AS explicit_bounds, NULL AS quantiles \
+                 FROM {hist} sm \
+                 WHERE sm.series_id IN ({ids}){time} \
+                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col})"
+            )
+        } else {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
+                 arg_max(COALESCE(sm.sum, 0.0), sm.{ts_col}) AS value, \
+                 arg_max(sm.count, sm.{ts_col}) AS count, arg_max(sm.sum, sm.{ts_col}) AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {hist} sm \
+                 WHERE sm.series_id IN ({ids}){time} \
+                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col})"
+            )
+        }
+    } else {
+        format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(sm.{ts_col}) * 1000) AS BIGINT) AS timestamp_ms, \
+             COALESCE(sm.sum, 0.0) AS value, \
+             {count_expr}, {sum_expr}, {buckets_expr}, {bounds_expr}, NULL AS quantiles \
+             FROM {hist} sm \
+             WHERE sm.series_id IN ({ids}){time}"
+        )
+    }
 }
 
 fn hist_or_union_scan_sql(
     catalog: &str,
-    series: &str,
     ids: &str,
     time: &str,
-    label_proj: &str,
     include_fidelity: bool,
     fetch_limit: usize,
     grain: SampleGrain,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
+    bucket_iv: Option<&str>,
+    hist_arrays: bool,
 ) -> String {
-    let hist = qualified_metrics_layout_table(catalog, "metric_hist_samples");
-    if grain == SampleGrain::Hist {
-        return format!(
-            "SELECT s.metric_name, \
-             s.description, \
-             s.unit, \
-             {label_proj}, \
-             CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-             COALESCE(sm.sum, 0.0) AS value, \
-             s.metric_type, sm.count, sm.sum, sm.bucket_counts, sm.explicit_bounds, NULL AS quantiles \
-             FROM {hist} sm \
-             JOIN {series} s \
-               ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
-             WHERE sm.series_id IN ({ids}){time} \
-             LIMIT {fetch_limit}"
-        );
+    if grain.is_hist() {
+        let body = match grain {
+            SampleGrain::Hist => hist_row_select_sql(
+                catalog,
+                "metric_hist_samples",
+                "timestamp",
+                ids,
+                time,
+                hist_arrays,
+                bucket_iv,
+            ),
+            SampleGrain::HistFiveMin => {
+                // 5m hist for older data (guaranteed complete), raw for recent window.
+                use crate::compat::backends::grain::FIVE_MIN_LAG_MS;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let end = end_ms.unwrap_or(now_ms);
+                let start = start_ms.unwrap_or(i64::MIN);
+                let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
+
+                if end <= cutoff {
+                    let ds_time = samples_time_predicates(Some(start), Some(end), "window_ts");
+                    hist_row_select_sql(
+                        catalog,
+                        "metric_hist_samples_5m",
+                        "window_ts",
+                        ids,
+                        &ds_time,
+                        hist_arrays,
+                        bucket_iv,
+                    )
+                } else {
+                    let mut parts = Vec::new();
+                    let raw_start = start.max(cutoff);
+                    let raw_time =
+                        samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+                    parts.push(hist_row_select_sql(
+                        catalog,
+                        "metric_hist_samples",
+                        "timestamp",
+                        ids,
+                        &raw_time,
+                        hist_arrays,
+                        bucket_iv,
+                    ));
+                    if start < cutoff {
+                        let ds_time =
+                            samples_time_predicates(Some(start), Some(cutoff), "window_ts");
+                        parts.push(hist_row_select_sql(
+                            catalog,
+                            "metric_hist_samples_5m",
+                            "window_ts",
+                            ids,
+                            &ds_time,
+                            hist_arrays,
+                            bucket_iv,
+                        ));
+                    }
+                    match parts.len() {
+                        1 => parts.into_iter().next().unwrap(),
+                        _ => format!("({}) UNION ALL ({})", parts[0], parts[1]),
+                    }
+                }
+            }
+            SampleGrain::HistOneHour => {
+                use crate::compat::backends::grain::ONE_HOUR_LAG_MS;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let end = end_ms.unwrap_or(now_ms);
+                let start = start_ms.unwrap_or(i64::MIN);
+                let cutoff = now_ms.saturating_sub(ONE_HOUR_LAG_MS);
+
+                if end <= cutoff {
+                    hist_row_select_sql(
+                        catalog,
+                        "metric_hist_samples_1h",
+                        "window_ts",
+                        ids,
+                        time,
+                        hist_arrays,
+                        bucket_iv,
+                    )
+                } else {
+                    let mut parts = Vec::new();
+                    let raw_start = start.max(cutoff);
+                    let raw_time =
+                        samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+                    parts.push(hist_row_select_sql(
+                        catalog,
+                        "metric_hist_samples",
+                        "timestamp",
+                        ids,
+                        &raw_time,
+                        hist_arrays,
+                        bucket_iv,
+                    ));
+                    if start < cutoff {
+                        let ds_time =
+                            samples_time_predicates(Some(start), Some(cutoff), "window_ts");
+                        parts.push(hist_row_select_sql(
+                            catalog,
+                            "metric_hist_samples_1h",
+                            "window_ts",
+                            ids,
+                            &ds_time,
+                            hist_arrays,
+                            bucket_iv,
+                        ));
+                    }
+                    match parts.len() {
+                        1 => parts.into_iter().next().unwrap(),
+                        _ => format!("({}) UNION ALL ({})", parts[0], parts[1]),
+                    }
+                }
+            }
+            _ => unreachable!("is_hist()"),
+        };
+        return format!("{body} LIMIT {fetch_limit}");
     }
-    // Raw + fidelity: UNION gauge samples with hist (short-window classic hist path).
+
     let samples = grain_table_sql(catalog, SampleGrain::Raw);
     let raw_time = samples_time_predicates(start_ms, end_ms, SampleGrain::Raw.time_column());
     let gauge_sql = format!(
-        "SELECT s.metric_name, \
-         s.description, \
-         s.unit, \
-         {label_proj}, \
+        "SELECT sm.series_id, \
          CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
          sm.value, \
-         s.metric_type, NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
          NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
          FROM {samples} sm \
-         JOIN {series} s \
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
          WHERE sm.series_id IN ({ids}){raw_time}"
     );
     if !include_fidelity {
         return format!("{gauge_sql} LIMIT {fetch_limit}");
     }
-    let hist_sql = format!(
-        "SELECT s.metric_name, \
-         s.description, \
-         s.unit, \
-         {label_proj}, \
-         CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-         COALESCE(sm.sum, 0.0) AS value, \
-         s.metric_type, sm.count, sm.sum, sm.bucket_counts, sm.explicit_bounds, NULL AS quantiles \
-         FROM {hist} sm \
-         JOIN {series} s \
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
-         WHERE sm.series_id IN ({ids}){raw_time}"
+    let hist_sql = hist_row_select_sql(
+        catalog,
+        "metric_hist_samples",
+        "timestamp",
+        ids,
+        &raw_time,
+        hist_arrays,
+        bucket_iv,
     );
     format!("({gauge_sql}) UNION ALL ({hist_sql}) LIMIT {fetch_limit}")
 }
@@ -419,6 +769,7 @@ pub fn samples_scan_sql_for_window(
     label_proj: &str,
     include_fidelity: bool,
     is_histogram: bool,
+    hist_arrays: bool,
     fetch_limit: usize,
 ) -> String {
     let grain = select_sample_grain(start_ms, end_ms, step_ms, is_histogram);
@@ -431,6 +782,8 @@ pub fn samples_scan_sql_for_window(
         include_fidelity,
         fetch_limit,
         grain,
+        step_ms,
+        hist_arrays,
     )
 }
 
@@ -657,9 +1010,7 @@ mod tests {
     use super::*;
     use crate::compat::backends::grain::SampleGrain;
     use crate::models::Metric;
-    use crate::storage::ducklake::{
-        write_metrics_layout_txn, DEFAULT_MAX_LABELS_PER_SERIES,
-    };
+    use crate::storage::ducklake::{write_metrics_layout_txn, DEFAULT_MAX_LABELS_PER_SERIES};
     use chrono::TimeZone;
     use duckdb::Connection;
     use std::collections::HashMap;
@@ -724,17 +1075,19 @@ mod tests {
             })
         });
         assert_eq!(hit, vec![2, 99], "warm intersect must match posting AND");
-        assert_eq!(fetches.load(AtomicOrdering::SeqCst), 0, "must be cache hits");
+        assert_eq!(
+            fetches.load(AtomicOrdering::SeqCst),
+            0,
+            "must be cache hits"
+        );
 
         // Expired entry must miss (TTL).
         let expired = now + POSTING_CACHE_TTL + Duration::from_secs(1);
         assert!(cache.get(&key_name, expired).is_none());
 
         // Day B name posting is isolated from day A intersect.
-        let only_b = intersect_equality_postings_from_sets(
-            &equality[..1],
-            &[day_b],
-            |day, name, value| {
+        let only_b =
+            intersect_equality_postings_from_sets(&equality[..1], &[day_b], |day, name, value| {
                 let key = PostingCacheKey {
                     engine_id: 1,
                     tenant_id: "t1".into(),
@@ -748,15 +1101,17 @@ mod tests {
                 } else {
                     cache.get(&key, now).unwrap_or_else(|| Arc::new(Vec::new()))
                 }
-            },
-        );
+            });
         assert_eq!(only_b, vec![7, 8]);
         assert!(!only_b.contains(&2), "must not serve day_a ids for day_b");
     }
 
     #[test]
     fn union_and_intersect_sorted_ids() {
-        assert_eq!(union_sorted_ids(&[1, 3, 5], &[2, 3, 4]), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            union_sorted_ids(&[1, 3, 5], &[2, 3, 4]),
+            vec![1, 2, 3, 4, 5]
+        );
         assert_eq!(intersect_sorted_ids(&[1, 3, 5, 7], &[3, 7, 9]), vec![3, 7]);
         assert!(intersect_sorted_ids(&[1, 2], &[3, 4]).is_empty());
     }
@@ -891,6 +1246,8 @@ mod tests {
             false,
             100,
             SampleGrain::Raw,
+            None,
+            true,
         );
         assert!(
             sql_is_postings_resolve_path(&resolve, &samples),
@@ -920,6 +1277,7 @@ mod tests {
             "NULL::VARCHAR AS lbl__empty",
             false,
             false,
+            true,
             100,
         );
         assert!(
@@ -928,7 +1286,7 @@ mod tests {
         );
         assert!(
             !sql.contains(".metric_samples sm"),
-            "AC-Q2: must not use raw metric_samples, got {sql}"
+            "AC-Q2: historical window must not use raw metric_samples, got {sql}"
         );
         assert!(sql.contains("window_ts"));
         assert!(!sql.contains("to_timestamp("));
@@ -948,6 +1306,7 @@ mod tests {
             "NULL::VARCHAR AS lbl__empty",
             false,
             false,
+            true,
             100,
         );
         assert!(sql.contains("metric_samples_1h"), "{sql}");
@@ -967,6 +1326,7 @@ mod tests {
             "NULL::VARCHAR AS lbl__empty",
             false,
             false,
+            true,
             100,
         );
         assert!(
@@ -976,6 +1336,24 @@ mod tests {
         assert!(!sql.contains("metric_samples_1h"));
         assert!(!sql.contains("metric_samples_5m"));
         assert!(!sql.contains("to_timestamp("));
+        assert!(
+            sql.contains("sm.series_id") && !sql.contains("JOIN") && !sql.contains("CAST(s.labels"),
+            "sample scan must be skinny (no series JOIN / VARIANT labels): {sql}"
+        );
+        assert!(
+            sql.contains("time_bucket(INTERVAL '15 seconds'"),
+            "Grafana 15s step must bucket raw scans: {sql}"
+        );
+    }
+
+    #[test]
+    fn series_meta_sql_reads_labels_as_json_once() {
+        let sql = series_meta_sql("softprobe", &[42], Some(1_000), Some(2_000));
+        assert!(sql.contains("metric_series"));
+        assert!(sql.contains("CAST(s.labels AS JSON)"));
+        assert!(!sql.contains("CAST(s.labels['"));
+        assert!(sql.contains("series_id IN (42)"));
+        assert!(sql.contains("record_date BETWEEN DATE"));
     }
 
     /// time_predicate_is_timestamptz (§9.1 step 8).
@@ -1068,7 +1446,11 @@ mod tests {
             .expect("query")
             .map(|r| r.expect("row"))
             .collect();
-        assert_eq!(ids.len(), 1, "AC-Q3: expected exactly 1 series_id, got {ids:?}");
+        assert_eq!(
+            ids.len(),
+            1,
+            "AC-Q3: expected exactly 1 series_id, got {ids:?}"
+        );
 
         let samples_sql = samples_scan_sql(
             &catalog,
@@ -1079,17 +1461,36 @@ mod tests {
             false,
             100,
             SampleGrain::Raw,
+            None,
+            true,
         );
         assert!(sql_is_postings_resolve_path(&resolve_sql, &samples_sql));
         let mut sstmt = conn.prepare(&samples_sql).expect("prepare samples");
-        let rows: Vec<(f64, String)> = sstmt
-            .query_map([], |r| Ok((r.get::<_, f64>(5)?, r.get::<_, String>(3)?)))
+        let rows: Vec<(u64, f64)> = sstmt
+            .query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, f64>(2)?)))
             .expect("samples query")
             .map(|r| r.expect("row"))
             .collect();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, 1.0);
-        assert_eq!(rows[0].1, "i-1");
+        assert_eq!(rows[0].1, 1.0);
+        let meta_sql = series_meta_sql(
+            &catalog,
+            &ids,
+            Some(ts.timestamp_millis() - 60_000),
+            Some(ts.timestamp_millis() + 60_000),
+        );
+        let mut mstmt = conn.prepare(&meta_sql).expect("prepare meta");
+        let instances: Vec<String> = mstmt
+            .query_map([], |r| r.get::<_, String>(5))
+            .expect("meta query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(instances.len(), 1, "expected one series meta row");
+        assert!(
+            instances[0].contains("i-1"),
+            "labels_json should include instance i-1, got {}",
+            instances[0]
+        );
     }
 
     /// T-Q4 integration: wide name-only selector exceeds low max_series without sample hang.
@@ -1146,10 +1547,8 @@ mod tests {
 
         let end = ts;
         let start = ts - chrono::Duration::days(31);
-        let days = RecordDateRange::from_ms(
-            Some(start.timestamp_millis()),
-            Some(end.timestamp_millis()),
-        );
+        let days =
+            RecordDateRange::from_ms(Some(start.timestamp_millis()), Some(end.timestamp_millis()));
         assert!(
             days.inclusive_days().map(|d| d.len()).unwrap_or(0) > 1,
             "AC-W4 window must span multiple calendar days"
@@ -1257,7 +1656,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 0, "AC-C4: dead pod p1 must not appear in today's postings");
+        assert_eq!(
+            n, 0,
+            "AC-C4: dead pod p1 must not appear in today's postings"
+        );
     }
 
     fn hist(name: &str, instance: &str, ts: DateTime<Utc>) -> Metric {
@@ -1303,6 +1705,7 @@ mod tests {
             "NULL::VARCHAR AS lbl__empty",
             true,
             true,
+            true,
             100,
         );
         assert!(
@@ -1318,20 +1721,33 @@ mod tests {
         );
     }
 
-    /// AC-H3 / H4 / H5: mid+long windows and `_sum` stay on `metric_hist_samples`.
+    /// AC-H3 / H4 / H5: mid+long windows use hist ladder (5m / 1h), never gauge grains.
     #[test]
-    fn hist_prom_sql_uses_hist_table_for_mid_and_long_windows() {
+    fn hist_prom_sql_uses_hist_ladder_for_mid_and_long_windows() {
         let end = 1_700_000_000_000i64;
         let hour = 3_600_000i64;
         let day = 24 * hour;
-        let cases: &[(i64, Option<i64>, &str)] = &[
-            (3 * hour, Some(20_000), "layout_latency_count"), // AC-H3
-            (day, Some(60_000), "layout_latency_count"),      // AC-H4 24h
-            (30 * day, Some(hour), "layout_latency_count"),   // AC-H4 30d
-            (3 * hour, Some(20_000), "layout_latency_sum"),   // AC-H5 summary suffix
-            (3 * hour, Some(hour), "layout_latency_bucket"),
+        let cases: &[(i64, Option<i64>, &str, fn(&str) -> bool)] = &[
+            (
+                3 * hour,
+                Some(20_000),
+                "layout_latency_count",
+                (|s: &str| s.contains("metric_hist_samples")) as fn(&str) -> bool,
+            ),
+            (day, Some(60_000), "layout_latency_count", |s: &str| {
+                s.contains("metric_hist_samples_5m") || s.contains("metric_hist_samples")
+            }),
+            (30 * day, Some(hour), "layout_latency_count", |s: &str| {
+                s.contains("metric_hist_samples_1h") || s.contains("metric_hist_samples")
+            }),
+            (3 * hour, Some(20_000), "layout_latency_sum", |s: &str| {
+                s.contains("metric_hist_samples")
+            }),
+            (3 * hour, Some(hour), "layout_latency_bucket", |s: &str| {
+                s.contains("metric_hist_samples")
+            }),
         ];
-        for &(range, step, name) in cases {
+        for &(range, step, name, want) in cases {
             let start = end - range;
             let samples = samples_scan_sql_for_window(
                 "softprobe",
@@ -1342,19 +1758,20 @@ mod tests {
                 "NULL::VARCHAR AS lbl__empty",
                 true,
                 true,
+                true,
                 100,
             );
             assert!(
-                samples.contains("metric_hist_samples"),
-                "AC-H3/H4/H5 {name} range={range}: want hist table, sql={samples}"
+                want(&samples),
+                "AC-H3/H4/H5 {name} range={range}: want hist ladder, sql={samples}"
             );
             assert!(
                 !samples.contains("metric_samples_1h"),
-                "AC-H3/H4/H5 {name} range={range}: must not use 1h grain, sql={samples}"
+                "AC-H3/H4/H5 {name} range={range}: must not use gauge 1h, sql={samples}"
             );
             assert!(
                 !samples.contains("metric_samples_5m"),
-                "AC-H3/H4/H5 {name} range={range}: must not use 5m grain, sql={samples}"
+                "AC-H3/H4/H5 {name} range={range}: must not use gauge 5m, sql={samples}"
             );
             let resolve = resolve_series_ids_sql(
                 "softprobe",
@@ -1417,7 +1834,11 @@ mod tests {
             .expect("query")
             .map(|r| r.expect("row"))
             .collect();
-        assert_eq!(ids.len(), 3, "AC-H1: expected 3 series via postings, got {ids:?}");
+        assert_eq!(
+            ids.len(),
+            3,
+            "AC-H1: expected 3 series via postings, got {ids:?}"
+        );
 
         let samples_sql = samples_scan_sql_for_window(
             &catalog,
@@ -1426,6 +1847,7 @@ mod tests {
             Some(end),
             Some(15_000),
             "CAST(s.labels['instance'] AS VARCHAR) AS lbl_instance",
+            true,
             true,
             true,
             100,
@@ -1461,19 +1883,18 @@ mod tests {
         );
 
         let mut sstmt = conn.prepare(&samples_sql).expect("prepare samples");
-        let rows: Vec<(Option<i64>, Option<f64>, String)> = sstmt
+        let rows: Vec<(Option<i64>, Option<f64>)> = sstmt
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, Option<i64>>(7)?, // count
-                    r.get::<_, Option<f64>>(8)?, // sum
-                    r.get::<_, String>(3)?,      // instance label
+                    r.get::<_, Option<i64>>(3)?, // count
+                    r.get::<_, Option<f64>>(4)?, // sum
                 ))
             })
             .expect("samples query")
             .map(|r| r.expect("row"))
             .collect();
         assert_eq!(rows.len(), 3, "AC-H1: expected hist rows, got {rows:?}");
-        for (count, sum, _) in &rows {
+        for (count, sum) in &rows {
             assert_eq!(*count, Some(10));
             assert_eq!(*sum, Some(100.0));
         }
@@ -1485,13 +1906,19 @@ mod tests {
             value: "layout_latency_bucket".into(),
         }]);
         let resolve_bucket = resolve_series_ids_sql(&catalog, days, &eq_bucket, 10_000);
-        let mut bstmt = conn.prepare(&resolve_bucket).expect("prepare bucket resolve");
+        let mut bstmt = conn
+            .prepare(&resolve_bucket)
+            .expect("prepare bucket resolve");
         let bucket_ids: Vec<u64> = bstmt
             .query_map([], |r| r.get::<_, u64>(0))
             .expect("query")
             .map(|r| r.expect("row"))
             .collect();
-        assert_eq!(bucket_ids.len(), 3, "AC-H1: _bucket must resolve via postings");
+        assert_eq!(
+            bucket_ids.len(),
+            3,
+            "AC-H1: _bucket must resolve via postings"
+        );
     }
 
     /// T-D3 / AC-D3: Prom backend is DuckLakeMetricsBackend; no sidecar writers in src.

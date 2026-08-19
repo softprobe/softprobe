@@ -262,21 +262,12 @@ async fn query_range_handler(
     let start_ms = params.start_ms.unwrap();
     let end_ms = params.end_ms.unwrap();
     let step_ms = params.step_ms.unwrap();
-    let cache_key =
-        super::result_cache::cache_key(ctx.tenant_id(), &params.query, start_ms, end_ms, step_ms);
-    if let Some(data) = super::result_cache::get(cache_key).await {
-        return respond_data(&ctx, data);
-    }
     let expr = match parse_promql(&params.query) {
         Ok(e) => e,
         Err(e) => return map_err(e),
     };
     match eval_range(&backend, &ctx, &expr, start_ms, end_ms, step_ms).await {
-        Ok(result) => {
-            let data = encode_eval_result(result);
-            super::result_cache::put(cache_key, data.clone()).await;
-            respond_data(&ctx, data)
-        }
+        Ok(result) => respond_data(&ctx, encode_eval_result(result)),
         Err(e) => map_err(e),
     }
 }

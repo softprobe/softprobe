@@ -109,15 +109,15 @@ Match Greptime: **do not** reject Prom ranges with a fixed Softprobe max (not 1d
 
 Flush-through creates **one snapshot per successful `/v1/metrics` commit**. The live snapshot count is then ≈ `commit_rate × max_snapshot_age`. A flat “≤ 500” with no assumed rate is not an invariant.
 
-Let `A = maintenance.max_snapshot_age_seconds` (default **3600**), `I = maintenance.interval_seconds` (default **300**), `C` = minimum seconds between OTLP metric commits (demo overlay collector batch = **60s**).
+Let `A = maintenance.max_snapshot_age_seconds` (default **60**), `I = maintenance.metadata_interval_seconds` (default **60**), `C` = minimum seconds between OTLP metric commits (demo overlay `batch/softprobe.timeout` = **15s**, with `send_batch_size` large enough that timeout dominates).
 
-After a maintenance pass that has had at least **`2 × A`** of ingest at interval `C`:
+PromQL does not use DuckLake time-travel; snapshot history is unused. After a maintenance pass:
 
 | Metric | Bar |
 |--------|-----|
 | Age of every live `ducklake_snapshot` row | **< `A + I`** |
-| `count(ducklake_snapshot)` | **≤ `ceil(A / C) + 20`** (headroom for in-flight + one lag). Demo defaults: `ceil(3600/60)+20` = **80** |
-| Default `A` | **3600**, not 604800 (7 days) |
+| `count(ducklake_snapshot)` after a pass | **≤ 50** (AC-N6). F-snap formula still `≤ ceil(A / C) + 20` (AC-N3) |
+| Default `A` | **60**, not 3600 and not 604800 (7 days) |
 | Expiry + orphan cleanup SQL | **Second-granularity** `INTERVAL '… seconds'` (fix `max(1, age/86400)` day flooring in **both** `ducklake_expire_snapshots` and `ducklake_cleanup_old_files`) |
 | Sample/index **data** | Unchanged by snapshot expiry (time-travel history only) |
 
@@ -135,6 +135,8 @@ After maintenance, **closed** time windows are merged toward `target_file_size_b
 | Same bar, separately, for `metric_postings`, `metric_series`, `metric_hist_samples` | ≤ **2 × `days_retained`** each (or 1 file if that table’s closed-day bytes < 8 MiB) |
 | Median file size of those closed-day **sample** files | ≥ **8 MiB**, **or** the partition holds < 8 MiB of data (then 1 file is enough) |
 | Current UTC day after a merge pass | `metric_samples` live files ≤ **20** |
+| Closed-day parquet per family after a pass (AC-F8) | **1** file, or **2** if that day’s bytes **> 64 MiB**; median ≥ **8 MiB** unless the partition holds < 8 MiB |
+| Inlined catalog bytes for skinny tables (AC-F7) | **0** for `metric_samples`, `metric_hist_samples`, `metric_postings` (`data_inlining_row_limit` default **0**; VARIANT shredding stays on Parquet for `metric_series`) |
 | Existing warn threshold (≥200 files) | Must not fire on any metrics-family table after a successful maintenance pass on a 30d fixture |
 
 Do **not** hive-partition by `metric_name` (hundreds of tiny files per OTLP batch). Greptime’s metric-engine exists precisely because table-per-metric is too heavy; Softprobe keeps **one physical table family**.
@@ -177,8 +179,8 @@ Gated queries: AC-G1…AC-G5 map to T-Q1, T-Q2, T-Q3, T-Q6, T-Q5 (see §10.2).
 | G2 Fast query | AC-Q0, AC-Q1, AC-Q2, AC-Q3, AC-Q4, AC-Q5, AC-Q6, AC-Q7, AC-Q8, AC-Q9, AC-H1, AC-H2, AC-H3, AC-H4, AC-H5, AC-H6 |
 | G3 Tall / wide / churn | AC-C1, AC-C2, AC-C3, AC-C4, AC-Q3, AC-Q4 |
 | G4 Long windows (no API ceiling; 30d/90d/180d SLOs) | AC-W1, AC-W2, AC-W3, AC-W4, AC-W5, AC-W6, AC-Q2, AC-Q5 |
-| G5 Snapshots | AC-N1, AC-N2, AC-N3, AC-N4, AC-N5 |
-| G6 Small files + TWCS | AC-F1, AC-F2, AC-F3, AC-F4, AC-F5, AC-F6 |
+| G5 Snapshots | AC-N1, AC-N2, AC-N3, AC-N4, AC-N5, AC-N6 |
+| G6 Small files + TWCS | AC-F1, AC-F2, AC-F3, AC-F4, AC-F5, AC-F6, AC-F7, AC-F8 |
 | G7 Cheap samples | AC-S1 |
 | G8 Keep data + concurrent ingest | AC-Q0, AC-Q9, AC-S2, AC-S3, AC-M2 |
 | Maintenance targets new tables | AC-M1 |
@@ -458,7 +460,7 @@ Softprobe maps that onto DuckLake:
 | Softprobe knob | Value | Greptime analog |
 |----------------|-------|-----------------|
 | Raw/index time window | **1 calendar day** (`record_date`) | `compaction.twcs.time_window` |
-| Merge trigger | Closed day has ≥ **4** live files **or** maintenance pass after target size pressure | `trigger_file_num` (default 4) |
+| Merge trigger | Closed day has ≥ **2** live files (complete compact toward 1 file, or 2 if > 64 MiB) | `trigger_file_num` |
 | Target merged file size | `maintenance.target_file_size_bytes` (64 MiB) | `max_output_file_size` |
 | Cross-window merge | **Forbidden** for `metric_samples` / `metric_postings` / `metric_series` / `metric_hist_samples` | TWCS invariant |
 | Today (open window) | Cap live sample files ≤ 20 after a pass; do not force full-day single-file merge while the day is open | Active window caution |
@@ -468,7 +470,7 @@ Implementation must not call a blind global `ducklake_merge_adjacent_files` that
 ### 7.2 Pass order
 
 1. `SET SORTED BY` / `SET PARTITIONED BY` if missing (idempotent).
-2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Do **not** only merge legacy `metrics`.
+2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Loop bounded waves until closed-day file bars (AC-F8) **and** until today’s live files are ≤20 (AC-F4). Open-day uses a 256-file CALL when over 256 live files; do not stop after one 32-file wave. Do **not** only merge legacy `metrics`.
 3. Build/append `metric_samples_5m` from raw older than **2h** (closed hours only).
 4. Build/append `metric_samples_1h` from 5m (or raw) older than **24h**.
 5. Build/append `metric_collapse_job_1h` from 1h (or raw) grouped by `(metric_name, job, hour)`.
@@ -681,11 +683,12 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 
 | ID | Pass | Fail | Test |
 |----|------|------|------|
-| **AC-N1** | Default `max_snapshot_age_seconds == 3600` in `config.rs` | Still 604800 | `T-N1` |
+| **AC-N1** | Default `max_snapshot_age_seconds == 60` in `config.rs` | Still 3600 or 604800 | `T-N1` |
 | **AC-N2** | Expiry SQL uses an interval derived from **seconds**, not `max(1, age/86400)` days (3600s → `INTERVAL '3600 seconds'` or equivalent hours, **not** `INTERVAL '1 days'`) | 1h config still 1-day floor | `T-N2` |
 | **AC-N3** | F-snap (`A=60`, `C=1`, ≥120 commits, then maintenance): `count(ducklake_snapshot) ≤ ceil(60/1)+20 = 80` **and** every remaining snapshot age **< A+I** (70s if `I=10`) | Thousands of snaps, or rows older than `A+I` | `T-N3` |
 | **AC-N4** | After expiry, `count(*) FROM metric_samples` unchanged vs pre-expiry | Samples dropped | `T-N4` |
 | **AC-N5** | `ducklake_cleanup_old_files` SQL uses a **seconds** interval when `remove_orphan_older_than_seconds` is set (same day-floor bug as expiry) | Still `INTERVAL 'N days'` from `max(1, s/86400)` | `T-N5` |
+| **AC-N6** | After a maintenance pass: `count(ducklake_snapshot) ≤ 50` **and** no live snapshot older than `A + I` (default 60+60) | Snapshot pile-up, or rows older than keep window + interval | `T-N6` |
 
 #### Small files + TWCS (G6)
 
@@ -697,6 +700,8 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 | **AC-F4** | After merge, **today’s** `metric_samples` live files ≤ **20** | Today unbounded small files | `T-F4` |
 | **AC-F5** | Closed-day live files for `metric_postings`, `metric_series`, `metric_hist_samples` each ≤ **2 × days_retained**. F-files sizes indexes so each family is ≥ 8 MiB before merge when asserting size; JSON `precondition_met: true` | Index tables explode into tiny files; precondition false while claiming pass | `T-F5` |
 | **AC-F6** | After forced merge of a **2-day** F-files corpus: every output sample Parquet file maps to a **single** `record_date`; merge SQL/plan is partition-scoped (`record_date = $d`). Unit `twcs_merge_does_not_cross_record_date` | Unfiltered global merge across days | `T-F6` |
+| **AC-F7** | Inlined catalog bytes for `metric_samples`, `metric_hist_samples`, `metric_postings` **= 0**. Default `data_inlining_row_limit` is **0** (opt-in inlining remains for the scores/inlined-reader test) | Skinny tables sit in Postgres `ducklake_inlined_data_*` and skip TWCS | `T-F7` |
+| **AC-F8** | After a pass: each closed-day parquet partition per family is **1** file, or **2** if that day’s bytes **> 64 MiB**; median file size ≥ **8 MiB** unless the partition holds < 8 MiB | Many tiny closed-day files remain | `T-F8` |
 
 #### Cheap storage + keep data (G7, G8)
 
@@ -794,8 +799,8 @@ CARGO_PROFILE_FLAG=--release PERF_SUITE=metrics-layout \
 
 Ready validator **rejects** unless: `binary_profile=="release"`, `fixture_profile=="release_full"`, every required AC id present with `pass==true`, and (when claiming G9) Greptime fields populated for AC-G\*.
 
-**Required AC ids (53):**  
-`AC-D1`…`AC-D4`, `AC-Q0`…`AC-Q9`, `AC-H1`…`AC-H6`, `AC-C1`…`AC-C4`, `AC-W1`…`AC-W6`, `AC-N1`…`AC-N5`, `AC-F1`…`AC-F6`, `AC-S1`…`AC-S3`, `AC-M1`, `AC-M2`, `AC-G0`…`AC-G6`.
+**Required AC ids (56):**  
+`AC-D1`…`AC-D4`, `AC-Q0`…`AC-Q9`, `AC-H1`…`AC-H6`, `AC-C1`…`AC-C4`, `AC-W1`…`AC-W6`, `AC-N1`…`AC-N6`, `AC-F1`…`AC-F8`, `AC-S1`…`AC-S3`, `AC-M1`, `AC-M2`, `AC-G0`…`AC-G6`.
 
 Unit tests (fast, no 100k / no Greptime):
 
@@ -910,6 +915,7 @@ Latest fail-closed run (2026-08-15 `pr_floor` + `COMPARE_GREPTIME=1`, **release*
 - **2026-08-14:** Goals G1–G8 and original 39 ACs reviewed adversarially.
 - **2026-08-15:** Redesign after GreptimeDB study (§4, TWCS, reject fork/WAL/Puffin/DataFusion).
 - **2026-08-15 (review loop):** Senior-architect pass — G9, §4.4, AC-F6/M2/G\*, JSON `release_full` gate.
+- **2026-08-18 (snapshots + parquet TWCS):** Default `A=60`, inlining postponed (`data_inlining_row_limit=0`), collector demo batch **15s**, TWCS closed-day complete merge, AC-N6/F7/F8. **Required AC ids = 56**.
 - **2026-08-17 (multi-window hist):** AC-H3..H6 + Q-hist-mid/long + window×type matrix; classic hist/summary always `metric_hist_samples` (no >2h divert to empty 1h grain). **Required AC ids = 53**.
 - **2026-08-15 (range ceiling):** Drop Softprobe-imposed `max_query_range` (Greptime-like). Retention TTL bounds data; 30d/90d/180d remain tested SLOs. **Required AC ids = 49** (added AC-W6).
 - **2026-08-15 (implement loop):** Harness + G9 OTLP compare live; 34/49 on pr_floor. §13 open clusters; Greptime II/Flow inform Softprobe cache + materialize — still no fork/WAL/Puffin.

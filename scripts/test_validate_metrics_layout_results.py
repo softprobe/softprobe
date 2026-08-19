@@ -73,11 +73,14 @@ def _minimal_doc(*, all_pass: bool = True, ready_profiles: bool = True) -> dict:
 
 
 class TestRequiredIds(unittest.TestCase):
-    def test_exactly_fifty_three(self):
-        self.assertEqual(len(V.REQUIRED_AC_IDS), 53)
-        self.assertEqual(len(set(V.REQUIRED_AC_IDS)), 53)
+    def test_exactly_fifty_six(self):
+        self.assertEqual(len(V.REQUIRED_AC_IDS), 56)
+        self.assertEqual(len(set(V.REQUIRED_AC_IDS)), 56)
         for hid in ("AC-H1", "AC-H2", "AC-H3", "AC-H4", "AC-H5", "AC-H6"):
             self.assertIn(hid, V.REQUIRED_AC_IDS)
+        self.assertIn("AC-N6", V.REQUIRED_AC_IDS)
+        self.assertIn("AC-F7", V.REQUIRED_AC_IDS)
+        self.assertIn("AC-F8", V.REQUIRED_AC_IDS)
 
     def test_includes_g_and_q_bounds(self):
         self.assertIn("AC-Q0", V.REQUIRED_AC_IDS)
