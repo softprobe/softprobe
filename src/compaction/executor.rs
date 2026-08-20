@@ -4,14 +4,13 @@ use crate::compaction::downsample::{
     downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
     hist_downsample_1h_from_5m_for_day_sql, hist_downsample_1h_from_5m_pending_days_sql,
     hist_downsample_1h_from_raw_for_day_sql, hist_downsample_5m_for_day_sql,
-    hist_downsample_5m_pending_days_sql,
-    HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS,
+    hist_downsample_5m_pending_days_sql, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS,
 };
 use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind, live_file_count_sql,
-    open_day_files_for_merge, open_day_max_compacted_files,
-    partition_live_file_stats_sql, plan_twcs_merges, should_merge_partition, DayKind,
-    PartitionFileStats, TWCS_CLOSED_DAY_MAX_COMPACTED_FILES, TWCS_CLOSED_DAY_MAX_WAVES,
+    open_day_files_for_merge, open_day_max_compacted_files, partition_live_file_stats_sql,
+    plan_twcs_merges, should_merge_partition, DayKind, PartitionFileStats,
+    TWCS_CLOSED_DAY_MAX_COMPACTED_FILES, TWCS_CLOSED_DAY_MAX_WAVES,
     TWCS_MAX_COMPACTED_FILES_PER_WAVE, TWCS_MAX_WAVES_PER_TABLE, TWCS_OPEN_DAY_FILE_CAP,
 };
 use crate::config::Config;
@@ -325,9 +324,7 @@ impl MaintenanceExecutor {
         );
         let run_tx = |sql: &str| -> Result<()> {
             let body = sql.trim().trim_end_matches(';');
-            if let Err(err) =
-                conn.execute_batch(&format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;"))
-            {
+            if let Err(err) = conn.execute_batch(&format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;")) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -348,7 +345,12 @@ impl MaintenanceExecutor {
 
         self.run_hist_downsample_5m_batched(conn, &catalog, &run_step);
 
-        if run_step("downsample_1h_from_5m", &downsample_1h_from_5m_sql(&catalog)).is_err() {
+        if run_step(
+            "downsample_1h_from_5m",
+            &downsample_1h_from_5m_sql(&catalog),
+        )
+        .is_err()
+        {
             let fb = downsample_1h_from_raw_sql(&catalog);
             if let Err(err2) = run_tx(&fb) {
                 warn!("downsample_1h_from_raw fallback failed: {}", err2);
@@ -399,7 +401,8 @@ impl MaintenanceExecutor {
         catalog: &str,
         run_step: &dyn Fn(&str, &str) -> Result<()>,
     ) {
-        let pending = hist_downsample_5m_pending_days_sql(catalog, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS);
+        let pending =
+            hist_downsample_5m_pending_days_sql(catalog, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS);
         let days = match self.query_pending_downsample_days(conn, &pending) {
             Ok(d) => d,
             Err(err) => {
@@ -1029,7 +1032,9 @@ fn is_ducklake_serialization_conflict(err: &duckdb::Error) -> bool {
 }
 
 fn is_ducklake_oom(err: &duckdb::Error) -> bool {
-    err.to_string().to_ascii_lowercase().contains("out of memory")
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("out of memory")
 }
 
 /// Inner attempts per merge wave. Paired with a second wave in

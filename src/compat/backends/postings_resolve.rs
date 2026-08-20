@@ -299,6 +299,7 @@ fn step_bucket_interval_sql(step_ms: Option<i64>) -> Option<String> {
 ///
 /// `grain` selects raw / 5m / 1h / hist (§9.1). Downsample empty tables yield empty
 /// results until maintenance builds them — planner still emits the correct FROM.
+#[allow(clippy::too_many_arguments)]
 pub fn samples_scan_sql(
     catalog: &str,
     series_ids: &[u64],
@@ -559,12 +560,7 @@ fn hist_row_select_sql(
             "sm.explicit_bounds",
         )
     } else {
-        (
-            "sm.count",
-            "sm.sum",
-            "NULL::UBIGINT[]",
-            "NULL::DOUBLE[]",
-        )
+        ("sm.count", "sm.sum", "NULL::UBIGINT[]", "NULL::DOUBLE[]")
     };
     if let Some(iv) = bucket_iv {
         if hist_arrays {
@@ -603,6 +599,7 @@ fn hist_row_select_sql(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hist_or_union_scan_sql(
     catalog: &str,
     ids: &str,
@@ -648,8 +645,7 @@ fn hist_or_union_scan_sql(
                 } else {
                     let mut parts = Vec::new();
                     let raw_start = start.max(cutoff);
-                    let raw_time =
-                        samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+                    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
                     parts.push(hist_row_select_sql(
                         catalog,
                         "metric_hist_samples",
@@ -698,8 +694,7 @@ fn hist_or_union_scan_sql(
                 } else {
                     let mut parts = Vec::new();
                     let raw_start = start.max(cutoff);
-                    let raw_time =
-                        samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+                    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
                     parts.push(hist_row_select_sql(
                         catalog,
                         "metric_hist_samples",
@@ -760,6 +755,7 @@ fn hist_or_union_scan_sql(
 }
 
 /// Build samples SQL using §9.1 grain selection.
+#[allow(clippy::too_many_arguments)]
 pub fn samples_scan_sql_for_window(
     catalog: &str,
     series_ids: &[u64],

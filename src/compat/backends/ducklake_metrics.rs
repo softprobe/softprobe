@@ -248,9 +248,9 @@ impl DuckLakeMetricsBackend {
     }
 
     fn hist_needs_bucket_arrays(matchers: &[LabelMatcher]) -> bool {
-        matchers.iter().any(|m| {
-            m.name == "__name__" && m.op == MatcherOp::Eq && m.value.ends_with("_bucket")
-        })
+        matchers
+            .iter()
+            .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq && m.value.ends_with("_bucket"))
     }
 
     async fn scan_rows(
@@ -550,6 +550,7 @@ impl DuckLakeMetricsBackend {
         Ok(ids)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fill_one_posting_cache_entry(
         &self,
         ctx: &TenantContext,
@@ -1533,6 +1534,7 @@ fn hist_emit_kind(matchers: &[LabelMatcher]) -> HistEmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_acc(
     acc: &mut HashMap<(u64, i16), SeriesAcc>,
     skip: &mut HashSet<(u64, i16)>,

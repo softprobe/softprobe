@@ -60,10 +60,7 @@ impl SampleGrain {
     pub fn time_column(self) -> &'static str {
         match self {
             Self::Raw | Self::Hist => "timestamp",
-            Self::FiveMin
-            | Self::OneHour
-            | Self::HistFiveMin
-            | Self::HistOneHour => "window_ts",
+            Self::FiveMin | Self::OneHour | Self::HistFiveMin | Self::HistOneHour => "window_ts",
         }
     }
 
@@ -272,12 +269,7 @@ mod tests {
                 SampleGrain::Raw,
                 SampleGrain::Hist,
             ),
-            (
-                6 * HOUR,
-                Some(15_000),
-                SampleGrain::Raw,
-                SampleGrain::Hist,
-            ),
+            (6 * HOUR, Some(15_000), SampleGrain::Raw, SampleGrain::Hist),
             (
                 RAW_RANGE_MS,
                 Some(15_000),
@@ -290,7 +282,12 @@ mod tests {
                 SampleGrain::FiveMin,
                 SampleGrain::HistFiveMin,
             ),
-            (DAY, Some(60_000), SampleGrain::FiveMin, SampleGrain::HistFiveMin),
+            (
+                DAY,
+                Some(60_000),
+                SampleGrain::FiveMin,
+                SampleGrain::HistFiveMin,
+            ),
             (
                 30 * DAY,
                 Some(HOUR),

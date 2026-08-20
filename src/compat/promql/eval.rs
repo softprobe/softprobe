@@ -150,13 +150,11 @@ fn eval_over_range(
     lookback_ms: i64,
 ) -> Result<RangeVal, CompatError> {
     match expr {
-        Expr::Paren(p) => eval_over_range(
-            prefetch, &p.expr, start_ms, end_ms, step_ms, lookback_ms,
-        ),
+        Expr::Paren(p) => {
+            eval_over_range(prefetch, &p.expr, start_ms, end_ms, step_ms, lookback_ms)
+        }
         Expr::Unary(u) => {
-            let inner = eval_over_range(
-                prefetch, &u.expr, start_ms, end_ms, step_ms, lookback_ms,
-            )?;
+            let inner = eval_over_range(prefetch, &u.expr, start_ms, end_ms, step_ms, lookback_ms)?;
             negate_range(inner)
         }
         Expr::NumberLiteral(n) => Ok(RangeVal::Scalar(n.val)),
@@ -166,7 +164,12 @@ fn eval_over_range(
             let off = offset_shift_ms(&vs.offset);
             let series = prefetch.series_for(&matchers)?;
             Ok(RangeVal::Matrix(matrix_from_grain_series(
-                series, start_ms, end_ms, step_ms, lookback_ms, off,
+                series,
+                start_ms,
+                end_ms,
+                step_ms,
+                lookback_ms,
+                off,
             )))
         }
         Expr::MatrixSelector(_) => Err(CompatError::unsupported(
@@ -174,18 +177,15 @@ fn eval_over_range(
         )),
         Expr::Call(c) => eval_call_over_range(prefetch, c, start_ms, end_ms, step_ms, lookback_ms),
         Expr::Aggregate(a) => {
-            let inner = eval_over_range(
-                prefetch, &a.expr, start_ms, end_ms, step_ms, lookback_ms,
-            )?;
+            let inner = eval_over_range(prefetch, &a.expr, start_ms, end_ms, step_ms, lookback_ms)?;
             let matrix = range_as_matrix(inner, start_ms, end_ms, step_ms);
             let op = a.op.id();
             if op == T_TOPK || op == T_BOTTOMK {
                 let param = a.param.as_ref().ok_or_else(|| {
                     CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
                 })?;
-                let k_val = eval_over_range(
-                    prefetch, param, start_ms, end_ms, step_ms, lookback_ms,
-                )?;
+                let k_val =
+                    eval_over_range(prefetch, param, start_ms, end_ms, step_ms, lookback_ms)?;
                 let k = match k_val {
                     RangeVal::Scalar(v) => expect_scalar_k(EvalResult::Scalar {
                         timestamp_ms: start_ms,
@@ -212,12 +212,8 @@ fn eval_over_range(
             }
         }
         Expr::Binary(b) => {
-            let lhs = eval_over_range(
-                prefetch, &b.lhs, start_ms, end_ms, step_ms, lookback_ms,
-            )?;
-            let rhs = eval_over_range(
-                prefetch, &b.rhs, start_ms, end_ms, step_ms, lookback_ms,
-            )?;
+            let lhs = eval_over_range(prefetch, &b.lhs, start_ms, end_ms, step_ms, lookback_ms)?;
+            let rhs = eval_over_range(prefetch, &b.rhs, start_ms, end_ms, step_ms, lookback_ms)?;
             let id = b.op.id();
             if id == T_LAND || id == T_LOR || id == T_LUNLESS {
                 eval_set_op_over_range(id, lhs, rhs, start_ms, end_ms, step_ms)
@@ -499,10 +495,7 @@ fn aggregate_topk_matrix(
 fn instant_values_at(series: &[MetricSeries], t: i64) -> Vec<InstantSample> {
     let mut out = Vec::new();
     for s in series {
-        if let Ok(idx) = s
-            .samples
-            .binary_search_by_key(&t, |sm| sm.timestamp_ms)
-        {
+        if let Ok(idx) = s.samples.binary_search_by_key(&t, |sm| sm.timestamp_ms) {
             let sm = &s.samples[idx];
             if sm.value.is_nan() {
                 continue;
@@ -527,16 +520,25 @@ fn eval_binary_over_range(
     step_ms: i64,
 ) -> Result<RangeVal, CompatError> {
     match (lhs, rhs) {
-        (RangeVal::Scalar(lv), RangeVal::Scalar(rv)) => match apply_scalar_op(op, lv, rv, return_bool)?
-        {
-            Some(v) => Ok(RangeVal::Scalar(v)),
-            None => Ok(RangeVal::Matrix(MatrixResult { series: vec![] })),
-        },
+        (RangeVal::Scalar(lv), RangeVal::Scalar(rv)) => {
+            match apply_scalar_op(op, lv, rv, return_bool)? {
+                Some(v) => Ok(RangeVal::Scalar(v)),
+                None => Ok(RangeVal::Matrix(MatrixResult { series: vec![] })),
+            }
+        }
         (RangeVal::Matrix(m), RangeVal::Scalar(scalar)) => Ok(RangeVal::Matrix(map_matrix_scalar(
-            op, m, scalar, true, return_bool,
+            op,
+            m,
+            scalar,
+            true,
+            return_bool,
         )?)),
         (RangeVal::Scalar(scalar), RangeVal::Matrix(m)) => Ok(RangeVal::Matrix(map_matrix_scalar(
-            op, m, scalar, false, return_bool,
+            op,
+            m,
+            scalar,
+            false,
+            return_bool,
         )?)),
         (RangeVal::Matrix(lv), RangeVal::Matrix(rv)) => {
             let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
