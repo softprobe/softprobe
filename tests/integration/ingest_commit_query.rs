@@ -808,22 +808,32 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
             let value = 100.0 + (i as f64 * 0.5) + (metric_idx as f64 * 10.0);
             expected_sum += value;
 
+            // Skinny layout: histograms land in metric_hist_samples (count/sum), not
+            // metric_samples.value. union_metrics exposes COALESCE(sum, 0) as value.
+            let metric_type = if metric_idx % 3 == 0 {
+                "gauge"
+            } else if metric_idx % 3 == 1 {
+                "sum"
+            } else {
+                "histogram"
+            };
+            let (count, sum) = if metric_type == "histogram" {
+                (Some(1u64), Some(value))
+            } else {
+                (None, None)
+            };
+
             metric_data_points.push(Metric {
                 metric_name: metric_name.clone(),
                 description: format!("Test metric {} description", metric_idx),
                 unit: if metric_idx % 2 == 0 { "ms" } else { "bytes" }.to_string(),
-                metric_type: if metric_idx % 3 == 0 {
-                    "gauge"
-                } else if metric_idx % 3 == 1 {
-                    "sum"
-                } else {
-                    "histogram"
-                }
-                .to_string(),
+                metric_type: metric_type.to_string(),
                 timestamp: now + chrono::Duration::milliseconds((metric_idx * 1000 + i) as i64),
                 value,
                 attributes,
                 resource_attributes,
+                count,
+                sum,
                 ..Default::default()
             });
         }
