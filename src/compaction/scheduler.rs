@@ -33,8 +33,7 @@ pub fn scheduler_wake_seconds(
 /// the full period, which previously skipped every other compact and let
 /// open-day Parquet climb to 100+ files between merges (Grafana >100ms).
 pub fn compaction_due(elapsed_secs: u64, compaction_interval_seconds: u64) -> bool {
-    compaction_interval_seconds > 0
-        && elapsed_secs + 1 >= compaction_interval_seconds
+    compaction_interval_seconds > 0 && elapsed_secs + 1 >= compaction_interval_seconds
 }
 
 pub async fn start_maintenance_scheduler(
@@ -127,7 +126,10 @@ mod tests {
         assert!(!compaction_due(0, 300));
         assert!(!compaction_due(60, 300));
         assert!(!compaction_due(298, 300));
-        assert!(compaction_due(299, 300), "1s early slack for interval jitter");
+        assert!(
+            compaction_due(299, 300),
+            "1s early slack for interval jitter"
+        );
         assert!(compaction_due(300, 300));
         assert!(compaction_due(301, 300));
     }

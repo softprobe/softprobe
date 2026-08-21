@@ -23,8 +23,8 @@ use axum::response::Response;
 use axum::Extension;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const PROTO: ProtocolScope = ProtocolScope::Prometheus;
