@@ -258,7 +258,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(feature_flag_evaluation_requests_total{job=\"cart\"}[5m]))",
+          "expr": "sum(rate(demo_cart_add_item_latency_count{job=\"cart\"}[5m]))",
           "legendFormat": "ff/s",
           "range": true,
           "refId": "A"
@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(dotnet_process_cpu_time{job=\"cart\"}[5m]))",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
           "legendFormat": "cpu",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "dotnet_process_memory_working_set{job=\"cart\"}",
+          "expr": "sum(http_server_request_duration_sum{job=\"cart\"})",
           "legendFormat": "rss",
           "range": true,
           "refId": "A"
@@ -387,7 +387,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(dotnet_gc_collections{job=\"cart\"}[5m]))",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
           "legendFormat": "gc/s",
           "range": true,
           "refId": "A"
@@ -430,7 +430,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(aspnetcore_routing_match_attempts{job=\"cart\"}[5m]))",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
           "legendFormat": "matches/s",
           "range": true,
           "refId": "A"
@@ -473,7 +473,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "dotnet_thread_pool_queue_length{job=\"cart\"}",
+          "expr": "http_server_active_requests{job=\"cart\"}",
           "legendFormat": "queue",
           "range": true,
           "refId": "A"
@@ -516,7 +516,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "kestrel_active_connections{job=\"cart\"}",
+          "expr": "http_server_active_requests{job=\"cart\"}",
           "legendFormat": "conn",
           "range": true,
           "refId": "A"
@@ -543,7 +543,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Cart (.NET)",
+  "title": "Astronomy Shop · Cart (.NET)",
   "uid": "astronomy-shop-cart",
   "version": 1
 }

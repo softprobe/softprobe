@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, avg by (container_name) (container_cpu_utilization))",
+          "expr": "topk(5, avg by (job) (rate(http_server_request_duration_count[5m])))",
           "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk CPU by container_name",
+      "title": "topk HTTP duration count rate by job",
       "type": "timeseries"
     },
     {

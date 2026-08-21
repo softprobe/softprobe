@@ -215,7 +215,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_utilization{job=\"payment\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"payment\"}[5m]))",
           "legendFormat": "util",
           "range": true,
           "refId": "A"
@@ -258,7 +258,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_delay_p99{job=\"payment\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"payment\"}[5m]))",
           "legendFormat": "p99",
           "range": true,
           "refId": "A"
@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "v8js_memory_heap_used{job=\"payment\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"payment\"})",
           "legendFormat": "heap",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(v8js_gc_duration_count{job=\"payment\"}[5m]))",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"payment\"}[5m]))",
           "legendFormat": "gc/s",
           "range": true,
           "refId": "A"
@@ -371,7 +371,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Payment (Node.js)",
+  "title": "Astronomy Shop · Payment (Node.js)",
   "uid": "astronomy-shop-payment",
   "version": 1
 }

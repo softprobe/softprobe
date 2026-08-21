@@ -473,13 +473,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(go_memory_used{job=\"load-generator\"})",
+          "expr": "sum(k6_data_received)",
           "legendFormat": "mem",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Loadgen Go memory used",
+      "title": "Loadgen data received",
       "type": "timeseries"
     }
   ],
@@ -500,7 +500,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Load generator (k6)",
+  "title": "Astronomy Shop · Load generator (k6)",
   "uid": "astronomy-shop-loadgen",
   "version": 1
 }

@@ -258,7 +258,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (jvm_memory_used{job=\"ad\"})",
+          "expr": "sum(http_server_request_duration_sum{job=\"ad\"})",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(jvm_gc_duration_count{job=\"ad\"}[5m]))",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"ad\"}[5m]))",
           "legendFormat": "gc/s",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "jvm_thread_count{job=\"ad\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"ad\"})",
           "legendFormat": "threads",
           "range": true,
           "refId": "A"
@@ -387,7 +387,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "jvm_cpu_recent_utilization{job=\"ad\"}",
+          "expr": "sum(rate(http_server_request_duration_sum{job=\"ad\"}[5m]))",
           "legendFormat": "cpu",
           "range": true,
           "refId": "A"
@@ -457,7 +457,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Ad (Java)",
+  "title": "Astronomy Shop · Ad (Java)",
   "uid": "astronomy-shop-ad",
   "version": 1
 }

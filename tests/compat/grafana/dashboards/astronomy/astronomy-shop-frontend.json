@@ -215,7 +215,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_utilization{job=\"frontend\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
           "legendFormat": "util",
           "range": true,
           "refId": "A"
@@ -258,7 +258,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_delay_p99{job=\"frontend\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
           "legendFormat": "p99",
           "range": true,
           "refId": "A"
@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_delay_p50{job=\"frontend\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
           "legendFormat": "p50",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nodejs_eventloop_delay_p90{job=\"frontend\"}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
           "legendFormat": "p90",
           "range": true,
           "refId": "A"
@@ -387,7 +387,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "v8js_memory_heap_used{job=\"frontend\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"frontend\"})",
           "legendFormat": "heap",
           "range": true,
           "refId": "A"
@@ -430,7 +430,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(v8js_gc_duration_count{job=\"frontend\"}[5m]))",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
           "legendFormat": "gc/s",
           "range": true,
           "refId": "A"
@@ -457,7 +457,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Frontend (Node.js)",
+  "title": "Astronomy Shop · Frontend (Node.js)",
   "uid": "astronomy-shop-frontend",
   "version": 1
 }

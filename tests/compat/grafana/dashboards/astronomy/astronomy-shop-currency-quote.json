@@ -172,7 +172,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(quotes{job=\"quote\"}[5m]))",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"quote\"}[5m]))",
           "legendFormat": "quotes/s",
           "range": true,
           "refId": "A"
@@ -215,7 +215,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "quotes{job=\"quote\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"quote\"})",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(otel_sdk_span_started{job=\"quote\"}[5m]))",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"quote\"}[5m]))",
           "legendFormat": "spans/s",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "otel_sdk_processor_span_queue_size{job=\"quote\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"quote\"})",
           "legendFormat": "queue",
           "range": true,
           "refId": "A"
@@ -371,7 +371,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Currency & Quote",
+  "title": "Astronomy Shop · Currency & Quote",
   "uid": "astronomy-shop-currency-quote",
   "version": 1
 }

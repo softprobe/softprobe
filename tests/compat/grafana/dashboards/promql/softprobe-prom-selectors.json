@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (container_cpu_utilization{job!=\"otel-collector\"})",
+          "expr": "sum by (job) (http_server_request_duration_count{job!=\"otel-collector\"})",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "not-equal job!=",
+      "title": "not-equal job!= (HTTP server)",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nginx_requests",
+          "expr": "demo_ad_served_total",
           "legendFormat": "nginx",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "instant vector (no range fn)",
+      "title": "instant vector demo_ad_served_total",
       "type": "timeseries"
     }
   ],
@@ -284,7 +284,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Selectors & matchers",
+  "title": "Softprobe · Selectors & matchers",
   "uid": "softprobe-prom-selectors",
   "version": 1
 }

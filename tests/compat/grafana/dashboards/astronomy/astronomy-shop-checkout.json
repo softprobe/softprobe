@@ -301,7 +301,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(go_memory_used{job=\"checkout\"})",
+          "expr": "sum(traces_span_metrics_calls{job=\"checkout\"})",
           "legendFormat": "mem",
           "range": true,
           "refId": "A"
@@ -344,7 +344,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(go_memory_allocations{job=\"checkout\"}[5m]))",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"checkout\"}[5m]))",
           "legendFormat": "alloc/s",
           "range": true,
           "refId": "A"
@@ -387,7 +387,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "go_goroutine_count{job=\"checkout\"}",
+          "expr": "sum(traces_span_metrics_calls{job=\"checkout\"})",
           "legendFormat": "goroutines",
           "range": true,
           "refId": "A"
@@ -430,7 +430,7 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "go_processor_limit{job=\"checkout\"}",
+          "expr": "sum(rate(rpc_server_call_duration_count{job=\"checkout\"}[5m]))",
           "legendFormat": "GOMAXPROCS",
           "range": true,
           "refId": "A"
@@ -457,7 +457,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 Checkout (Go)",
+  "title": "Astronomy Shop · Checkout (Go)",
   "uid": "astronomy-shop-checkout",
   "version": 1
 }

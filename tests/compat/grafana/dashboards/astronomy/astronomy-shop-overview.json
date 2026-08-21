@@ -430,13 +430,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(quotes[5m]))",
+          "expr": "sum(rate(demo_recommendation_requests[5m]))",
           "legendFormat": "quotes/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Business: quotes/s",
+      "title": "Business: recommendations/s",
       "type": "timeseries"
     },
     {
@@ -602,13 +602,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(8, avg by (container_name) (container_cpu_utilization))",
+          "expr": "topk(8, avg by (job) (rate(http_server_request_duration_count[5m])))",
           "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Top containers by CPU",
+      "title": "Top jobs by HTTP request rate",
       "type": "timeseries"
     },
     {
@@ -645,13 +645,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(8, avg by (container_name) (container_memory_percent))",
+          "expr": "topk(8, avg by (job) (rate(http_server_request_duration_sum[5m])))",
           "legendFormat": "{{container_name}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Top containers by memory %",
+      "title": "Top jobs by HTTP duration sum rate",
       "type": "timeseries"
     }
   ],
@@ -672,7 +672,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Astronomy Shop \u00b7 GOLD overview",
+  "title": "Astronomy Shop · GOLD overview",
   "uid": "astronomy-shop-overview",
   "version": 1
 }

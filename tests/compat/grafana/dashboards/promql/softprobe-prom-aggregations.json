@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "min by (job) (container_cpu_utilization)",
+          "expr": "min by (job) (rate(http_server_request_duration_count[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "min by (job) CPU",
+      "title": "min by (job) HTTP duration count rate",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "max by (job) (container_memory_percent)",
+          "expr": "max by (job) (rate(http_server_request_duration_sum[5m]))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "max by (job) memory %",
+      "title": "max by (job) HTTP duration sum rate",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(3, sum by (job) (container_cpu_utilization))",
+          "expr": "topk(3, sum by (job) (rate(http_server_request_duration_count[5m])))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk(3, CPU)",
+      "title": "topk(3, HTTP duration count rate)",
       "type": "timeseries"
     },
     {
@@ -301,13 +301,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "bottomk(3, sum by (job) (container_cpu_utilization))",
+          "expr": "bottomk(3, sum by (job) (rate(demo_ad_served_total[5m])))",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "bottomk(3, CPU)",
+      "title": "bottomk(3, ads served rate)",
       "type": "timeseries"
     },
     {
@@ -370,7 +370,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Aggregations",
+  "title": "Softprobe · Aggregations",
   "uid": "softprobe-prom-aggregations",
   "version": 1
 }
