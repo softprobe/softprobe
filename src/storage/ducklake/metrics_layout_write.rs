@@ -302,7 +302,38 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
         }
     }
 
+    // Dual-write collapses high-card OTEL hists (k6 URL×method×…) onto slim
+    // (job, instance, le) series_ids — without coalescing, one scrape writes
+    // hundreds of raw points into the same series and Grafana `sum by (le)`
+    // blows scan_cap / 100ms on 30m–3h. Keep last value per series per 15s
+    // (Grafana floor), Greptime-style pre-aggregate at ingest.
+    coalesce_samples_to_step(&mut out.samples, 15_000);
+
     out
+}
+
+/// Retain the latest sample per `(series_id, floor(ts / step_ms))`.
+fn coalesce_samples_to_step(samples: &mut Vec<SampleRow>, step_ms: i64) {
+    if samples.len() <= 1 || step_ms <= 0 {
+        return;
+    }
+    samples.sort_by_key(|s| (s.series_id, s.timestamp));
+    let mut out: Vec<SampleRow> = Vec::with_capacity(samples.len());
+    let mut cur_id: Option<u64> = None;
+    let mut cur_bucket: Option<i64> = None;
+    for s in samples.drain(..) {
+        let bucket = s.timestamp.timestamp_millis().div_euclid(step_ms);
+        if cur_id == Some(s.series_id) && cur_bucket == Some(bucket) {
+            if let Some(last) = out.last_mut() {
+                *last = s;
+            }
+        } else {
+            cur_id = Some(s.series_id);
+            cur_bucket = Some(bucket);
+            out.push(s);
+        }
+    }
+    *samples = out;
 }
 
 fn sql_str(s: &str) -> String {
@@ -1073,5 +1104,51 @@ mod tests {
         .unwrap();
         // Re-ensure must stay idempotent with data present.
         ensure_metrics_layout_core_tables(&conn, &catalog).unwrap();
+    }
+
+    #[test]
+    fn coalesce_samples_keeps_last_per_series_per_15s() {
+        let ts0 = Utc.with_ymd_and_hms(2026, 8, 21, 12, 0, 0).unwrap();
+        let ts1 = ts0 + chrono::Duration::milliseconds(3_000);
+        let ts2 = ts0 + chrono::Duration::milliseconds(20_000);
+        let day = ts0.date_naive();
+        let mut samples = vec![
+            SampleRow {
+                series_id: 1,
+                timestamp: ts0,
+                value: 1.0,
+                record_date: day,
+            },
+            SampleRow {
+                series_id: 1,
+                timestamp: ts1,
+                value: 2.0,
+                record_date: day,
+            },
+            SampleRow {
+                series_id: 1,
+                timestamp: ts2,
+                value: 3.0,
+                record_date: day,
+            },
+            SampleRow {
+                series_id: 2,
+                timestamp: ts0,
+                value: 9.0,
+                record_date: day,
+            },
+        ];
+        coalesce_samples_to_step(&mut samples, 15_000);
+        assert_eq!(
+            samples.len(),
+            3,
+            "two buckets for series 1 + one for series 2"
+        );
+        assert_eq!(samples[0].series_id, 1);
+        assert_eq!(samples[0].value, 2.0, "last in first 15s bucket");
+        assert_eq!(samples[1].series_id, 1);
+        assert_eq!(samples[1].value, 3.0);
+        assert_eq!(samples[2].series_id, 2);
+        assert_eq!(samples[2].value, 9.0);
     }
 }

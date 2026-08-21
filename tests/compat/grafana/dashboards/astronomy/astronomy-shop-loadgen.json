@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (le) (rate(k6_http_req_duration_bucket[5m]))",
+          "expr": "sum by (job) (rate(k6_http_req_duration_count[5m]))",
           "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP req duration buckets",
+      "title": "HTTP req duration count/s by job",
       "type": "timeseries"
     },
     {

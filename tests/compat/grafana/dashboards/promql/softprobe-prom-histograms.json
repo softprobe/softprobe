@@ -344,13 +344,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (le) (rate(k6_http_req_duration_bucket[5m]))",
+          "expr": "sum by (le) (rate(demo_cart_add_item_latency_bucket[5m]))",
           "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6_http_req_duration _bucket rate",
+      "title": "cart latency _bucket rate (sum by le)",
       "type": "timeseries"
     }
   ],
@@ -370,7 +370,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Classic histogram series",
+  "title": "Softprobe · Classic histogram series",
   "uid": "softprobe-prom-histograms",
   "version": 1
 }

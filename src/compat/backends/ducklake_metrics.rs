@@ -793,22 +793,30 @@ impl DuckLakeMetricsBackend {
 
     /// Histogram fidelity columns are heavy; only pull them when the selector
     /// can expand classic `_bucket` / `_sum` / `_count` series.
+    /// When to UNION native `metric_hist_samples` (array expand) onto the scan.
+    ///
+    /// Classic Prom `_bucket` / `_sum` / `_count` names are dual-written as skinny
+    /// gauges in `metric_samples`. Expanding native hist rows for those names
+    /// reintroduces high-card OTEL label soup, skips Grafana step-bucketing, and
+    /// blows `scan_cap` (k6 `sum by (le) (rate(..._bucket[5m]))` on 30m–3h).
+    /// Greptime-style: serve the pre-projected gauge series; keep hist arrays for
+    /// SQL/fidelity when the selector is not a classic Prom suffix.
     fn wants_histogram_fidelity(matchers: &[LabelMatcher]) -> bool {
+        let mut saw_name_eq = false;
         for m in matchers {
-            if m.name != "__name__" {
+            if m.name != "__name__" || m.op != MatcherOp::Eq {
                 continue;
             }
+            saw_name_eq = true;
             if m.value.ends_with("_bucket")
                 || m.value.ends_with("_sum")
                 || m.value.ends_with("_count")
             {
-                return true;
+                return false;
             }
         }
         // No __name__ equality → may be scanning mixed types; keep fidelity.
-        !matchers
-            .iter()
-            .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
+        !saw_name_eq
     }
 
     /// Legacy SQL matcher pushdown (unit-tested; Prom path uses postings resolve).
@@ -2159,12 +2167,20 @@ mod tests {
     }
 
     #[test]
-    fn wants_histogram_fidelity_only_for_classic_names() {
-        assert!(DuckLakeMetricsBackend::wants_histogram_fidelity(&[
-            LabelMatcher {
+    fn wants_histogram_fidelity_skips_classic_prom_suffixes() {
+        assert!(
+            !DuckLakeMetricsBackend::wants_histogram_fidelity(&[LabelMatcher {
                 name: "__name__".into(),
                 op: MatcherOp::Eq,
                 value: "http_duration_bucket".into(),
+            }]),
+            "classic _bucket must use dual-write gauges, not hist expand"
+        );
+        assert!(!DuckLakeMetricsBackend::wants_histogram_fidelity(&[
+            LabelMatcher {
+                name: "__name__".into(),
+                op: MatcherOp::Eq,
+                value: "k6_http_req_duration_count".into(),
             }
         ]));
         assert!(!DuckLakeMetricsBackend::wants_histogram_fidelity(&[
