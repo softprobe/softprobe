@@ -1,7 +1,9 @@
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::tenant::TenantContext;
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use regex::Regex;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
@@ -184,15 +186,35 @@ pub fn labels_match_any(
     Ok(false)
 }
 
-fn regex_full_match(pattern: &str, value: &str) -> Result<bool, CompatError> {
+/// Compiled PromQL matcher regexes. `labels_match` runs once per sample row on
+/// the expand path; recompiling `load.*` for every point was ~0.5ms × N and blew
+/// the 100ms Grafana SLO for `job=~` selectors.
+fn matcher_regex(pattern: &str) -> Result<Regex, CompatError> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock().expect("matcher regex cache");
+        if let Some(re) = guard.get(pattern) {
+            return Ok(re.clone());
+        }
+    }
     let anchored = format!("^(?:{pattern})$");
-    let re = regex::Regex::new(&anchored).map_err(|e| {
+    let re = Regex::new(&anchored).map_err(|e| {
         CompatError::new(
             CompatErrorCode::BadRequest,
             format!("invalid matcher regex '{pattern}': {e}"),
         )
     })?;
-    Ok(re.is_match(value))
+    let mut guard = cache.lock().expect("matcher regex cache");
+    if guard.len() >= 1024 {
+        guard.clear();
+    }
+    guard.insert(pattern.to_string(), re.clone());
+    Ok(re)
+}
+
+fn regex_full_match(pattern: &str, value: &str) -> Result<bool, CompatError> {
+    Ok(matcher_regex(pattern)?.is_match(value))
 }
 
 #[cfg(test)]

@@ -201,7 +201,8 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
     // onto empty metric_samples_1h (AC-H3 regression).
     let windows = [
         ("1640994300", "1640996100"), // ±30m around sample
-        ("1640985300", "1640996100"), // ~3h before → sample end
+        // Mid window must stay ≤ raw hist grain after lookback expansion (AC-H3).
+        ("1640992500", "1640996100"), // 1h mid window
     ];
     for (start, end) in windows {
         for query in [

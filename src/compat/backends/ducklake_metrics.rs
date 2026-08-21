@@ -236,15 +236,13 @@ impl DuckLakeMetricsBackend {
         ctx.limits.max_series.saturating_mul(10).max(10_000)
     }
 
-    /// Classic hist/summary Prom name (`_bucket` / `_sum` / `_count`) for grain.
-    fn is_classic_hist_selector(matchers: &[LabelMatcher]) -> bool {
-        matchers.iter().any(|m| {
-            m.name == "__name__"
-                && m.op == MatcherOp::Eq
-                && (m.value.ends_with("_bucket")
-                    || m.value.ends_with("_sum")
-                    || m.value.ends_with("_count"))
-        })
+    /// Classic hist/summary Prom name (`_bucket` / `_sum` / `_count`).
+    ///
+    /// Ingest dual-writes these as skinny gauges in `metric_samples`, so the Prom
+    /// path must **not** force `metric_hist_samples` array expand (that path is
+    /// ~3× over the 100ms Grafana SLO). Native hist rows remain for SQL/fidelity.
+    fn is_classic_hist_selector(_matchers: &[LabelMatcher]) -> bool {
+        false
     }
 
     fn hist_needs_bucket_arrays(matchers: &[LabelMatcher]) -> bool {
@@ -882,18 +880,18 @@ impl DuckLakeMetricsBackend {
                 emit_summary_row(row, base, emit, matchers, &mut acc, &mut skip)?;
                 continue;
             }
-            if labels_match(base, matchers)? {
-                push_acc(
-                    &mut acc,
-                    &mut skip,
-                    matchers,
-                    row.series_id,
-                    GAUGE_PART,
-                    base,
-                    row.timestamp_ms,
-                    row.value,
-                )?;
-            }
+            // `push_acc` matches once per series_id (skip set); do not re-run
+            // regex matchers on every sample row here.
+            push_acc(
+                &mut acc,
+                &mut skip,
+                matchers,
+                row.series_id,
+                GAUGE_PART,
+                base,
+                row.timestamp_ms,
+                row.value,
+            )?;
         }
 
         if acc.len() > ctx.limits.max_series {

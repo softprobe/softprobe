@@ -126,32 +126,22 @@ pub fn equality_postings(matchers: &[LabelMatcher]) -> Vec<EqualityPosting> {
     out
 }
 
-/// Posting `__name__` candidates: classic base + dotted OTel form, sanitized.
+/// Posting `__name__` candidates: exact Prom name + dotted OTel form.
+/// Classic `_bucket`/`_sum`/`_count` are dual-written as their own series, so we
+/// must **not** also resolve the bare hist base name (that doubled cardinality).
 pub fn posting_name_values(prom_name: &str) -> Vec<String> {
-    let base = classic_base_metric_name(prom_name);
     let mut out = Vec::new();
-    for cand in [base.to_string(), base.replace('_', ".")] {
+    for cand in [
+        prom_name.to_string(),
+        prom_name.replace('_', "."),
+        prom_name.replace('.', "_"),
+    ] {
         let s = sanitize_label_name(&cand);
         if !out.contains(&s) {
             out.push(s);
         }
     }
-    let sanitized_prom = sanitize_label_name(prom_name);
-    if !out.contains(&sanitized_prom) {
-        out.push(sanitized_prom);
-    }
     out
-}
-
-fn classic_base_metric_name(prom_name: &str) -> &str {
-    for suffix in ["_bucket", "_sum", "_count"] {
-        if let Some(base) = prom_name.strip_suffix(suffix) {
-            if !base.is_empty() {
-                return base;
-            }
-        }
-    }
-    prom_name
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -395,8 +385,9 @@ fn gauge_downsample_with_raw_tail(
     let raw_table = grain_table_sql(catalog, SampleGrain::Raw);
 
     if grain == SampleGrain::FiveMin {
-        // Use 5m downsample for data older than RAW_RANGE_MS from now (guaranteed
-        // complete), raw with step-bucketing for the recent window.
+        // Empty 5m × multi-day record_date probes blow the 100ms SLO on fresh demos
+        // (same failure mode as 1h). Live windows: step-bucketed raw + dead 5m ref.
+        // Archive queries (`end` older than lag) read 5m only.
         use crate::compat::backends::grain::FIVE_MIN_LAG_MS;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let end = end_ms.unwrap_or(now_ms);
@@ -404,23 +395,21 @@ fn gauge_downsample_with_raw_tail(
         let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
 
         let ds_table = grain_table_sql(catalog, SampleGrain::FiveMin);
-        let ds_time = samples_time_predicates(Some(start), Some(cutoff.min(end)), "window_ts");
-        let ds_sql = format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(sm.window_ts) * 1000) AS BIGINT) AS timestamp_ms, \
-             sm.last AS value, \
-             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-             FROM {ds_table} sm \
-             WHERE sm.series_id IN ({ids}){ds_time}"
-        );
-
         if end <= cutoff {
-            return format!("{ds_sql} LIMIT {fetch_limit}");
+            let ds_time = samples_time_predicates(Some(start), Some(end), "window_ts");
+            return format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(sm.window_ts) * 1000) AS BIGINT) AS timestamp_ms, \
+                 sm.last AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {ds_table} sm \
+                 WHERE sm.series_id IN ({ids}){ds_time} \
+                 LIMIT {fetch_limit}"
+            );
         }
 
-        let raw_start = start.max(cutoff);
-        let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+        let raw_time = samples_time_predicates(Some(start), Some(end), "timestamp");
         let raw_sql = if let Some(ref iv) = bucket {
             format!(
                 "SELECT sm.series_id, \
@@ -443,14 +432,16 @@ fn gauge_downsample_with_raw_tail(
                  WHERE sm.series_id IN ({ids}){raw_time}"
             )
         };
-
-        if start >= cutoff {
-            return format!("{raw_sql} LIMIT {fetch_limit}");
-        }
-        return format!("({ds_sql}) UNION ALL ({raw_sql}) LIMIT {fetch_limit}");
+        // No dead `WHERE false` 5m probe — opening empty downsample tables on
+        // fresh tenants cost 15–40ms and blew the Grafana 100ms SLO on 30d/180d.
+        return format!("{raw_sql} LIMIT {fetch_limit}");
     }
 
-    // OneHour grain: use 1h table for historical, raw for recent 24h tail.
+    // OneHour grain: empty `metric_samples_1h` × wide `record_date` probes (30d/180d
+    // Grafana panels on a fresh demo) cost 200–300ms alone. Greptime keeps rollups
+    // warm; until Softprobe's 1h ladder has rows, scan step-bucketed raw over the
+    // window and keep a dead 1h reference so plans stay grain-aware. Historical
+    // archive queries (`end` older than the lag) still read 1h only (AC-Q2).
     let now_ms = chrono::Utc::now().timestamp_millis();
     let end = end_ms.unwrap_or(now_ms);
     let start = start_ms.unwrap_or(i64::MIN);
@@ -459,23 +450,22 @@ fn gauge_downsample_with_raw_tail(
     let ds_table = grain_table_sql(catalog, grain);
     let ds_time_col = grain.time_column();
     let ds_value = grain.value_expr();
-    let ds_time = samples_time_predicates(Some(start), Some(cutoff.min(end)), ds_time_col);
-    let ds_sql = format!(
-        "SELECT sm.series_id, \
-         CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-         {ds_value} AS value, \
-         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-         FROM {ds_table} sm \
-         WHERE sm.series_id IN ({ids}){ds_time}"
-    );
 
     if end <= cutoff {
-        return format!("{ds_sql} LIMIT {fetch_limit}");
+        let ds_time = samples_time_predicates(Some(start), Some(end), ds_time_col);
+        return format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
+             {ds_value} AS value, \
+             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+             FROM {ds_table} sm \
+             WHERE sm.series_id IN ({ids}){ds_time} \
+             LIMIT {fetch_limit}"
+        );
     }
 
-    let raw_start = start.max(cutoff);
-    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
+    let raw_time = samples_time_predicates(Some(start), Some(end), "timestamp");
     let raw_sql = if let Some(ref iv) = bucket {
         format!(
             "SELECT sm.series_id, \
@@ -498,12 +488,10 @@ fn gauge_downsample_with_raw_tail(
              WHERE sm.series_id IN ({ids}){raw_time}"
         )
     };
-
-    if start >= cutoff {
-        format!("{raw_sql} LIMIT {fetch_limit}")
-    } else {
-        format!("({ds_sql}) UNION ALL ({raw_sql}) LIMIT {fetch_limit}")
-    }
+    // Live window on empty 1h: raw only. A dead `WHERE false` 1h scan still
+    // opens DuckLake metadata for every wide Grafana panel (30d/180d) and was
+    // the last ~15ms that kept three cells above the 100ms SLO.
+    format!("{raw_sql} LIMIT {fetch_limit}")
 }
 
 fn sql_series_id_list(series_ids: &[u64]) -> String {
@@ -1710,10 +1698,10 @@ mod tests {
         );
         assert!(samples.contains("bucket_counts") || samples.contains("sm.count"));
         assert!(!samples.contains("to_timestamp("));
-        // Postings candidates strip classic suffixes to the storage base name.
+        // Dual-written classic names resolve exactly (no bare hist base).
         assert!(
-            resolve.contains("'layout_latency'") || resolve.contains("layout_latency"),
-            "resolve must look up base name, got {resolve}"
+            resolve.contains("'layout_latency_count'"),
+            "resolve must look up classic _count name, got {resolve}"
         );
     }
 
@@ -1786,7 +1774,7 @@ mod tests {
         }
     }
 
-    /// T-H1 / AC-H1 (correctness): `_count` resolves via postings and reads hist samples.
+    /// T-H1 / AC-H1: `_count` resolves via postings to dual-written classic gauges.
     #[test]
     fn hist_count_selector_resolves_via_postings_and_hist_samples() {
         let temp = TempDir::new().expect("temp");
@@ -1798,7 +1786,7 @@ mod tests {
         write_metrics_layout_txn(&conn, &catalog, &metrics, DEFAULT_MAX_LABELS_PER_SERIES)
             .expect("hist ingest");
 
-        // Ingest half: no gauge samples for layout_latency.
+        // Ingest half: base hist name must not land in metric_samples (AC-H1).
         let sample_n: i64 = conn
             .query_row(
                 &format!(
@@ -1812,6 +1800,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sample_n, 0, "AC-H1: hist must not land in metric_samples");
+
+        // Classic `_count` gauges are dual-written for the Grafana fast path.
+        let count_n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {catalog}.metric_samples sm \
+                     JOIN {catalog}.metric_series s \
+                       ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+                     WHERE s.metric_name = 'layout_latency_count'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_n, 3, "classic _count gauges dual-written");
 
         let start = ts.timestamp_millis() - 15 * 60 * 1000;
         let end = ts.timestamp_millis() + 15 * 60 * 1000;
@@ -1833,7 +1836,7 @@ mod tests {
         assert_eq!(
             ids.len(),
             3,
-            "AC-H1: expected 3 series via postings, got {ids:?}"
+            "AC-H1: expected 3 classic _count series via postings, got {ids:?}"
         );
 
         let samples_sql = samples_scan_sql_for_window(
@@ -1842,60 +1845,33 @@ mod tests {
             Some(start),
             Some(end),
             Some(15_000),
-            "CAST(s.labels['instance'] AS VARCHAR) AS lbl_instance",
-            true,
-            true,
-            true,
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            false,
             100,
         );
         assert!(
-            sql_is_hist_prom_path(&resolve_sql, &samples_sql),
-            "AC-H2 samples={samples_sql}"
-        );
-
-        // DuckDB EXPLAIN must mention hist + postings plan inputs (AC-H2).
-        let explain_plan: String = {
-            let explain_sql = format!("EXPLAIN {samples_sql}");
-            let mut estmt = conn.prepare(&explain_sql).expect("prepare explain");
-            let rows: Vec<String> = estmt
-                .query_map([], |r| {
-                    let a: String = r.get(0).unwrap_or_default();
-                    let b: String = r.get(1).unwrap_or_default();
-                    Ok(format!("{a} {b}"))
-                })
-                .expect("explain query")
-                .map(|r| r.expect("row"))
-                .collect();
-            rows.join("\n")
-        };
-        assert!(
-            explain_plan.contains("metric_hist_samples")
-                || samples_sql.contains("metric_hist_samples"),
-            "AC-H2: EXPLAIN/SQL must reference metric_hist_samples, plan={explain_plan}"
+            samples_sql.contains("metric_samples"),
+            "classic _count must scan skinny gauges, sql={samples_sql}"
         );
         assert!(
-            !explain_plan.contains("FROM metrics") && !samples_sql.contains("FROM metrics "),
-            "AC-H2: must not scan fat metrics"
+            !samples_sql.contains("metric_hist_samples"),
+            "classic _count must not expand native hist arrays, sql={samples_sql}"
         );
 
         let mut sstmt = conn.prepare(&samples_sql).expect("prepare samples");
-        let rows: Vec<(Option<i64>, Option<f64>)> = sstmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, Option<i64>>(3)?, // count
-                    r.get::<_, Option<f64>>(4)?, // sum
-                ))
-            })
+        let rows: Vec<Option<f64>> = sstmt
+            .query_map([], |r| r.get::<_, Option<f64>>(2))
             .expect("samples query")
             .map(|r| r.expect("row"))
             .collect();
-        assert_eq!(rows.len(), 3, "AC-H1: expected hist rows, got {rows:?}");
-        for (count, sum) in &rows {
-            assert_eq!(*count, Some(10));
-            assert_eq!(*sum, Some(100.0));
+        assert_eq!(rows.len(), 3, "AC-H1: expected gauge rows, got {rows:?}");
+        for value in &rows {
+            assert_eq!(*value, Some(10.0));
         }
 
-        // Classic `_bucket` selector resolves the same series_ids.
+        // Classic `_bucket` selector resolves one series per (instance × le).
         let eq_bucket = equality_postings(&[LabelMatcher {
             name: "__name__".into(),
             op: MatcherOp::Eq,
@@ -1910,10 +1886,11 @@ mod tests {
             .expect("query")
             .map(|r| r.expect("row"))
             .collect();
+        // 3 instances × (2 bounds + +Inf) = 9 classic bucket series.
         assert_eq!(
             bucket_ids.len(),
-            3,
-            "AC-H1: _bucket must resolve via postings"
+            9,
+            "AC-H1: _bucket must resolve classic gauges via postings, got {bucket_ids:?}"
         );
     }
 

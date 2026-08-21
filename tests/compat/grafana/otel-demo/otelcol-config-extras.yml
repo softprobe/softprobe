@@ -10,11 +10,17 @@
 # Keep GOLD-relevant metric sources only; leave traces/logs on debug (+ span_metrics).
 
 processors:
+  # Keep only GOLD / Astronomy Shop board families. Full firehose (20–40k points)
+  # pegs DuckLake writers and blows the 100ms Grafana PromQL SLO.
+  filter/softprobe_gold:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'not IsMatch(name, "(?i)^(k6_|demo_|http\\.|http_|rpc\\.|rpc_|traces\\.span\\.metrics|traces_span_metrics|calls$|duration$|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
   batch/softprobe:
-    # Timeout must dominate send_batch_size or commit rate stays ~1s (snapshot storm).
-    timeout: 15s
-    send_batch_size: 8192
-    send_batch_max_size: 8192
+    timeout: 20s
+    send_batch_size: 10000
+    send_batch_max_size: 10000
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512
@@ -25,7 +31,7 @@ exporters:
     endpoint: http://host.docker.internal:8090
     tls:
       insecure: true
-    timeout: 60s
+    timeout: 30s
     compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
@@ -36,7 +42,7 @@ exporters:
       max_elapsed_time: 120s
     sending_queue:
       enabled: true
-      num_consumers: 2
+      num_consumers: 1
       queue_size: 64
 
 service:
@@ -52,11 +58,14 @@ service:
         ]
       exporters: [debug, span_metrics]
     metrics:
-      # GOLD / Astronomy Shop Prom boards: app OTLP + ad Prometheus bridge + spanmetrics.
-      # Drop docker_stats / host_metrics / redis / postgres / nginx / httpcheck — those
-      # dominate volume and starve Softprobe ingest (flat lookback lines in Grafana).
       receivers: [otlp, prometheus/ad, span_metrics]
-      processors: [resourcedetection, memory_limiter/softprobe, batch/softprobe]
+      processors:
+        [
+          resourcedetection,
+          memory_limiter/softprobe,
+          filter/softprobe_gold,
+          batch/softprobe,
+        ]
       exporters: [debug, otlphttp/softprobe]
     logs:
       receivers: [otlp]

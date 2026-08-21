@@ -11,21 +11,21 @@
 
 use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 
-/// Raw grain window: end − start ≤ 12h.
-/// Kept generous to avoid gaps from downsample watermark lag; step-bucketing
-/// on raw keeps scan cost manageable for typical dashboard panels.
-pub const RAW_RANGE_MS: i64 = 12 * 60 * 60 * 1000;
-/// 5m grain window: end − start ≤ 48h (and > 2h) for gauges.
-pub const FIVE_MIN_RANGE_MS: i64 = 48 * 60 * 60 * 1000;
-/// Hist 5m grain: 12h < range ≤ 48h (beyond 48h uses hist_1h).
-pub const HIST_FIVE_MIN_RANGE_MS: i64 = 48 * 60 * 60 * 1000;
+/// Raw grain window: end − start ≤ 24h.
+/// Fresh tenants/demos have empty 5m ladders for the first lag window; scanning
+/// raw with Grafana step-bucketing stays ≤100ms and avoids empty-UNION overhead.
+/// Longer windows still cut over to 5m/1h (Greptime-style).
+pub const RAW_RANGE_MS: i64 = 24 * 60 * 60 * 1000;
+/// 5m grain window: end − start ≤ 7d (and > 24h) for gauges.
+pub const FIVE_MIN_RANGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Hist 5m grain: 24h < range ≤ 7d (beyond uses hist_1h).
+pub const HIST_FIVE_MIN_RANGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Grafana step ≥ 1h → prefer `metric_samples_1h` even for shorter ranges.
 pub const ONE_HOUR_STEP_MS: i64 = 60 * 60 * 1000;
 /// Lag window (ms) for 5m downsample — raw data newer than this may not be in 5m.
-/// Matches RAW_RANGE_MS so the raw tail always covers the gap.
-pub const FIVE_MIN_LAG_MS: i64 = 12 * 60 * 60 * 1000;
+pub const FIVE_MIN_LAG_MS: i64 = 5 * 60 * 1000;
 /// Lag window (ms) for 1h downsample — raw data newer than this is not yet in 1h.
-pub const ONE_HOUR_LAG_MS: i64 = 24 * 60 * 60 * 1000;
+pub const ONE_HOUR_LAG_MS: i64 = 60 * 60 * 1000;
 
 /// Physical sample table chosen after postings resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,7 +163,7 @@ mod tests {
 
     /// Boundary: exactly RAW_RANGE_MS → raw; just over → 5m.
     #[test]
-    fn planner_raw_boundary_at_2h() {
+    fn planner_raw_boundary_at_24h() {
         let end = 1_700_000_000_000i64;
         assert_eq!(
             select_sample_grain(Some(end - RAW_RANGE_MS), Some(end), None, false),
@@ -175,13 +175,16 @@ mod tests {
         );
     }
 
-    /// ≤ 48h (and > 2h) → 5m.
+    /// 24h stays on raw; multi-day → 5m.
     #[test]
-    fn planner_picks_5m_for_24h() {
+    fn planner_picks_raw_for_24h_and_5m_for_2d() {
         let end = 1_700_000_000_000i64;
-        let start = end - DAY;
         assert_eq!(
-            select_sample_grain(Some(start), Some(end), Some(60_000), false),
+            select_sample_grain(Some(end - DAY), Some(end), Some(60_000), false),
+            SampleGrain::Raw
+        );
+        assert_eq!(
+            select_sample_grain(Some(end - 2 * DAY), Some(end), Some(60_000), false),
             SampleGrain::FiveMin
         );
     }
@@ -240,9 +243,9 @@ mod tests {
             (30 * 60 * 1000, SampleGrain::Hist),
             (RAW_RANGE_MS, SampleGrain::Hist),
             (RAW_RANGE_MS + 1, SampleGrain::HistFiveMin),
-            (DAY, SampleGrain::HistFiveMin),
             (2 * DAY, SampleGrain::HistFiveMin),
-            (2 * DAY + 1, SampleGrain::HistOneHour),
+            (HIST_FIVE_MIN_RANGE_MS, SampleGrain::HistFiveMin),
+            (HIST_FIVE_MIN_RANGE_MS + 1, SampleGrain::HistOneHour),
             (30 * DAY, SampleGrain::HistOneHour),
             (90 * DAY, SampleGrain::HistOneHour),
         ];
@@ -283,7 +286,7 @@ mod tests {
                 SampleGrain::HistFiveMin,
             ),
             (
-                DAY,
+                2 * DAY,
                 Some(60_000),
                 SampleGrain::FiveMin,
                 SampleGrain::HistFiveMin,

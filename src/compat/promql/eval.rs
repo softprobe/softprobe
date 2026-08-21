@@ -7,6 +7,7 @@ use crate::compat::backends::metrics::{
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::tenant::TenantContext;
 use async_trait::async_trait;
+use futures::future::try_join_all;
 use promql_parser::parser::token::{
     T_ADD, T_AVG, T_BOTTOMK, T_COUNT, T_DIV, T_EQLC, T_GTE, T_GTR, T_LAND, T_LOR, T_LSS, T_LTE,
     T_LUNLESS, T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM, T_TOPK,
@@ -741,8 +742,14 @@ impl PrefetchBackend {
 
         let mut needs = Vec::new();
         collect_selector_needs(expr, &mut needs)?;
-        // Check if any selector has an explicit range window (e.g. [5m]) before expansion.
-        let has_explicit_range = needs.iter().any(|n| n.is_range);
+        // Disable step-bucketing only when Grafana step is coarser than a
+        // range-vector window (would destroy points rate/irate need inside [range]).
+        // rate(x[5m]) at step=15s still benefits from 15s bucketing.
+        let min_range_window = needs
+            .iter()
+            .filter(|n| n.is_range)
+            .map(|n| n.window_ms)
+            .min();
         // Expand plain-selector lookback to cover Grafana step on 1h grain (AC-Q2).
         let step_lookback = range_lookback_ms(step_ms);
         for need in &mut needs {
@@ -767,30 +774,35 @@ impl PrefetchBackend {
             }
         }
 
-        // If any selector has an explicit range window (i.e. [5m]),
-        // disable step-bucketing so range-vector functions get raw samples.
-        let effective_step = if has_explicit_range {
-            None
-        } else {
-            Some(step_ms)
+        // Bucket at Grafana step when it is fine enough for range-vector fns.
+        // When step > [range] (e.g. 180d panels), bucket at range/4 so rate/irate
+        // still see multiple points per window — but never disable bucketing
+        // (that caused multi-day raw hist scans and blew the 100ms SLO).
+        let effective_step = match min_range_window {
+            Some(w) if step_ms > w => Some((w / 4).max(15_000)),
+            _ => Some(step_ms),
         };
 
-        let mut entries = Vec::with_capacity(merged.len());
-        for (matchers, fetch_start, fetch_end) in merged {
-            let series = backend
-                .query_range(
-                    ctx,
-                    MetricsQueryRequest {
-                        start_ms: Some(fetch_start),
-                        end_ms: Some(fetch_end),
-                        matchers: matchers.clone(),
-                        step_ms: effective_step,
-                        collapse_metric: None,
-                    },
-                )
-                .await?;
-            entries.push((matchers, series));
-        }
+        // Independent selectors (binary ops, joins) fetch in parallel so
+        // `a / b` wall time ≈ max(a,b) instead of a+b (100ms Grafana SLO).
+        let entries = try_join_all(merged.into_iter().map(
+            |(matchers, fetch_start, fetch_end)| async move {
+                let series = backend
+                    .query_range(
+                        ctx,
+                        MetricsQueryRequest {
+                            start_ms: Some(fetch_start),
+                            end_ms: Some(fetch_end),
+                            matchers: matchers.clone(),
+                            step_ms: effective_step,
+                            collapse_metric: None,
+                        },
+                    )
+                    .await?;
+                Ok::<_, CompatError>((matchers, series))
+            },
+        ))
+        .await?;
 
         Ok(Self { entries })
     }

@@ -203,16 +203,26 @@ impl MaintenanceExecutor {
                     );
                 }
 
+                // Metrics-layout demos have no fat traces/logs/scores tables.
+                // Only compact when the table exists so we do not ERROR/spam every
+                // minute and contend with PromQL (Grafana 100ms SLO).
                 for table in ["traces", "logs", "scores"] {
-                    let status = match self.ducklake_compact_table(&conn, &ducklake, table) {
-                        Ok(s) => s,
-                        Err(err) => {
-                            warn!(
-                                "Maintenance compaction failed for {}.{} ({}): {}",
-                                ducklake.metadata_schema, table, label, err
-                            );
-                            CompactionStatus::Skipped
+                    let status = if self
+                        .ducklake_table_exists(&conn, &ducklake, table)
+                        .unwrap_or(false)
+                    {
+                        match self.ducklake_compact_table(&conn, &ducklake, table) {
+                            Ok(s) => s,
+                            Err(err) => {
+                                warn!(
+                                    "Maintenance compaction failed for {}.{} ({}): {}",
+                                    ducklake.metadata_schema, table, label, err
+                                );
+                                CompactionStatus::Skipped
+                            }
                         }
+                    } else {
+                        CompactionStatus::Skipped
                     };
                     compact_status.insert(table.to_string(), status);
                 }
@@ -827,6 +837,17 @@ impl MaintenanceExecutor {
         );
         conn.execute_batch(&attach_sql)?;
         Ok(())
+    }
+
+    fn ducklake_table_exists(
+        &self,
+        conn: &Connection,
+        ducklake: &crate::config::DuckLakeConfig,
+        table: &str,
+    ) -> Result<bool> {
+        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
+        let sql = format!("SELECT 1 FROM {qualified} LIMIT 0;");
+        Ok(conn.execute_batch(&sql).is_ok())
     }
 
     fn ducklake_compact_table(

@@ -15,10 +15,10 @@ pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
 /// Query workers: one DuckDB thread each. Default `threads = nproc` on every
 /// connection made Grafana refresh occupy hundreds of OS threads and 15s timeouts.
 pub(crate) const QUERY_DUCKDB_THREADS: i64 = 1;
-pub(crate) const QUERY_DUCKDB_MEMORY: &str = "256MB";
-/// Writers / TWCS: a little parallelism without starving PromQL workers.
+pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
+/// Writers / TWCS: classic Prom dual-write + live OTEL need more than 512MB.
 pub(crate) const WRITER_DUCKDB_THREADS: i64 = 2;
-pub(crate) const WRITER_DUCKDB_MEMORY: &str = "512MB";
+pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
 /// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs (TWCS skip
 /// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
 pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;

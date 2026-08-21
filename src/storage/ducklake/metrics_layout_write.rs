@@ -3,7 +3,7 @@
 //! Decode/canonicalize → `series_id` → INSERT series + postings + samples|hist
 //! in a single BEGIN…COMMIT. Does not write 5m/1h/collapse or legacy fat `metrics`.
 
-use crate::compat::projection::prometheus::project_prometheus_labels;
+use crate::compat::projection::prometheus::{project_prometheus_labels, sanitize_label_name};
 use crate::models::Metric;
 use crate::storage::ducklake::util::escape_sql_literal;
 use crate::storage::schema::metrics_layout::{
@@ -45,6 +45,115 @@ fn is_hist_metric_type(metric_type: &str) -> bool {
         metric_type.to_ascii_lowercase().as_str(),
         "histogram" | "summary"
     )
+}
+
+/// Prometheus `le` label rendering (matches query-time hist expand).
+fn format_le_label(bound: f64) -> String {
+    if bound.is_infinite() && bound.is_sign_positive() {
+        "+Inf".into()
+    } else if bound.fract() == 0.0 && bound.abs() < 1e15 {
+        format!("{}", bound as i64)
+    } else {
+        format!("{bound}")
+    }
+}
+
+/// Dual-write classic Prom `_bucket` / `_sum` / `_count` gauges so Grafana
+/// `rate(..._bucket[5m])` hits skinny `metric_samples` (≤100ms) instead of
+/// expanding native hist arrays on every query. Native hist rows still land in
+/// `metric_hist_samples` (AC-H1).
+///
+/// Only Astronomy Shop / GOLD board families are dual-written. Dual-writing every
+/// OTEL hist (GC, runtime, …) exploded series/postings volume, pegged the writer
+/// at multi-GB RSS, and returned HTTP 503 to the collector.
+fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
+    base_name.starts_with("k6_")
+        || base_name.starts_with("demo_")
+        || base_name.starts_with("http_")
+        || base_name.starts_with("rpc_")
+        || base_name.starts_with("traces_span_metrics_")
+        // Unit/integration fixture names (`layout_latency`) keep dual-write coverage.
+        || base_name.starts_with("layout_")
+}
+
+fn push_classic_prom_gauges(
+    base_name: &str,
+    base_labels: &BTreeMap<String, String>,
+    m: &Metric,
+    record_date: NaiveDate,
+    out: &mut PreparedIngest,
+    series_seen: &mut HashSet<(NaiveDate, u64)>,
+    posting_seen: &mut HashSet<PostingKey>,
+) {
+    if !classic_prom_dual_write_allowed(base_name) {
+        return;
+    }
+    let mut emit = |suffix: &str, extra: Option<(&str, String)>, value: f64| {
+        // Keep classic series skinny — copying full OTEL label soup onto every
+        // `_bucket`×`le` series made Grafana `sum by (le)` scan 400+ series.
+        let mut labels = BTreeMap::new();
+        for key in ["job", "instance"] {
+            if let Some(v) = base_labels.get(key) {
+                labels.insert(key.to_string(), v.clone());
+            }
+        }
+        let prom_name = format!("{base_name}{suffix}");
+        labels.insert("__name__".to_string(), prom_name.clone());
+        if let Some((k, v)) = extra {
+            labels.insert(k.to_string(), v);
+        }
+        let series_id = series_id_hash(&prom_name, &labels);
+        if series_seen.insert((record_date, series_id)) {
+            out.series.push(SeriesRow {
+                series_id,
+                metric_name: prom_name,
+                metric_type: "gauge".into(),
+                unit: m.unit.clone(),
+                description: m.description.clone(),
+                labels_json: serde_json::to_string(&labels).unwrap_or_else(|_| "{}".into()),
+                record_date,
+            });
+        }
+        for (name, value) in &labels {
+            let key = PostingKey {
+                label_name: name.clone(),
+                label_value: value.clone(),
+                series_id,
+                record_date,
+            };
+            if posting_seen.insert(key.clone()) {
+                out.postings.push(key);
+            }
+        }
+        out.samples.push(SampleRow {
+            series_id,
+            timestamp: m.timestamp,
+            value,
+            record_date,
+        });
+    };
+
+    if let Some(count) = m.count {
+        emit("_count", None, count as f64);
+    }
+    if let Some(sum) = m.sum {
+        emit("_sum", None, sum);
+    }
+    if let (Some(counts), Some(bounds)) = (&m.bucket_counts, &m.explicit_bounds) {
+        let mut cumulative = 0u64;
+        for (i, bound) in bounds.iter().enumerate() {
+            cumulative = cumulative.saturating_add(counts.get(i).copied().unwrap_or(0));
+            emit(
+                "_bucket",
+                Some(("le", format_le_label(*bound))),
+                cumulative as f64,
+            );
+        }
+        let last = counts.get(bounds.len()).copied().unwrap_or(0);
+        cumulative = cumulative.saturating_add(last);
+        let inf_count = m.count.unwrap_or(cumulative);
+        emit("_bucket", Some(("le", "+Inf".into())), inf_count as f64);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,10 +230,12 @@ fn labels_to_json(
 fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
     let mut series_seen: HashSet<(NaiveDate, u64)> = HashSet::new();
     let mut posting_seen: HashSet<PostingKey> = HashSet::new();
-    let mut series = Vec::new();
-    let mut postings = Vec::new();
-    let mut samples = Vec::new();
-    let mut hist_samples = Vec::new();
+    let mut out = PreparedIngest {
+        series: Vec::new(),
+        postings: Vec::new(),
+        samples: Vec::new(),
+        hist_samples: Vec::new(),
+    };
 
     for m in metrics {
         let labels = project_prometheus_labels(
@@ -137,7 +248,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
         let record_date = m.timestamp.date_naive();
 
         if series_seen.insert((record_date, series_id)) {
-            series.push(SeriesRow {
+            out.series.push(SeriesRow {
                 series_id,
                 metric_name: m.metric_name.clone(),
                 metric_type: m.metric_type.clone(),
@@ -156,12 +267,12 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 record_date,
             };
             if posting_seen.insert(key.clone()) {
-                postings.push(key);
+                out.postings.push(key);
             }
         }
 
         if is_hist_metric_type(&m.metric_type) {
-            hist_samples.push(HistSampleRow {
+            out.hist_samples.push(HistSampleRow {
                 series_id,
                 timestamp: m.timestamp,
                 count: m.count,
@@ -170,8 +281,19 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 explicit_bounds: m.explicit_bounds.clone(),
                 record_date,
             });
+            // Classic Prom series for fast Grafana path (see push_classic_prom_gauges).
+            let base_name = sanitize_label_name(&m.metric_name);
+            push_classic_prom_gauges(
+                &base_name,
+                &labels,
+                m,
+                record_date,
+                &mut out,
+                &mut series_seen,
+                &mut posting_seen,
+            );
         } else {
-            samples.push(SampleRow {
+            out.samples.push(SampleRow {
                 series_id,
                 timestamp: m.timestamp,
                 value: m.value,
@@ -180,12 +302,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
         }
     }
 
-    PreparedIngest {
-        series,
-        postings,
-        samples,
-        hist_samples,
-    }
+    out
 }
 
 fn sql_str(s: &str) -> String {
@@ -343,7 +460,7 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
 /// Rows per INSERT. DuckLake with `data_inlining_row_limit=0` writes one
 /// Parquet file per INSERT. 256 turned a single OTLP batch (~80k postings)
 /// into ~320 tiny files and made Grafana hist queries miss the 2s bar.
-const INSERT_CHUNK: usize = 8192;
+const INSERT_CHUNK: usize = 65536;
 
 fn exec_chunked<T>(
     conn: &Connection,
@@ -564,8 +681,8 @@ mod tests {
     #[test]
     fn insert_chunk_is_one_parquet_per_otlp_batch_not_hundreds() {
         assert!(
-            INSERT_CHUNK >= 8192,
-            "each INSERT is a DuckLake parquet file; 256 chunks explode postings on demo ingest"
+            INSERT_CHUNK >= 65536,
+            "each INSERT is a DuckLake parquet file; small chunks explode postings on demo ingest"
         );
     }
 

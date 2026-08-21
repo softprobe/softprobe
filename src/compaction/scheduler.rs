@@ -28,8 +28,13 @@ pub fn scheduler_wake_seconds(
 }
 
 /// TWCS/ladder is due on its own interval, not on every metadata tick (AC-Q9).
+///
+/// Allow 1s early: `tokio::time::interval` often fires a tick slightly before
+/// the full period, which previously skipped every other compact and let
+/// open-day Parquet climb to 100+ files between merges (Grafana >100ms).
 pub fn compaction_due(elapsed_secs: u64, compaction_interval_seconds: u64) -> bool {
-    compaction_interval_seconds > 0 && elapsed_secs >= compaction_interval_seconds
+    compaction_interval_seconds > 0
+        && elapsed_secs + 1 >= compaction_interval_seconds
 }
 
 pub async fn start_maintenance_scheduler(
@@ -52,14 +57,22 @@ pub async fn start_maintenance_scheduler(
     let executor = MaintenanceExecutor::new(config, dropdown_catalog, scope_registry).await?;
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_seconds));
+        // Long TWCS merges (multi-second) must not Burst-catch-up into a
+        // compaction=false metadata-only pass that wastes the next slot —
+        // that pattern left open-day Parquet at 100+ files for Grafana.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // First tick should compact; then wait `compact_interval`.
         let mut last_compact = Instant::now()
             .checked_sub(Duration::from_secs(compact_interval))
             .unwrap_or_else(Instant::now);
         loop {
             ticker.tick().await;
+            // Compact whenever the TWCS interval has elapsed (2s early slack for
+            // timer jitter). Do not require a perfect second boundary — missed
+            // Burst/Delay ticks previously left open-day files at 100+.
             let run_compaction = compaction_enabled
-                && compaction_due(last_compact.elapsed().as_secs(), compact_interval);
+                && last_compact.elapsed() + Duration::from_secs(2)
+                    >= Duration::from_secs(compact_interval);
             match executor.run_pass(run_compaction).await {
                 Ok(summary) => {
                     if run_compaction {
@@ -113,7 +126,8 @@ mod tests {
     fn twcs_does_not_run_every_metadata_tick() {
         assert!(!compaction_due(0, 300));
         assert!(!compaction_due(60, 300));
-        assert!(!compaction_due(299, 300));
+        assert!(!compaction_due(298, 300));
+        assert!(compaction_due(299, 300), "1s early slack for interval jitter");
         assert!(compaction_due(300, 300));
         assert!(compaction_due(301, 300));
     }

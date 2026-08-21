@@ -1,16 +1,18 @@
 //! Incremental 5m / 1h downsample ladder (§7.2 steps 3–4).
 //!
-//! - `metric_samples_5m` from raw older than 2h (closed hours only)
-//! - `metric_samples_1h` from 5m (fallback raw) older than 24h
+//! - `metric_samples_5m` from raw older than 5m (closed 5m buckets)
+//! - `metric_samples_1h` from 5m (fallback raw) older than 1h
 //! - Watermark = `max(window_ts)` already in the destination (AC-M2)
 //! - Raw rows are never deleted (AC-S2)
 
 use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 
-/// Raw samples must be older than this before entering 5m (closed hours).
-pub const DOWNSAMPLE_5M_LAG: &str = "INTERVAL '2 hours'";
+/// Raw samples must be older than this before entering 5m (closed buckets).
+/// Kept short so Grafana long windows hit filled ladders within minutes of
+/// demo ingest (empty-UNION was blowing the 100ms SLO).
+pub const DOWNSAMPLE_5M_LAG: &str = "INTERVAL '5 minutes'";
 /// 5m / raw must be older than this before entering 1h.
-pub const DOWNSAMPLE_1H_LAG: &str = "INTERVAL '24 hours'";
+pub const DOWNSAMPLE_1H_LAG: &str = "INTERVAL '1 hour'";
 /// Max closed days processed per maintenance pass (AC-Q9 / G2).
 pub const HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS: usize = 4;
 
@@ -38,7 +40,7 @@ pub fn downsample_5m_sql(catalog_alias: &str) -> String {
            max(timestamp) AS last_ts\n\
          FROM {src}\n\
          WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) < date_trunc('hour', now())\n\
+           AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
            AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
          GROUP BY series_id, time_bucket(INTERVAL '5 minutes', timestamp);"
     )
@@ -114,7 +116,7 @@ pub fn hist_downsample_5m_pending_days_sql(catalog_alias: &str, limit: usize) ->
     format!(
         "SELECT DISTINCT CAST(record_date AS VARCHAR) AS record_date FROM {src}\n\
          WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) < date_trunc('hour', now())\n\
+           AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
            AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
          ORDER BY record_date\n\
          LIMIT {limit};"
@@ -137,7 +139,7 @@ pub fn hist_downsample_5m_for_day_sql(
          WITH src AS (\n\
            SELECT * FROM {src}\n\
            WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-             AND time_bucket(INTERVAL '5 minutes', timestamp) < date_trunc('hour', now())\n\
+             AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
              AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
              {day_filter}\n\
          ),\n\
@@ -308,24 +310,23 @@ mod tests {
         let sql = downsample_5m_sql("softprobe");
         assert!(sql.starts_with("INSERT INTO softprobe.metric_samples_5m"));
         assert!(sql.contains("FROM softprobe.metric_samples"));
-        assert!(sql.contains("INTERVAL '2 hours'"));
-        assert!(sql.contains("date_trunc('hour', now())"));
+        assert!(sql.contains("INTERVAL '5 minutes'"));
         assert!(sql.contains("max(window_ts)"));
         assert!(!sql.to_lowercase().contains("delete"));
         assert!(!sql.to_lowercase().contains("truncate"));
     }
 
     #[test]
-    fn downsample_1h_sql_uses_24h_lag_and_watermark() {
+    fn downsample_1h_sql_uses_1h_lag_and_watermark() {
         let from_5m = downsample_1h_from_5m_sql("softprobe");
         assert!(from_5m.contains("metric_samples_5m"));
-        assert!(from_5m.contains("INTERVAL '24 hours'"));
+        assert!(from_5m.contains("INTERVAL '1 hour'"));
         assert!(from_5m.contains("INSERT INTO softprobe.metric_samples_1h"));
         assert!(from_5m.contains("max(window_ts)"));
 
         let from_raw = downsample_1h_from_raw_sql("softprobe");
         assert!(from_raw.contains("FROM softprobe.metric_samples\n"));
-        assert!(from_raw.contains("INTERVAL '24 hours'"));
+        assert!(from_raw.contains("INTERVAL '1 hour'"));
     }
 
     /// AC-M2 shape: watermark predicate prevents full rebuild.
@@ -364,10 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn hist_downsample_1h_sql_uses_24h_lag() {
+    fn hist_downsample_1h_sql_uses_1h_lag() {
         let from_5m = hist_downsample_1h_from_5m_sql("softprobe");
         assert!(from_5m.contains("metric_hist_samples_5m"));
-        assert!(from_5m.contains("INTERVAL '24 hours'"));
+        assert!(from_5m.contains("INTERVAL '1 hour'"));
         let from_raw = hist_downsample_1h_from_raw_sql("softprobe");
         assert!(from_raw.contains("metric_hist_samples\n"));
     }

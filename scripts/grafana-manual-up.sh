@@ -311,16 +311,18 @@ object_store:
   endpoint: null
 
 query:
-  max_connections: 10
+  max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo ingest + Grafana: keep maintenance on so snapshots expire and TWCS merges.
+# Demo: maintenance ON so TWCS keeps open-day Parquet near the file cap (PromQL
+# SLO). Compact every 15s (collector batches every 60s) so live file count stays
+# near TWCS_OPEN_DAY_FILE_CAP=2. Dual-write is allowlisted to avoid HTTP 503.
 maintenance:
   enabled: true
   target_file_size_bytes: 67108864
-  interval_seconds: 300
+  interval_seconds: 15
   metadata_enabled: true
-  metadata_interval_seconds: 60
+  metadata_interval_seconds: 30
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 60
@@ -332,7 +334,7 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 0
-  writer_pool_size: 4
+  writer_pool_size: 1
 
 dropdown_catalog:
   enabled: false

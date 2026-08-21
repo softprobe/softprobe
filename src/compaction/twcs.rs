@@ -13,7 +13,9 @@ use chrono::NaiveDate;
 /// Closed-day merge if more than this many live files (complete compact → 1 file).
 pub const TWCS_TRIGGER_FILE_NUM: usize = 2;
 /// After a maintenance pass, today's open-day live sample files must be ≤ this (AC-F4).
-pub const TWCS_OPEN_DAY_FILE_CAP: usize = 20;
+/// Keep this tiny: Grafana PromQL pays ~3–5ms per open Parquet file on the query
+/// path (Greptime-style “few SSTs”); 40–60 open-day files alone blow the 100ms SLO.
+pub const TWCS_OPEN_DAY_FILE_CAP: usize = 2;
 
 /// Live Parquet stats for one `record_date` partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +45,10 @@ pub fn day_kind(record_date: NaiveDate, today: NaiveDate) -> DayKind {
 /// Whether TWCS should merge this partition on this pass (§7.1).
 ///
 /// Closed days keep merging until the AC-F8 file bar (1 file, or 2 if that
-/// day's bytes exceed 64 MiB). Open day is a soft cap only (AC-F4).
+/// day's bytes exceed 64 MiB). Open day is a soft file-count cap only (AC-F4) —
+/// do **not** treat "many tiny files under 8MiB" as open-day size pressure:
+/// that caused endless merge waves on the Grafana demo (CPU pegged, OTLP
+/// ingest starved, PromQL queue times blew the 100ms SLO).
 pub fn should_merge_partition(
     stats: &PartitionFileStats,
     kind: DayKind,
@@ -53,7 +58,7 @@ pub fn should_merge_partition(
         DayKind::Closed => {
             !closed_day_meets_file_bar(stats.live_file_count, stats.total_bytes) || size_pressure
         }
-        DayKind::Open => stats.live_file_count > TWCS_OPEN_DAY_FILE_CAP || size_pressure,
+        DayKind::Open => stats.live_file_count > TWCS_OPEN_DAY_FILE_CAP,
     }
 }
 
@@ -321,12 +326,12 @@ mod tests {
         let today = d(2026, 8, 15);
         let under = PartitionFileStats {
             record_date: today,
-            live_file_count: 20,
+            live_file_count: TWCS_OPEN_DAY_FILE_CAP,
             total_bytes: 1_000,
         };
         let over = PartitionFileStats {
             record_date: today,
-            live_file_count: 21,
+            live_file_count: TWCS_OPEN_DAY_FILE_CAP + 1,
             total_bytes: 1_000,
         };
         assert_eq!(day_kind(today, today), DayKind::Open);
