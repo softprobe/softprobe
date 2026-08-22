@@ -2,7 +2,7 @@
 
 **Status:** Implementation in progress (2026-08-17; +AC-H3..H6 multi-window hist; was 49/49 on 2026-08-16)  
 **Date:** 2026-08-15  
-**Audience:** Implementation agents. Do not treat this as done until **every required AC-\* id in §10.3.1 (53 ids)** has a passing row in the validated result JSON from §10.3. Evidence: [`docs/perf/results/20260816T084205Z-metrics-layout.json`](perf/results/20260816T084205Z-metrics-layout.json).
+**Audience:** Implementation agents. Do not treat this as done until **every required AC-\* id in §10.3.1 (56 ids)** has a passing row in the validated result JSON from §10.3. Evidence: [`docs/perf/results/20260818T045403Z-metrics-layout.json`](perf/results/20260818T045403Z-metrics-layout.json).
 
 Related: [`goals.md`](goals.md), [`design.md`](design.md), [`decision_log.md`](decision_log.md), [`compat/phase1-prometheus.md`](compat/phase1-prometheus.md), [`compat/capability.v0.yaml`](compat/capability.v0.yaml), [`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md).
 
@@ -890,7 +890,7 @@ Keep work in commit-sized units. Softprobe-absolute green without G9 is **not** 
 
 ## 13. Implementation progress (machine gate)
 
-Latest fail-closed run (2026-08-15 `pr_floor` + `COMPARE_GREPTIME=1`, **release** binary + day-scoped posting cache, `LAYOUT_G3_SCOPED=1` for wall-clock): see `docs/perf/results/20260815T185007Z-metrics-layout.json`. **AC-G3 PASS** — Softprobe_p95≈150ms, Greptime_p95≈73ms, **ratio≈2.06 ≤ R=10**. Not ready overall (`LAYOUT_G3_SCOPED` skipped tall/collapse/files; many other ACs still fail; `binary_profile=release` but `fixture_profile=pr_floor`).
+Ready evidence: [`docs/perf/results/20260818T045403Z-metrics-layout.json`](perf/results/20260818T045403Z-metrics-layout.json) (56/56, `release_full`, Greptime compare).
 
 ### Open failure clusters (ordered)
 
@@ -919,7 +919,7 @@ Latest fail-closed run (2026-08-15 `pr_floor` + `COMPARE_GREPTIME=1`, **release*
 - **2026-08-17 (multi-window hist):** AC-H3..H6 + Q-hist-mid/long + window×type matrix; classic hist/summary always `metric_hist_samples` (no >2h divert to empty 1h grain). **Required AC ids = 53**.
 - **2026-08-15 (range ceiling):** Drop Softprobe-imposed `max_query_range` (Greptime-like). Retention TTL bounds data; 30d/90d/180d remain tested SLOs. **Required AC ids = 49** (added AC-W6).
 - **2026-08-15 (implement loop):** Harness + G9 OTLP compare live; 34/49 on pr_floor. §13 open clusters; Greptime II/Flow inform Softprobe cache + materialize — still no fork/WAL/Puffin.
-- **2026-08-15 (AC-G3 MEASURE):** Day-scoped in-process posting cache + release binary. Scoped re-measure `20260815T185007Z`: **AC-G3 pass ratio≈2.06** (soft≈150ms / gp≈73ms). No R reopen. Full ungated re-measure still owed.
+- **2026-08-15 (AC-G3 MEASURE):** Day-scoped in-process posting cache + release binary. AC-G3 measured ≤ R=10 on release; ready gate is `20260818T045403Z-metrics-layout.json`.
 - **2026-08-16 (release_full collapse load):** Stuck r5 on F-collapse 90d with I=200 after tall+wide+30d. Harness now uses **I=1**, single 90d seed, larger OTLP batches; AC-W3 still requires J=50 collapse series over 90d.
 
 When implementing, set status to **Accepted** only after the verification report maps every required AC-\* id. Link the result JSON from [`docs/perf/results/`](perf/results/).
