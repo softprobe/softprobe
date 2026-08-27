@@ -1,0 +1,57 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Representative Tempo trace-search dashboard with a concrete tenant-A trace-to-log navigation target.",
+  "editable": false,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "softprobe-tempo-a"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "softprobe-tempo-a"
+          },
+          "query": "{ resource.service.name = \"api\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "API trace search",
+      "type": "table"
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 39,
+  "tags": [
+    "softprobe",
+    "tempo",
+    "deterministic"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Softprobe Tempo smoke",
+  "uid": "softprobe-tempo-smoke",
+  "version": 1
+}

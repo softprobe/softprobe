@@ -5,6 +5,7 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
+use crate::api::sql_support::{sql_string_literal, timestamp_ns_literal_from_str};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::storage::schema::variant::{
@@ -235,8 +236,8 @@ pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, St
     if let Some(time_range) = &request.time_range {
         conditions.push(format!(
             "timestamp >= {} AND timestamp <= {}",
-            timestamp_literal(&time_range.from),
-            timestamp_literal(&time_range.to)
+            timestamp_ns_literal_from_str(&time_range.from),
+            timestamp_ns_literal_from_str(&time_range.to)
         ));
     }
     if let Some(filter) = &request.filter {
@@ -299,11 +300,25 @@ pub fn compile_details_sql(
         _ => return Err("target.kind must be session or trace".to_string()),
     };
 
+    let span_time_filter = time_range.map(|range| {
+        format!(
+            "timestamp >= {} AND timestamp <= {}",
+            timestamp_ns_literal_from_str(&range.from),
+            timestamp_ns_literal_from_str(&range.to)
+        )
+    });
     let time_filter = time_range.map(|range| {
         format!(
             "timestamp >= {} AND timestamp <= {}",
             timestamp_literal(&range.from),
             timestamp_literal(&range.to)
+        )
+    });
+    let log_time_filter = time_range.map(|range| {
+        format!(
+            "timestamp >= {} AND timestamp <= {}",
+            timestamp_ns_literal_from_str(&range.from),
+            timestamp_ns_literal_from_str(&range.to)
         )
     });
 
@@ -315,7 +330,7 @@ pub fn compile_details_sql(
                 variant_as_json("attributes")
             ),
             &span_filter,
-            time_filter.as_deref(),
+            span_time_filter.as_deref(),
             limit,
         ),
         logs: detail_sql(
@@ -326,7 +341,7 @@ pub fn compile_details_sql(
                 variant_as_json("resource_attributes")
             ),
             &log_filter,
-            time_filter.as_deref(),
+            log_time_filter.as_deref(),
             limit,
         ),
         metrics: detail_sql(
@@ -574,32 +589,21 @@ fn compile_filter(filter: &TelemetryFilter) -> Result<String, String> {
         ));
     }
     let sql = spec.sql;
+    let literal = |value: &Value| -> Result<String, String> {
+        if spec.value_type == "timestamp" {
+            Ok(timestamp_ns_literal_from_str(&string_value(value)?))
+        } else {
+            Ok(scalar_literal(value))
+        }
+    };
     match filter.op.as_str() {
         "exists" => Ok(format!("{sql} IS NOT NULL")),
-        "eq" => Ok(format!(
-            "{sql} = {}",
-            scalar_literal(required_value(filter)?)
-        )),
-        "neq" => Ok(format!(
-            "{sql} <> {}",
-            scalar_literal(required_value(filter)?)
-        )),
-        "lt" => Ok(format!(
-            "{sql} < {}",
-            scalar_literal(required_value(filter)?)
-        )),
-        "lte" => Ok(format!(
-            "{sql} <= {}",
-            scalar_literal(required_value(filter)?)
-        )),
-        "gt" => Ok(format!(
-            "{sql} > {}",
-            scalar_literal(required_value(filter)?)
-        )),
-        "gte" => Ok(format!(
-            "{sql} >= {}",
-            scalar_literal(required_value(filter)?)
-        )),
+        "eq" => Ok(format!("{sql} = {}", literal(required_value(filter)?)?)),
+        "neq" => Ok(format!("{sql} <> {}", literal(required_value(filter)?)?)),
+        "lt" => Ok(format!("{sql} < {}", literal(required_value(filter)?)?)),
+        "lte" => Ok(format!("{sql} <= {}", literal(required_value(filter)?)?)),
+        "gt" => Ok(format!("{sql} > {}", literal(required_value(filter)?)?)),
+        "gte" => Ok(format!("{sql} >= {}", literal(required_value(filter)?)?)),
         "prefix" => Ok(format!(
             "{sql} LIKE {}",
             sql_string_literal(&format!("{}%", string_value(required_value(filter)?)?))
@@ -617,8 +621,8 @@ fn compile_filter(filter: &TelemetryFilter) -> Result<String, String> {
             }
             let literals = values
                 .iter()
-                .map(scalar_literal)
-                .collect::<Vec<_>>()
+                .map(literal)
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let op = if filter.op == "in" { "IN" } else { "NOT IN" };
             Ok(format!("{sql} {op} ({literals})"))
@@ -652,10 +656,6 @@ fn scalar_literal(value: &Value) -> String {
         Value::String(s) => sql_string_literal(s),
         _ => sql_string_literal(&value.to_string()),
     }
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn timestamp_literal(value: &str) -> String {
@@ -848,4 +848,58 @@ fn storage_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": { "code": "storage_error", "message": err.to_string() } })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_log_details_use_timestamp_ns_without_changing_other_tables() {
+        let target = TelemetryDetailsTarget {
+            kind: "session".into(),
+            id: "session-1".into(),
+        };
+        let range = TelemetryTimeRange {
+            from: "2023-11-14T22:13:20.000000001Z".into(),
+            to: "2023-11-14T22:13:20.000000002Z".into(),
+        };
+        let compiled = compile_details_sql(&target, Some(&range), 100).unwrap();
+
+        assert!(compiled
+            .spans
+            .contains("timestamp >= '2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
+        assert!(compiled
+            .logs
+            .contains("timestamp >= '2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
+        assert!(!compiled.logs.contains("TIMESTAMPTZ"));
+        assert!(compiled.spans.contains("::TIMESTAMP_NS"));
+        assert!(compiled.metrics.contains("::TIMESTAMPTZ"));
+    }
+
+    #[test]
+    fn timestamp_filter_uses_timestamp_ns_for_trace_search() {
+        let request = TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: Some(TelemetryTimeRange {
+                from: "2023-11-14T22:13:20.000000001Z".into(),
+                to: "2023-11-14T22:13:20.000000002Z".into(),
+            }),
+            filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+                field: "timestamp".into(),
+                op: "gte".into(),
+                value: Some(json!("2023-11-14T22:13:20.000000003Z")),
+            })),
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(10),
+            cursor: None,
+        };
+
+        let sql = compile_search_sql(&request).unwrap();
+
+        assert!(sql.contains("timestamp >= '2023-11-14T22:13:20.000000003Z'::TIMESTAMP_NS"));
+        assert!(!sql.contains("'2023-11-14T22:13:20.000000003Z'::TIMESTAMPTZ"));
+    }
 }

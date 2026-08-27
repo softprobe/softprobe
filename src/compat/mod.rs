@@ -9,11 +9,13 @@ pub mod backends;
 pub mod capability;
 pub mod envelopes;
 pub mod errors;
+pub mod loki;
 pub mod ordering;
 pub mod projection;
 pub mod prometheus;
 pub mod promql;
 pub mod stubs;
+pub mod tempo;
 pub mod tenant;
 
 pub use capability::{load_capability_v0, CapabilityManifest};

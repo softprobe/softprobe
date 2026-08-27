@@ -1,0 +1,80 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Representative Loki dashboard with a label variable and a supported label-plus-line-filter LogQL query.",
+  "editable": false,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "softprobe-loki-a"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLines": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "softprobe-loki-a"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"$service\"} |= \"checkout\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "All logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 39,
+  "tags": [
+    "softprobe",
+    "loki",
+    "deterministic"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "checkout",
+          "value": "checkout"
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "softprobe-loki-a"
+        },
+        "definition": "label_values({service_name=~\".+\"}, service_name)",
+        "includeAll": false,
+        "label": "Service",
+        "name": "service",
+        "options": [],
+        "query": "label_values({service_name=~\".+\"}, service_name)",
+        "refresh": 1,
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Softprobe Loki smoke",
+  "uid": "softprobe-loki-smoke",
+  "version": 1
+}

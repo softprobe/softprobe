@@ -1,6 +1,6 @@
 use crate::api::sql_support::{
     cursor_predicate, encode_cursor, push_optional_time_bounds, sql_string_literal,
-    timestamp_literal,
+    timestamp_ns_literal,
 };
 use crate::api::AppState;
 use crate::authn::TenantInfo;
@@ -436,8 +436,8 @@ pub fn compile_session_recording_sql(
          LIMIT {limit}",
         projection = observation_projection(true),
         session = sql_string_literal(session_id),
-        from_ts = timestamp_literal(&from),
-        to_ts = timestamp_literal(&to),
+        from_ts = timestamp_ns_literal(&from),
+        to_ts = timestamp_ns_literal(&to),
         obs_type = obs_type,
         limit = limit,
     ))
@@ -655,8 +655,8 @@ pub fn compile_session_search_sql(
     }
 
     let mut predicates = vec![
-        format!("timestamp >= {}", timestamp_literal(&request.from)),
-        format!("timestamp <= {}", timestamp_literal(&request.to)),
+        format!("timestamp >= {}", timestamp_ns_literal(&request.from)),
+        format!("timestamp <= {}", timestamp_ns_literal(&request.to)),
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
         // Web recording shares session_id with LLM spans but is not an LLM
@@ -832,8 +832,8 @@ pub fn compile_observation_search_sql(
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
     let mut conditions = vec![format!(
         "timestamp >= {} AND timestamp <= {}",
-        timestamp_literal(&request.from),
-        timestamp_literal(&request.to)
+        timestamp_ns_literal(&request.from),
+        timestamp_ns_literal(&request.to)
     )];
 
     if !request.observation_types.is_empty() {
@@ -957,8 +957,8 @@ pub fn compile_session_aggregate_sql(
         total_cost = expr_total_cost(),
         user_id = expr_user_id(),
         session = sql_string_literal(session_id),
-        from_ts = timestamp_literal(&from),
-        to_ts = timestamp_literal(&to),
+        from_ts = timestamp_ns_literal(&from),
+        to_ts = timestamp_ns_literal(&to),
         not_recording = exclude_recording_observation_sql(),
     ))
 }
@@ -976,8 +976,8 @@ pub fn compile_session_traces_sql(
     let where_sql = format!(
         "session_id = {} AND timestamp >= {} AND timestamp <= {} AND {}",
         sql_string_literal(session_id),
-        timestamp_literal(&from),
-        timestamp_literal(&to),
+        timestamp_ns_literal(&from),
+        timestamp_ns_literal(&to),
         exclude_recording_observation_sql(),
     );
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
@@ -1998,6 +1998,47 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert!(compile_session_recording_sql("sess-1", from, to, 10).is_err());
+    }
+
+    #[test]
+    fn span_query_predicates_use_timestamp_ns() {
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00.987654321Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let assert_ns = |sql: String| {
+            assert!(sql.contains("::TIMESTAMP_NS"), "{sql}");
+            assert!(!sql.contains("::TIMESTAMPTZ"), "{sql}");
+        };
+
+        assert_ns(compile_session_recording_sql("sess-1", from, to, 10).unwrap());
+        assert_ns(compile_session_aggregate_sql("sess-1", from, to).unwrap());
+        assert_ns(compile_session_traces_sql("sess-1", from, to, 10, None).unwrap());
+        assert_ns(compile_observation_detail_sql("span-1", Some(from), Some(to)).unwrap());
+        assert_ns(compile_trace_summary_sql("trace-1", Some(from), Some(to)).unwrap());
+        assert_ns(
+            compile_trace_observations_sql("trace-1", Some(from), Some(to), 10, None).unwrap(),
+        );
+
+        let request = ObservationSearchRequest {
+            from,
+            to,
+            observation_types: vec![],
+            model_name: None,
+            user_id: None,
+            session_id: Some("sess-1".to_string()),
+            trace_id: None,
+            limit: Some(10),
+            cursor: None,
+        };
+        assert_ns(compile_observation_search_sql(&request).unwrap());
+
+        let mut session_request = session_search_request();
+        session_request.from = from;
+        session_request.to = to;
+        assert_ns(compile_session_search_sql(&session_request, 10).unwrap());
     }
 
     #[test]

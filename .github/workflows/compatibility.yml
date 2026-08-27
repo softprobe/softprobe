@@ -1,0 +1,1742 @@
+name: Compatibility Differential
+
+# Pull requests run the fast manifest/mock lane plus real protocol differential
+# smoke. The scheduled full lane adds Grafana; the separate drift schedule only
+# reports newer image candidates and never becomes release evidence.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      selector:
+        description: >-
+          Select real service-backed validation, or the explicit mock harness
+          path (mock is fast and is not compatibility evidence).
+        required: false
+        default: real
+        type: choice
+        options:
+          - real
+          - mock
+          - drift
+      drift_prometheus_image:
+        description: Candidate Prometheus repository for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_prometheus_version:
+        description: Candidate Prometheus version for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_prometheus_digest:
+        description: Candidate Prometheus immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_loki_image:
+        description: Candidate Loki repository for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_loki_version:
+        description: Candidate Loki version for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_loki_digest:
+        description: Candidate Loki immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_tempo_image:
+        description: Candidate Tempo repository for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_tempo_version:
+        description: Candidate Tempo version for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_tempo_digest:
+        description: Candidate Tempo immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_grafana_image:
+        description: Candidate Grafana repository for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_grafana_version:
+        description: Candidate Grafana version for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_grafana_digest:
+        description: Candidate Grafana immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
+  schedule:
+    - cron: "30 3 * * *"
+    - cron: "0 4 * * 0"
+
+concurrency:
+  group: compatibility-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-preflight:
+    name: Real compatibility prerequisites
+    if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 10
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_TEST_THREADS: "1"
+      DOCKER_CLIENT_TIMEOUT: "30"
+      COMPOSE_HTTP_TIMEOUT: "30"
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Verify real runtime and required Grafana inputs
+        run: |
+          set -euo pipefail
+          command -v docker
+          docker info
+          command -v ruby
+          ruby --version
+          command -v python3
+          python3 --version
+          command -v curl
+          curl --version
+
+  prometheus-diff:
+    name: Prometheus differential
+    if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      PROMETHEUS_DIFF_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
+      SOFTPROBE_COMPAT_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
+      PROMETHEUS_RAW_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/raw.json
+      PROMETHEUS_NORMALIZED_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/normalized.json
+      DUCKDB_DOWNLOAD_LIB: "1"
+      SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
+      SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
+      SOFTPROBE_TENANT_B_API_KEY: ${{ secrets.SOFTPROBE_TENANT_B_API_KEY }}
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Verify pinned compatibility references
+        run: make check-compat-reference-pins
+
+      - name: Run Prometheus differential gates
+        run: make test-prom-compat
+
+      - name: Require passing Prometheus result and evidence
+        run: |
+          set -euo pipefail
+          root="$PROMETHEUS_DIFF_ARTIFACT_DIR"
+          python3 - "$root" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          required_root = ("raw.json", "normalized.json")
+          for name in required_root:
+              path = root / name
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"missing or empty Prometheus evidence: {path}")
+          required_case = ("request.raw.json", "request.normalized.json", "lake.raw.json", "lake.normalized.json", "oracle.raw.json", "oracle.normalized.json")
+          cases = sorted({path.parent for path in root.rglob("request.raw.json")})
+          if not cases:
+              raise SystemExit("Prometheus evidence has no per-case request artifact")
+          for case in cases:
+              for name in required_case:
+                  path = case / name
+                  if not path.is_file() or path.stat().st_size == 0:
+                      raise SystemExit(f"missing or empty Prometheus case evidence: {path}")
+          bad = {"skipped", "environment_skip", "infrastructure_failure", "product_regression", "fail", "failed", "error"}
+          for path in root.rglob("*.json"):
+              try:
+                  obj = json.loads(path.read_text())
+              except (OSError, ValueError) as exc:
+                  raise SystemExit(f"invalid Prometheus evidence JSON: {path}: {exc}")
+              if path.name.endswith("outcome.json") and (not isinstance(obj, dict) or obj.get("status") != "pass"):
+                  raise SystemExit(f"non-passing Prometheus outcome: {path}")
+              if isinstance(obj, dict) and obj.get("status") in bad:
+                  raise SystemExit(f"non-passing Prometheus result: {path}")
+          PY
+
+      - name: Stage sanitized Prometheus evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/upload/prometheus
+          python3 - target/compat/prometheus target/compat/upload/prometheus <<'PY'
+          import os, pathlib, re, shutil, sys
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          if not source.is_dir(): raise SystemExit(f"missing evidence directory: {source}")
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
+          values = [value for value in values if value]
+          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
+          for path in source.rglob("*"):
+              if not path.is_file() or ".work" in path.parts: continue
+              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
+              try: text = path.read_text()
+              except UnicodeDecodeError: shutil.copy2(path, target); continue
+              for value in values: text = text.replace(value, "[REDACTED]")
+              text = re.sub(r"(?im)^[ \t]*[\"']?authorization[\"']?\s*:\s*[^\r\n]*(?:\r?\n|$)", "", text)
+              target.write_text(bearer.sub(r"\1[REDACTED]", text))
+          PY
+
+      - name: Scan Prometheus evidence for credentials and require upload inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          test -d target/compat/upload/prometheus
+          test -s target/compat/prometheus/raw.json
+          test -s target/compat/prometheus/normalized.json
+          python3 - target/compat/upload/prometheus <<'PY'
+          import os, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
+          values = [value.encode() for value in values if value]
+          authorization = re.compile(rb"(?im)^\s*[\"']?authorization[\"']?\s*:")
+          files = [path for path in root.rglob("*") if path.is_file()]
+          if not files: raise SystemExit("Prometheus upload evidence is empty")
+          for path in files:
+              data = path.read_bytes()
+              if any(value in data for value in values) or authorization.search(data):
+                  raise SystemExit(f"unsanitized credential or Authorization header in {path}")
+          PY
+
+      - name: Upload Prometheus evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prometheus-differential-evidence
+          path: target/compat/upload/prometheus/
+          if-no-files-found: error
+
+  loki-diff:
+    name: Loki differential
+    if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      LOKI_DIFF_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/loki
+      LOKI_DIFF_TIMEOUT_SECS: "900"
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Verify Docker and pinned Loki reference
+        run: |
+          set -euo pipefail
+          docker info
+          make check-compat-reference-pins
+          docker pull "$(make --no-print-directory compat-reference-image SIGNAL=loki)"
+
+      - name: Run Loki differential gate
+        run: make test-loki-diff
+
+      - name: Require passing Loki result and evidence
+        run: |
+          set -euo pipefail
+          root="$LOKI_DIFF_ARTIFACT_DIR"
+          python3 - "$root" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          if not root.is_dir():
+              raise SystemExit(f"missing Loki evidence directory: {root}")
+          for name in ("raw.json", "normalized.json"):
+              path = root / name
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"missing or empty Loki evidence: {path}")
+          required = ("request.raw.json", "request.normalized.json", "lake.raw.json", "lake.normalized.json", "oracle.raw.json", "oracle.normalized.json")
+          cases = sorted({path.parent for path in root.rglob("request.raw.json")})
+          if not cases:
+              raise SystemExit("Loki evidence has no per-case directory")
+          bad = {"skip", "skipped", "environment_skip", "infrastructure_failure", "product_regression", "fail", "failed", "failure", "error"}
+          parsed = {}
+          for path in root.rglob("*.json"):
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"missing or empty Loki JSON evidence: {path}")
+              try:
+                  parsed[path] = json.loads(path.read_text())
+              except (OSError, ValueError) as exc:
+                  raise SystemExit(f"invalid Loki JSON evidence: {path}: {exc}")
+              def reject_outcomes(value):
+                  if isinstance(value, dict):
+                      for key, item in value.items():
+                          if key in {"status", "outcome"} and isinstance(item, str) and item.lower() in bad:
+                              raise SystemExit(f"non-passing Loki {key} in {path}: {item}")
+                          reject_outcomes(item)
+                  elif isinstance(value, list):
+                      for item in value:
+                          reject_outcomes(item)
+              reject_outcomes(parsed[path])
+          for case in cases:
+              for name in required:
+                  path = case / name
+                  if not path.is_file() or path.stat().st_size == 0:
+                      raise SystemExit(f"missing or empty Loki case evidence: {path}")
+              lake = parsed[case / "lake.normalized.json"]
+              oracle = parsed[case / "oracle.normalized.json"]
+              if lake != oracle:
+                  raise SystemExit(f"product-regression: Loki normalized lake/oracle mismatch: {case}")
+          PY
+
+      - name: Stage sanitized Loki evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/upload/loki
+          python3 - target/compat/loki target/compat/upload/loki <<'PY'
+          import os, pathlib, re, shutil, sys
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          if not source.exists():
+              (destination / "FAILED.txt").write_text("real evidence directory missing\n")
+              raise SystemExit(0)
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
+          values = [value for value in values if value]
+          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
+          for path in source.rglob("*"):
+              if not path.is_file() or ".work" in path.parts: continue
+              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
+              try: text = path.read_text()
+              except UnicodeDecodeError: shutil.copy2(path, target); continue
+              for value in values: text = text.replace(value, "[REDACTED]")
+              target.write_text(bearer.sub(r"\1[REDACTED]", text))
+          PY
+
+      - name: Upload Loki evidence paths
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loki-differential-evidence
+          path: target/compat/upload/loki/
+          if-no-files-found: error
+
+  tempo-diff:
+    name: Tempo differential
+    if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      TEMPO_DIFF_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/tempo
+      TEMPO_DIFF_TIMEOUT_SECS: "900"
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Verify Docker and pinned Tempo reference
+        run: |
+          set -euo pipefail
+          docker info
+          make check-compat-reference-pins
+          docker pull "$(make --no-print-directory compat-reference-image SIGNAL=tempo)"
+
+      - name: Run Tempo differential gate
+        run: make test-tempo-diff
+
+      - name: Require passing Tempo result and evidence
+        run: |
+          set -euo pipefail
+          root="$TEMPO_DIFF_ARTIFACT_DIR"
+          python3 - "$root" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          if not root.is_dir():
+              raise SystemExit(f"missing Tempo evidence directory: {root}")
+          for name in ("raw.json", "normalized.json"):
+              path = root / name
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"missing or empty Tempo evidence: {path}")
+          required = ("request.raw.json", "request.normalized.json", "lake.raw.json", "lake.normalized.json", "oracle.raw.json", "oracle.normalized.json")
+          cases = sorted({path.parent for path in root.rglob("request.raw.json")})
+          if not cases:
+              raise SystemExit("Tempo evidence has no per-case directory")
+          bad = {"skip", "skipped", "environment_skip", "infrastructure_failure", "product_regression", "fail", "failed", "failure", "error"}
+          parsed = {}
+          for path in root.rglob("*.json"):
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"missing or empty Tempo JSON evidence: {path}")
+              try:
+                  parsed[path] = json.loads(path.read_text())
+              except (OSError, ValueError) as exc:
+                  raise SystemExit(f"invalid Tempo JSON evidence: {path}: {exc}")
+              def reject_outcomes(value):
+                  if isinstance(value, dict):
+                      for key, item in value.items():
+                          if key in {"status", "outcome"} and isinstance(item, str) and item.lower() in bad:
+                              raise SystemExit(f"non-passing Tempo {key} in {path}: {item}")
+                          reject_outcomes(item)
+                  elif isinstance(value, list):
+                      for item in value:
+                          reject_outcomes(item)
+              reject_outcomes(parsed[path])
+          for case in cases:
+              for name in required:
+                  path = case / name
+                  if not path.is_file() or path.stat().st_size == 0:
+                      raise SystemExit(f"missing or empty Tempo case evidence: {path}")
+              lake = parsed[case / "lake.normalized.json"]
+              oracle = parsed[case / "oracle.normalized.json"]
+              if lake != oracle:
+                  raise SystemExit(f"product-regression: Tempo normalized lake/oracle mismatch: {case}")
+          PY
+
+      - name: Stage sanitized Tempo evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/upload/tempo
+          python3 - target/compat/tempo target/compat/upload/tempo <<'PY'
+          import os, pathlib, re, shutil, sys
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          if not source.exists():
+              (destination / "FAILED.txt").write_text("real evidence directory missing\n")
+              raise SystemExit(0)
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
+          values = [value for value in values if value]
+          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
+          for path in source.rglob("*"):
+              if not path.is_file() or ".work" in path.parts: continue
+              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
+              try: text = path.read_text()
+              except UnicodeDecodeError: shutil.copy2(path, target); continue
+              for value in values: text = text.replace(value, "[REDACTED]")
+              target.write_text(bearer.sub(r"\1[REDACTED]", text))
+          PY
+
+      - name: Upload Tempo evidence paths
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tempo-differential-evidence
+          path: target/compat/upload/tempo/
+          if-no-files-found: error
+
+  grafana-system:
+    name: Grafana system (${{ inputs.selector || 'real' }})
+    # always() lets the job record prerequisite failures and still upload its
+    # own evidence. The service-backed steps below are gated on success.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 25
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      SOFTPROBE_URL: ${{ secrets.SOFTPROBE_URL }}
+      SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
+      SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
+      SOFTPROBE_TENANT_B_API_KEY: ${{ secrets.SOFTPROBE_TENANT_B_API_KEY }}
+      SOFTPROBE_TENANT_A_ID: ${{ secrets.SOFTPROBE_TENANT_A_ID }}
+      SOFTPROBE_TENANT_B_ID: ${{ secrets.SOFTPROBE_TENANT_B_ID }}
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Initialize Grafana evidence directory
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/grafana
+          selector="${{ inputs.selector || 'real' }}"
+          printf 'selector=%s\n' "$selector" > target/compat/grafana/selector.txt
+          if [[ "$selector" == mock ]]; then
+            printf '%s\n' \
+              'This artifact was produced by the explicit mock/fast harness selector.' \
+              'It is not service-backed Grafana compatibility evidence.' \
+              > target/compat/grafana/NOTICE.txt
+          fi
+
+      - name: Run static Grafana Phase 4 contracts
+        run: make test-grafana-static
+
+      - name: Require successful protocol prerequisites for real validation
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        env:
+          PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
+          LOKI_RESULT: ${{ needs.loki-diff.result }}
+          TEMPO_RESULT: ${{ needs.tempo-diff.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for prerequisite in \
+            "prometheus-diff=$PROMETHEUS_RESULT" \
+            "loki-diff=$LOKI_RESULT" \
+            "tempo-diff=$TEMPO_RESULT"; do
+            if [[ "${prerequisite#*=}" != success ]]; then
+              echo "Prerequisite did not succeed: $prerequisite" | tee -a target/compat/grafana/summary.txt
+              failed=1
+            fi
+          done
+          if (( failed )); then
+            echo "Real Grafana validation was not run." | tee -a target/compat/grafana/summary.txt
+            exit 1
+          fi
+
+      - name: Run real Grafana system harness
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        env:
+          GRAFANA_REFERENCE_MANIFEST: docs/compat/references.v0.yaml
+          SOFTPROBE_URL: ${{ secrets.SOFTPROBE_URL }}
+          SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
+          SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
+          SOFTPROBE_TENANT_B_API_KEY: ${{ secrets.SOFTPROBE_TENANT_B_API_KEY }}
+          SOFTPROBE_TENANT_A_ID: ${{ secrets.SOFTPROBE_TENANT_A_ID }}
+          SOFTPROBE_TENANT_B_ID: ${{ secrets.SOFTPROBE_TENANT_B_ID }}
+        run: make test-grafana-system
+
+      - name: Require passing real Grafana results and evidence
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        run: |
+          set -euo pipefail
+          root=target/compat/grafana
+          test -d "$root"
+          test -s "$root/outcome.json"
+          python3 - "$root" <<'PY'
+          import json, pathlib, sys
+          bad = {"skipped", "environment_skip", "infrastructure_failure", "product_regression"}
+          root = pathlib.Path(sys.argv[1])
+          overall = json.loads((root / "outcome.json").read_text())
+          if overall.get("outcome") == "environment_skip":
+              reason = overall.get("reason", "")
+              if reason not in {"Docker unavailable", "GNU timeout unavailable"}:
+                  raise SystemExit(f"unapproved Grafana environment skip: {reason}")
+              if list(root.glob("G*.outcome.json")):
+                  raise SystemExit("environment-skipped Grafana run unexpectedly produced G-case results")
+              print(f"Grafana system lane permitted environment skip: {reason}")
+              raise SystemExit(0)
+          case_paths = [root / f"G{case_id}.outcome.json" for case_id in range(1, 9)]
+          missing = [str(path) for path in case_paths if not path.is_file() or path.stat().st_size == 0]
+          if missing:
+              raise SystemExit("missing Grafana case evidence: " + ", ".join(missing))
+          paths = [root / "outcome.json", *case_paths]
+          for path in paths:
+              obj = json.loads(path.read_text())
+              outcome = obj.get("outcome")
+              if outcome != "pass" or outcome in bad:
+                  raise SystemExit(f"non-passing Grafana result: {path}")
+          PY
+
+      - name: Run explicit mock Grafana harness
+        if: ${{ inputs.selector == 'mock' }}
+        env:
+          MOCK: "1"
+          GRAFANA_CHECK_DASHBOARD_QUERIES: "1"
+          ARTIFACT_DIR: target/compat/grafana
+        run: scripts/grafana-system-smoke.sh
+
+      - name: Stage sanitized Grafana evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          test -d target/compat/grafana
+          test -n "$(find target/compat/grafana -type f -print -quit)"
+          rm -rf target/compat/upload/grafana
+          mkdir -p target/compat/upload/grafana
+          python3 - target/compat/grafana target/compat/upload/grafana <<'PY'
+          import os, pathlib, re, shutil, sys
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY", "GRAFANA_ADMIN_PASSWORD")]
+          values = [value for value in values if value]
+          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
+          for path in source.rglob("*"):
+              if not path.is_file() or ".work" in path.parts: continue
+              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
+              try: text = path.read_text()
+              except UnicodeDecodeError: shutil.copy2(path, target); continue
+              for value in values: text = text.replace(value, "[REDACTED]")
+              target.write_text(bearer.sub(r"\1[REDACTED]", text))
+          PY
+          test -n "$(find target/compat/upload/grafana -type f -print -quit)"
+
+      - name: Upload Grafana system evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grafana-system-${{ inputs.selector || 'real' }}-evidence
+          path: target/compat/upload/grafana/
+          if-no-files-found: error
+
+  manifest-conformance:
+    name: Manifest conformance (${{ matrix.protocol }}, ${{ inputs.selector || 'real' }})
+    # The matrix is deliberately after all protocol and Grafana prerequisites.
+    # Mock mode still reaches this job because the prerequisite jobs are skipped.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff, grafana-system]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [prometheus, loki, tempo]
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      MANIFEST: tests/compat/manifests/cases.v0.yaml
+      OUT: target/compat/conformance/${{ matrix.protocol }}
+
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Initialize conformance evidence directory
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          selector="${{ inputs.selector || 'real' }}"
+          printf 'selector=%s\nprotocol=%s\n' "$selector" "${{ matrix.protocol }}" > "$OUT/selector.txt"
+          if [[ "$selector" == mock ]]; then
+            printf '%s\n' \
+              'This artifact was produced by the explicit mock/fast harness selector.' \
+              'Mock comparisons are manifest-shaped checks, not service-backed compatibility evidence.' \
+              > "$OUT/NOTICE.txt"
+          fi
+
+      - name: Require successful prerequisites for real conformance
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        env:
+          PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
+          LOKI_RESULT: ${{ needs.loki-diff.result }}
+          TEMPO_RESULT: ${{ needs.tempo-diff.result }}
+          GRAFANA_RESULT: ${{ needs.grafana-system.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for prerequisite in \
+            "prometheus-diff=$PROMETHEUS_RESULT" \
+            "loki-diff=$LOKI_RESULT" \
+            "tempo-diff=$TEMPO_RESULT" \
+            "grafana-system=$GRAFANA_RESULT"; do
+            if [[ "${prerequisite#*=}" != success ]]; then
+              echo "Prerequisite did not succeed: $prerequisite" | tee -a "$OUT/summary.txt"
+              failed=1
+            fi
+          done
+          if (( failed )); then
+            echo "Real manifest conformance was not run." | tee -a "$OUT/summary.txt"
+            exit 1
+          fi
+
+      - name: Run real manifest conformance selector
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        run: |
+          set -euo pipefail
+          scripts/compat/conformance.sh \
+            --protocol "${{ matrix.protocol }}" \
+            --out "$OUT"
+
+      - name: Require complete real per-case conformance evidence
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        env:
+          PROTOCOL: ${{ matrix.protocol }}
+        run: |
+          set -euo pipefail
+          ruby -ryaml -rjson <<'RUBY'
+          manifest = YAML.load_file(ENV.fetch("MANIFEST"))
+          root = ENV.fetch("OUT")
+          protocol = ENV.fetch("PROTOCOL")
+          cases = manifest.fetch("cases").select { |entry| entry.fetch("protocol") == protocol }
+          report = File.join(root, "report.jsonl")
+          abort "missing report.jsonl" unless File.file?(report)
+          rows = File.readlines(report, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+          ids = cases.map { |entry| entry.fetch("id") }
+          grouped = rows.group_by { |row| row.fetch("case_id") }
+          abort "duplicate, missing, or extra conformance cases" unless ids.sort == grouped.keys.sort && grouped.values.all? { |values| values.one? }
+          rows.each do |row|
+            case_entry = cases.find { |c| c["id"] == row["case_id"] }
+            if case_entry && case_entry["conformance_exclusion"]
+              abort "excluded case has invalid skipped result: #{row['case_id']}" unless row["mode"] == "real" && row["status"] == "skipped" && row["outcome"] == "conformance_exclusion"
+            else
+              abort "non-passing or non-release real conformance result: #{row['case_id']}" unless row["mode"] == "real" && row["status"] == "pass" && row["release_evidence"] == true
+            end
+          end
+          versions = JSON.parse(File.read(File.join(root, "versions.json")))
+          abort "conformance mode is not real" unless versions["mode"] == "real"
+          abort "conformance release evidence is not asserted" unless versions["release_evidence"] == true
+          ids.each do |id|
+            dir = File.join(root, id)
+            case_entry = cases.find { |c| c["id"] == id }
+            is_excluded = case_entry && case_entry["conformance_exclusion"]
+            required = %w[case.json case_provenance.json request.raw.json request.normalized.json softprobe.raw.json softprobe.normalized.json reference.raw.json reference.normalized.json diff.json outcome.json suite.evidence.json]
+            missing = required.reject { |name| File.file?(File.join(dir, name)) }
+            abort "#{id}: missing #{missing.join(', ')}" unless missing.empty?
+            outcome = JSON.parse(File.read(File.join(dir, "outcome.json")))
+            diff = JSON.parse(File.read(File.join(dir, "diff.json")))
+            diff_equal = diff.key?("equal") ? (diff["equal"] == true) : (diff.dig("payload", "equal") == true)
+            if is_excluded
+              abort "#{id}: invalid excluded real evidence" unless outcome["mode"] == "real" && outcome["status"] == "skipped" && outcome["reason"] == "conformance_exclusion"
+              abort "#{id}: excluded diff comparison failed" unless diff_equal && diff["classification"] == "skipped"
+            else
+              abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case" && outcome["release_evidence"] == true
+              abort "#{id}: normalized comparison failed or is not release evidence" unless diff_equal && diff["release_evidence"] == true
+            end
+          end
+          RUBY
+
+      - name: Validate real conformance artifact set
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        run: scripts/compat/validate-artifacts.sh --root "$OUT" --release-gate
+
+      - name: Run explicit mock manifest conformance selector
+        if: ${{ inputs.selector == 'mock' }}
+        run: |
+          set -euo pipefail
+          scripts/compat/conformance.sh \
+            --mock \
+            --protocol "${{ matrix.protocol }}" \
+            --out "$OUT"
+
+      - name: Assert mock conformance is visibly non-evidence
+        if: ${{ inputs.selector == 'mock' }}
+        run: |
+          set -euo pipefail
+          test -s "$OUT/NOTICE.txt"
+          rg -qi 'MOCK-ONLY|not service-backed|not.*compatibility evidence' "$OUT/NOTICE.txt"
+          rg -qi 'mock' "$OUT/versions.json"
+
+      - name: Validate mock conformance artifact set
+        if: ${{ inputs.selector == 'mock' }}
+        run: scripts/compat/validate-artifacts.sh --root "$OUT"
+
+      - name: Stage sanitized conformance evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/upload/conformance/${{ matrix.protocol }}
+          python3 - "$OUT" "target/compat/upload/conformance/${{ matrix.protocol }}" <<'PY'
+          import os, pathlib, re, shutil, sys
+          source, destination = map(pathlib.Path, sys.argv[1:])
+          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
+          values = [value for value in values if value]
+          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
+          for path in source.rglob("*"):
+              if not path.is_file() or ".work" in path.parts: continue
+              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
+              try: text = path.read_text()
+              except UnicodeDecodeError: shutil.copy2(path, target); continue
+              for value in values: text = text.replace(value, "[REDACTED]")
+              target.write_text(bearer.sub(r"\1[REDACTED]", text))
+          PY
+
+      - name: Upload manifest conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-conformance-${{ matrix.protocol }}-${{ inputs.selector || 'real' }}-evidence
+          path: target/compat/upload/conformance/${{ matrix.protocol }}/
+          if-no-files-found: error
+
+  drift-preflight:
+    name: Scheduled candidate drift prerequisites
+    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
+      DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
+      DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
+      DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
+      DRIFT_TEMPO_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
+      DRIFT_TEMPO_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_TEMPO_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
+      DRIFT_GRAFANA_IMAGE: ${{ inputs.drift_grafana_image || vars.COMPAT_DRIFT_GRAFANA_IMAGE || secrets.COMPAT_DRIFT_GRAFANA_IMAGE }}
+      DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
+      DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
+
+      - name: Initialize drift metadata after checkout
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/drift/preflight
+          python3 - <<'PY'
+          import json, os
+          data = {
+              "mode": "drift",
+              "release_evidence": False,
+              "status": "pending",
+              "candidate": {key.removeprefix("DRIFT_").lower(): os.environ.get(key, "") for key in (
+                  "DRIFT_PROMETHEUS_IMAGE", "DRIFT_PROMETHEUS_VERSION", "DRIFT_PROMETHEUS_DIGEST", "DRIFT_LOKI_IMAGE", "DRIFT_LOKI_VERSION", "DRIFT_LOKI_DIGEST",
+                  "DRIFT_TEMPO_IMAGE", "DRIFT_TEMPO_VERSION", "DRIFT_TEMPO_DIGEST", "DRIFT_GRAFANA_IMAGE", "DRIFT_GRAFANA_VERSION", "DRIFT_GRAFANA_DIGEST")},
+              "baseline": {key.removeprefix("BASELINE_").lower(): os.environ.get(key, "") for key in (
+                  "BASELINE_PROMETHEUS_IMAGE", "BASELINE_PROMETHEUS_VERSION", "BASELINE_LOKI_IMAGE", "BASELINE_LOKI_VERSION",
+                  "BASELINE_TEMPO_IMAGE", "BASELINE_TEMPO_VERSION", "BASELINE_GRAFANA_IMAGE", "BASELINE_GRAFANA_VERSION")},
+          }
+          json.dump(data, open("target/compat/drift/preflight/metadata.json", "w"), indent=2)
+          PY
+
+      - name: Validate and pull candidate references
+        run: |
+          set -euo pipefail
+          docker info >/dev/null
+          python3 - <<'PY'
+          import os, re
+          pairs = (
+              ("PROMETHEUS", os.environ["BASELINE_PROMETHEUS_IMAGE"], os.environ["BASELINE_PROMETHEUS_VERSION"]),
+              ("LOKI", os.environ["BASELINE_LOKI_IMAGE"], os.environ["BASELINE_LOKI_VERSION"]),
+              ("TEMPO", os.environ["BASELINE_TEMPO_IMAGE"], os.environ["BASELINE_TEMPO_VERSION"]),
+              ("GRAFANA", os.environ["BASELINE_GRAFANA_IMAGE"], os.environ["BASELINE_GRAFANA_VERSION"]),
+          )
+          for name, baseline_image, baseline_version in pairs:
+              image = os.environ.get(f"DRIFT_{name}_IMAGE", "")
+              version = os.environ.get(f"DRIFT_{name}_VERSION", "")
+              if not image or not version:
+                  raise SystemExit(f"missing candidate {name.lower()} image/version")
+              if not re.fullmatch(r"[A-Za-z0-9._/-]+(?::[0-9]+)?", image) or "@" in image:
+                  raise SystemExit(f"invalid candidate {name.lower()} image")
+              if version.lower() == "latest" or "latest" in version.lower() or any(char.isspace() for char in version):
+                  raise SystemExit(f"mutable candidate {name.lower()} version")
+              if version == baseline_version:
+                  raise SystemExit(f"candidate {name.lower()} version is unchanged from baseline")
+          for name in ("PROMETHEUS", "LOKI", "TEMPO", "GRAFANA"):
+              digest = os.environ.get(f"DRIFT_{name}_DIGEST", "")
+              if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+                  raise SystemExit(f"{name.lower()} drift candidate requires an immutable sha256 digest")
+          PY
+          for signal in prometheus loki tempo grafana; do
+            upper=$(printf '%s' "$signal" | tr '[:lower:]' '[:upper:]')
+            image_var="DRIFT_${upper}_IMAGE"
+            digest_var="DRIFT_${upper}_DIGEST"
+            candidate_reference="${!image_var}@${!digest_var}"
+            docker pull "$candidate_reference" >/dev/null
+            repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "$candidate_reference")
+            printf '%s' "$repo_digests" | grep -Fq -- "$candidate_reference" || {
+              echo "$signal candidate digest does not match the pulled immutable reference" >&2
+              exit 1
+            }
+          done
+          python3 - <<'PY'
+          import json
+          data = json.load(open("target/compat/drift/preflight/metadata.json"))
+          data["status"] = "pass"
+          json.dump(data, open("target/compat/drift/preflight/metadata.json", "w"), indent=2)
+          PY
+
+      - name: Record drift preflight failure
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/drift/preflight
+          python3 - <<'PY'
+          import json, pathlib
+          path = pathlib.Path("target/compat/drift/preflight/metadata.json")
+          try:
+              data = json.loads(path.read_text())
+          except (OSError, ValueError):
+              data = {"mode": "drift", "release_evidence": False}
+          data["status"] = "infrastructure_failure"
+          data["failure_reason"] = "preflight_validation_failed"
+          data["release_evidence"] = False
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+
+      - name: Upload drift preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-preflight-evidence
+          path: target/compat/drift/preflight/
+          if-no-files-found: error
+
+  drift-prometheus:
+    name: Drift Prometheus candidate
+    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [drift-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
+      DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
+      OUT: ${{ github.workspace }}/target/compat/drift/prometheus
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
+      - name: Run Prometheus drift contract
+        run: scripts/compat/conformance.sh --drift --protocol prometheus --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+      - name: Upload Prometheus drift evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-prometheus-evidence
+          path: target/compat/drift/prometheus/
+          if-no-files-found: error
+
+  drift-loki:
+    name: Drift Loki candidate
+    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [drift-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
+      DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
+      OUT: ${{ github.workspace }}/target/compat/drift/loki
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
+      - name: Run Loki drift contract
+        run: scripts/compat/conformance.sh --drift --protocol loki --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+      - name: Upload Loki drift evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-loki-evidence
+          path: target/compat/drift/loki/
+          if-no-files-found: error
+
+  drift-tempo:
+    name: Drift Tempo candidate
+    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [drift-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
+      DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
+      OUT: ${{ github.workspace }}/target/compat/drift/tempo
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
+      - name: Run Tempo drift contract
+        run: scripts/compat/conformance.sh --drift --protocol tempo --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+      - name: Upload Tempo drift evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-tempo-evidence
+          path: target/compat/drift/tempo/
+          if-no-files-found: error
+
+  drift-grafana:
+    name: Drift Grafana candidate
+    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [drift-preflight]
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
+      DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
+      DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
+      DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
+      DRIFT_TEMPO_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
+      DRIFT_TEMPO_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_TEMPO_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
+      DRIFT_GRAFANA_IMAGE: ${{ inputs.drift_grafana_image || vars.COMPAT_DRIFT_GRAFANA_IMAGE || secrets.COMPAT_DRIFT_GRAFANA_IMAGE }}
+      DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
+      DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
+      SOFTPROBE_URL: ${{ secrets.SOFTPROBE_URL }}
+      SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
+      SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
+      SOFTPROBE_TENANT_B_API_KEY: ${{ secrets.SOFTPROBE_TENANT_B_API_KEY }}
+      SOFTPROBE_TENANT_A_ID: ${{ secrets.SOFTPROBE_TENANT_A_ID }}
+      SOFTPROBE_TENANT_B_ID: ${{ secrets.SOFTPROBE_TENANT_B_ID }}
+      GRAFANA_REFERENCE_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
+      GRAFANA_SYSTEM_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/drift/grafana
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+      - name: Create candidate reference manifest
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/drift
+          ruby -ryaml -e '
+            path = "docs/compat/references.v0.yaml"
+            document = YAML.load_file(path)
+            refs = document.fetch("references")
+            values = {
+              "prometheus" => [ENV.fetch("DRIFT_PROMETHEUS_IMAGE"), ENV.fetch("DRIFT_PROMETHEUS_VERSION"), ENV.fetch("DRIFT_PROMETHEUS_DIGEST")],
+              "loki" => [ENV.fetch("DRIFT_LOKI_IMAGE"), ENV.fetch("DRIFT_LOKI_VERSION"), ENV.fetch("DRIFT_LOKI_DIGEST")],
+              "tempo" => [ENV.fetch("DRIFT_TEMPO_IMAGE"), ENV.fetch("DRIFT_TEMPO_VERSION"), ENV.fetch("DRIFT_TEMPO_DIGEST")],
+              "grafana" => [ENV.fetch("DRIFT_GRAFANA_IMAGE"), ENV.fetch("DRIFT_GRAFANA_VERSION"), ENV.fetch("DRIFT_GRAFANA_DIGEST")]
+            }
+            values.each { |key, (image, tag, digest)| refs.fetch(key).merge!("image" => image, "tag" => tag, "digest" => digest) }
+            File.write("target/compat/drift/references.yaml", YAML.dump(document))
+          '
+      - name: Run static Grafana Phase 4 contracts
+        run: make test-grafana-static
+      - name: Run Grafana drift system lane
+        run: |
+          set -euo pipefail
+          make test-grafana-system \
+            COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml" \
+            GRAFANA_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml" \
+            COMPAT_REFERENCE_ALLOW_MANIFEST_OVERRIDE=1 \
+            LOKI_REFERENCE_IMAGE="$(make --no-print-directory compat-reference-image SIGNAL=loki COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml")" \
+            TEMPO_REFERENCE_IMAGE="$(make --no-print-directory compat-reference-image SIGNAL=tempo COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml")" \
+            GRAFANA_REFERENCE_VERSION="$DRIFT_GRAFANA_VERSION" \
+            GRAFANA_REFERENCE_DIGEST="$DRIFT_GRAFANA_DIGEST" \
+            GRAFANA_SYSTEM_ARTIFACT_DIR="$GRAFANA_SYSTEM_ARTIFACT_DIR"
+      - name: Mark Grafana drift records as non-release evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -d "$GRAFANA_SYSTEM_ARTIFACT_DIR" ]]; then
+            python3 - "$GRAFANA_SYSTEM_ARTIFACT_DIR" <<'PY'
+            import json, pathlib, sys
+            root = pathlib.Path(sys.argv[1])
+            for path in root.rglob("*.json"):
+                try:
+                    value = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if isinstance(value, dict):
+                    value["release_evidence"] = False
+                    path.write_text(json.dumps(value, indent=2) + "\n")
+            PY
+          fi
+      - name: Upload Grafana drift evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-grafana-evidence
+          path: target/compat/drift/grafana/
+          if-no-files-found: error
+
+  drift-report:
+    name: Scheduled candidate drift report
+    if: ${{ always() && (inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0')) }}
+    needs: [drift-preflight, drift-prometheus, drift-loki, drift-tempo, drift-grafana]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download drift evidence only
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: compatibility-drift-*-evidence
+          path: target/compat/drift/downloaded
+          merge-multiple: false
+      - name: Build non-release drift report
+        env:
+          PREFLIGHT_RESULT: ${{ needs.drift-preflight.result }}
+          PROMETHEUS_RESULT: ${{ needs.drift-prometheus.result }}
+          LOKI_RESULT: ${{ needs.drift-loki.result }}
+          TEMPO_RESULT: ${{ needs.drift-tempo.result }}
+          GRAFANA_RESULT: ${{ needs.drift-grafana.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/compat/drift/report
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path("target/compat/drift/downloaded")
+          expected = {
+              "compatibility-drift-preflight-evidence": ("metadata.json",),
+              "compatibility-drift-prometheus-evidence": ("versions.json", "report.jsonl"),
+              "compatibility-drift-loki-evidence": ("versions.json", "report.jsonl"),
+              "compatibility-drift-tempo-evidence": ("versions.json", "report.jsonl"),
+              "compatibility-drift-grafana-evidence": ("summary.json",),
+          }
+          errors = []
+          drift_cases = []
+          record_names = {"case.json", "case_provenance.json", "configuration_failure.json", "diff.json", "metadata.json", "outcome.json", "versions.json", "report.json"}
+          bad_statuses = {"product_regression", "infrastructure_failure", "environment_skip", "skipped", "failure", "failed", "error"}
+          for artifact, required in expected.items():
+              path = root / artifact
+              if not path.is_dir():
+                  errors.append(f"missing drift artifact: {artifact}")
+                  continue
+              for name in required:
+                  matches = list(path.rglob(name))
+                  if not matches or any(item.stat().st_size == 0 for item in matches):
+                      errors.append(f"missing or empty {name} in {artifact}")
+              is_protocol_artifact = artifact.startswith("compatibility-drift-") and artifact.endswith("-evidence") and artifact.split("-")[-2] in {"prometheus", "loki", "tempo"}
+              if is_protocol_artifact:
+                  configuration_failures = list(path.rglob("configuration_failure.json"))
+                  if configuration_failures:
+                      for name in ("command.txt", "runner.stdout", "runner.stderr", "outcome.json", "configuration_failure.json", "versions.json", "report.jsonl", "summary.md"):
+                          matches = list(path.rglob(name))
+                          if not matches or any(item.stat().st_size == 0 for item in matches):
+                              errors.append(f"incomplete infrastructure drift bundle missing or empty {name} in {artifact}")
+                      case_files = list(path.rglob("case.json"))
+                      if not case_files:
+                          errors.append(f"incomplete infrastructure drift bundle has no case records in {artifact}")
+                      for case_path in case_files:
+                          case_dir = case_path.parent
+                          for name in ("request.raw.json", "request.normalized.json", "case_provenance.json", "outcome.json", "suite.evidence.json"):
+                              required_path = case_dir / name
+                              if not required_path.is_file() or required_path.stat().st_size == 0:
+                                  errors.append(f"incomplete infrastructure drift case missing or empty {required_path}")
+                  else:
+                      for name in ("raw.json", "normalized.json", "diff.json"):
+                          if not list(path.rglob(name)):
+                              errors.append(f"missing drift semantic artifact {name} in {artifact}")
+          jobs = {name: os.environ.get(name, "unknown") for name in ("PREFLIGHT_RESULT", "PROMETHEUS_RESULT", "LOKI_RESULT", "TEMPO_RESULT", "GRAFANA_RESULT")}
+          drift_only = True
+          mock = False
+          result_names = jobs
+          required = set(result_names)
+          infrastructure_skips = [
+              name for name, status in result_names.items()
+              if status in {"skipped", "environment_skip", "infrastructure_failure"}
+          ]
+          product_regressions = [
+              name for name, status in result_names.items()
+              if status == "product_regression"
+          ]
+          unapproved_differences = 0
+          release_evidence = (
+              not drift_only and not mock and not infrastructure_skips and
+              not product_regressions and unapproved_differences == 0 and
+              all(result_names[name] == "success" for name in required)
+          )
+          for name, status in jobs.items():
+              if status != "success":
+                  errors.append(f"{name} finished with {status}")
+          metadata_path = root / "compatibility-drift-preflight-evidence" / "metadata.json"
+          try:
+              metadata = json.loads(metadata_path.read_text())
+          except (OSError, ValueError) as exc:
+              metadata = {}
+              errors.append(f"invalid drift preflight metadata: {exc}")
+          if metadata.get("release_evidence") is not False:
+              errors.append("drift preflight metadata is not marked release_evidence=false")
+          if metadata.get("status") != "pass":
+              errors.append(f"drift preflight status is not pass: {metadata.get('status')}")
+          for artifact in expected:
+              path = root / artifact
+              if not path.exists():
+                  continue
+              for json_path in path.rglob("*.json"):
+                  if json_path.name.endswith(".raw.json") or json_path.name.endswith(".normalized.json") or json_path.name in {"raw.json", "normalized.json"}:
+                      continue
+                  try:
+                      value = json.loads(json_path.read_text())
+                  except (OSError, ValueError) as exc:
+                      errors.append(f"invalid drift record {json_path}: {exc}")
+                      continue
+                  if not isinstance(value, dict):
+                      errors.append(f"drift record is not an object: {json_path}")
+                      continue
+                  if json_path.name in record_names or value.get("mode") == "drift" or artifact.startswith("compatibility-drift-"):
+                      if value.get("release_evidence") is not False:
+                          errors.append(f"record is not marked release_evidence=false: {json_path}")
+                  status = value.get("status", value.get("outcome"))
+                  classification = value.get("classification")
+                  if classification in {"infrastructure_failure", "configuration_failure"}:
+                      errors.append(f"configuration/infrastructure failure: {json_path}")
+                  elif classification == "drift":
+                      if status != "drift" or value.get("review_status") != "needs_review":
+                          errors.append(f"invalid drift review record: {json_path}")
+                      else:
+                          drift_cases.append(str(json_path))
+                  elif status == "drift":
+                      errors.append(f"drift status lacks drift classification: {json_path}")
+                  elif status in bad_statuses:
+                      errors.append(f"non-drift outcome {status}: {json_path}")
+                  if "outcome" in value and value.get("outcome") not in {"pass", "drift"}:
+                      errors.append(f"non-passing Grafana outcome: {json_path}")
+              for report_path in path.rglob("report.jsonl"):
+                  for line_number, line in enumerate(report_path.read_text().splitlines(), 1):
+                      if not line.strip():
+                          continue
+                      try:
+                          row = json.loads(line)
+                      except ValueError as exc:
+                          errors.append(f"invalid drift report row {report_path}:{line_number}: {exc}")
+                          continue
+                      if row.get("release_evidence") is not False:
+                          errors.append(f"drift report row is not marked release_evidence=false: {report_path}:{line_number}")
+                      if row.get("classification") == "drift" and row.get("review_status") == "needs_review":
+                          drift_cases.append(f"{report_path}:{line_number}")
+          report = {
+              "mode": "drift",
+              "release_evidence": False,
+              "candidate": metadata.get("candidate"),
+              "baseline": metadata.get("baseline"),
+              "jobs": jobs,
+              "required_jobs": sorted(required),
+              "infrastructure_skips": sorted(set(infrastructure_skips)),
+              "product_regressions": sorted(set(product_regressions)),
+              "unapproved_differences": unapproved_differences,
+              "drift_cases": sorted(drift_cases),
+              "review_status": "needs_review" if drift_cases else "no_semantic_drift_observed",
+              "errors": errors,
+          }
+          json.dump(report, open("target/compat/drift/report/report.json", "w"), indent=2)
+          pathlib.Path("target/compat/drift/report/report.md").write_text("# Scheduled candidate drift report\n\n" + json.dumps(report, indent=2) + "\n")
+          if errors:
+              raise SystemExit("drift report failed: " + "; ".join(errors))
+          PY
+      - name: Upload separate drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-drift-report
+          path: target/compat/drift/report/
+          if-no-files-found: error
+
+  fast-pr:
+    name: Fast PR compatibility lane
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      RUST_TEST_THREADS: "1"
+      DUCKDB_DOWNLOAD_LIB: "1"
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize fast-lane evidence
+        run: mkdir -p target/compat/fast-pr
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check library
+        run: cargo check --lib
+
+      - name: Run lint
+        run: cargo clippy --lib --bin softprobe-runtime -- -D warnings
+
+      - name: Run unit tests without containers
+        run: cargo test --lib -- --test-threads=1
+
+      - name: Run compatibility contract and fixture checks
+        run: |
+          set -euo pipefail
+          bash tests/compat/conformance_artifacts_test.sh
+          cargo test --test tests compat_phase0:: -- --test-threads=1
+          cargo test --test tests compat_prometheus:: -- --test-threads=1
+          cargo test --test tests compat_loki::loki_phase2_contract_cases -- --test-threads=1
+          cargo test --test tests compat_tempo::tempo_phase3_contract_cases -- --test-threads=1
+
+      - name: Run parser and serializer checks
+        run: |
+          set -euo pipefail
+          cargo test --lib compat::promql::parse:: -- --test-threads=1
+          cargo test --lib compat::prometheus::params:: -- --test-threads=1
+          cargo test --lib compat::loki::params:: -- --test-threads=1
+          cargo test --lib compat::loki::encode:: -- --test-threads=1
+
+      - name: Run tenant-isolation checks
+        run: |
+          set -euo pipefail
+          cargo test --test tests compat_phase0::compat_query_tenant_id -- --test-threads=1
+          cargo test --test tests compat_loki::loki_phase2_tenant_isolation -- --test-threads=1
+          cargo test --test tests compat_tempo::tempo_phase3_same_trace_id_isolated -- --test-threads=1
+
+      - name: Write fast-lane report
+        if: always()
+        run: |
+          set -euo pipefail
+          cat > target/compat/fast-pr/report.txt <<'EOF'
+          Fast PR compatibility lane ran formatting, library check, lint, unit,
+          compatibility contract, parser, serializer, and tenant-isolation checks.
+          This lane uses no reference-service containers.
+          EOF
+
+      - name: Upload fast PR evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-pr-compatibility-evidence
+          path: target/compat/fast-pr/
+          if-no-files-found: error
+
+  compatibility-report:
+    name: Consolidated compatibility report
+    if: ${{ always() && !(inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs:
+      - fast-pr
+      - real-preflight
+      - prometheus-diff
+      - loki-diff
+      - tempo-diff
+      - grafana-system
+      - manifest-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      SELECTOR: ${{ inputs.selector || 'real' }}
+      DRIFT_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+      FAST_PR_RESULT: ${{ needs.fast-pr.result }}
+      REAL_PREFLIGHT_RESULT: ${{ needs.real-preflight.result }}
+      PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
+      LOKI_RESULT: ${{ needs.loki-diff.result }}
+      TEMPO_RESULT: ${{ needs.tempo-diff.result }}
+      GRAFANA_RESULT: ${{ needs.grafana-system.result }}
+      CONFORMANCE_RESULT: ${{ needs.manifest-conformance.result }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Initialize report directory
+        run: mkdir -p target/compat/consolidated-report
+
+      - name: Download compatibility evidence
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*evidence"
+          path: target/compat/downloaded
+          merge-multiple: false
+
+      - name: Build and validate consolidated report
+        run: |
+          set -euo pipefail
+          python3 - target/compat/downloaded target/compat/consolidated-report <<'PY'
+          import json
+          import os
+          import pathlib
+          import shutil
+          import sys
+
+          evidence_root = pathlib.Path(sys.argv[1])
+          report_root = pathlib.Path(sys.argv[2])
+          event_name = os.environ.get("EVENT_NAME", "")
+          selector = os.environ.get("SELECTOR", "real")
+          drift_only = os.environ.get("DRIFT_ONLY", "false").lower() == "true"
+          if drift_only:
+              selector = "drift"
+          mock = event_name == "workflow_dispatch" and selector == "mock"
+
+          result_names = {
+              "fast-pr": os.environ.get("FAST_PR_RESULT", "unknown"),
+              "real-preflight": os.environ.get("REAL_PREFLIGHT_RESULT", "unknown"),
+              "prometheus-diff": os.environ.get("PROMETHEUS_RESULT", "unknown"),
+              "loki-diff": os.environ.get("LOKI_RESULT", "unknown"),
+              "tempo-diff": os.environ.get("TEMPO_RESULT", "unknown"),
+              "grafana-system": os.environ.get("GRAFANA_RESULT", "unknown"),
+              "manifest-conformance": os.environ.get("CONFORMANCE_RESULT", "unknown"),
+          }
+          if drift_only:
+              required = set()
+          elif mock:
+              required = {"grafana-system", "manifest-conformance"}
+          else:
+              required = {
+                  "real-preflight", "prometheus-diff", "loki-diff", "tempo-diff",
+                  "grafana-system", "manifest-conformance",
+              }
+              if event_name == "pull_request":
+                  required.add("fast-pr")
+          expected_artifacts = {}
+          if not drift_only:
+              if event_name == "pull_request":
+                  expected_artifacts["fast-pr-compatibility-evidence"] = ("report.txt",)
+              if not mock:
+                  expected_artifacts.update({
+                      "prometheus-differential-evidence": ("raw.json", "normalized.json"),
+                      "loki-differential-evidence": ("raw.json", "normalized.json"),
+                      "tempo-differential-evidence": ("raw.json", "normalized.json"),
+                      "grafana-system-real-evidence": ("outcome.json", "summary.json", "G1.outcome.json", "G2.outcome.json", "G3.outcome.json", "G4.outcome.json", "G5.outcome.json", "G6.outcome.json", "G7.outcome.json", "G8.outcome.json"),
+                  })
+              else:
+                  expected_artifacts["grafana-system-mock-evidence"] = ("NOTICE.txt",)
+              for protocol in ("prometheus", "loki", "tempo"):
+                  expected_artifacts[f"manifest-conformance-{protocol}-{'mock' if mock else 'real'}-evidence"] = ("report.jsonl", "versions.json")
+          errors = []
+          infrastructure_skips = []
+          for artifact_name, required_files in expected_artifacts.items():
+              artifact_root = evidence_root / artifact_name
+              if not artifact_root.is_dir():
+                  errors.append(f"missing required evidence artifact {artifact_name}")
+                  continue
+              if not any(path.is_file() for path in artifact_root.rglob("*")):
+                  errors.append(f"empty required evidence artifact {artifact_name}")
+                  continue
+              for required_file in required_files:
+                  matches = list(artifact_root.rglob(required_file))
+                  if not matches or any(path.stat().st_size == 0 for path in matches):
+                      errors.append(f"missing or empty {required_file} in {artifact_name}")
+
+          def has_explicit_skip_marker(job_name):
+              needle = job_name.lower()
+              for path in evidence_root.rglob("*") if evidence_root.exists() else []:
+                  if not path.is_file() or path.name not in {"NOTICE.txt", "SKIP.txt", "summary.txt"}:
+                      continue
+                  try:
+                      text = path.read_text(errors="replace").lower()
+                  except OSError:
+                      continue
+                  if needle in text and ("infrastructure" in text or "environment_skip" in text):
+                      return True
+              return False
+
+          for job_name in sorted(required):
+              status = result_names[job_name]
+              if has_explicit_skip_marker(job_name):
+                  infrastructure_skips.append(job_name)
+                  errors.append(f"required job {job_name} emitted an explicit skip marker")
+              if status == "success":
+                  continue
+              if status in {"skipped", "environment_skip", "infrastructure_failure"}:
+                  if job_name not in infrastructure_skips:
+                      infrastructure_skips.append(job_name)
+              errors.append(f"required job {job_name} finished with {status}")
+
+          product_regressions = []
+          unapproved_differences = 0
+          approved_differences = 0
+          if evidence_root.exists():
+              for path in evidence_root.rglob("diff.json"):
+                  try:
+                      diff = json.loads(path.read_text())
+                  except (OSError, ValueError) as exc:
+                      errors.append(f"invalid diff artifact {path}: {exc}")
+                      continue
+                  unapproved = int(diff.get("unapproved_differences", 0) or 0)
+                  approved = int(diff.get("approved_differences", 0) or 0)
+                  unapproved_differences += unapproved
+                  approved_differences += approved
+                  if unapproved or diff.get("equal") is False:
+                      product_regressions.append(str(path))
+              for path in evidence_root.rglob("outcome.json"):
+                  try:
+                      outcome = json.loads(path.read_text())
+                  except (OSError, ValueError) as exc:
+                      errors.append(f"invalid outcome artifact {path}: {exc}")
+                      continue
+                  status = outcome.get("status", outcome.get("outcome"))
+                  if status == "product_regression":
+                      product_regressions.append(str(path))
+                  if status == "environment_skip":
+                      infrastructure_skips.append(str(path))
+
+          # The release-gate artifact is self-contained: package every
+          # sanitized protocol/Grafana evidence bundle alongside the report so
+          # the downstream validator never has to reconstruct a multi-artifact
+          # handoff from the producing jobs.
+          evidence_artifacts = []
+          if evidence_root.exists():
+              for source in sorted(evidence_root.iterdir()):
+                  if not source.is_dir():
+                      continue
+                  shutil.copytree(source, report_root / source.name, dirs_exist_ok=True)
+                  evidence_artifacts.append(source.name)
+
+          if not mock and not drift_only:
+              excluded_cases = {
+                  "prometheus-metadata-discovery",
+                  "tempo-search-span-selector",
+                  "tempo-search-tags",
+                  "tempo-tag-values-peer-service",
+              }
+              manifest_path = pathlib.Path("tests/compat/manifests/cases.v0.yaml")
+              if manifest_path.exists():
+                  try:
+                      lines = manifest_path.read_text().splitlines()
+                      current_id = None
+                      for line in lines:
+                          trimmed = line.strip()
+                          if trimmed.startswith("- id:"):
+                              current_id = trimmed.split(":", 1)[1].strip()
+                          elif "conformance_exclusion:" in trimmed and current_id:
+                              excluded_cases.add(current_id)
+                  except Exception:
+                      pass
+
+              for path in evidence_root.rglob("*.json") if evidence_root.exists() else []:
+                  if any(case_id in str(path) for case_id in excluded_cases):
+                      continue
+                  try:
+                      value = json.loads(path.read_text())
+                  except (OSError, ValueError):
+                      continue
+                  stack = [value]
+                  while stack:
+                      item = stack.pop()
+                      if isinstance(item, dict):
+                          case_id = item.get("case_id")
+                          if case_id and case_id in excluded_cases:
+                              continue
+                          is_excluded = bool(
+                              item.get("conformance_exclusion")
+                              or item.get("reason") == "conformance_exclusion"
+                              or item.get("classification") == "skipped"
+                              or item.get("outcome") == "conformance_exclusion"
+                          )
+                          if item.get("release_evidence") is False and not is_excluded:
+                              errors.append(f"real evidence is marked release_evidence=false: {path}")
+                          stack.extend(item.values())
+                      elif isinstance(item, list):
+                          stack.extend(item)
+
+          if product_regressions:
+              errors.append("unexpected product regressions: " + ", ".join(sorted(set(product_regressions))))
+          if unapproved_differences:
+              errors.append(f"unapproved normalized differences: {unapproved_differences}")
+
+          # Consolidated reports are validation artifacts. In particular, the
+          # scheduled drift report must never become release evidence, even
+          # when every candidate job completed successfully.
+          release_evidence = not mock and not drift_only and not errors
+
+          report = {
+              "event": event_name,
+              "selector": selector,
+              "mode": "drift" if drift_only else ("mock" if mock else "real"),
+              "release_evidence": release_evidence,
+              "jobs": result_names,
+              "required_jobs": sorted(required),
+              "infrastructure_skips": infrastructure_skips,
+              "product_regressions": sorted(set(product_regressions)),
+              "approved_differences": approved_differences,
+              "unapproved_differences": unapproved_differences,
+              "evidence_validated": not errors,
+              "evidence_artifacts": evidence_artifacts,
+              "errors": errors,
+          }
+          (report_root / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          (report_root / "release_evidence.json").write_text(json.dumps({
+              "schema_version": "compat-release-evidence.v1",
+              "release_evidence": report["release_evidence"],
+              "validated": report["evidence_validated"],
+              "mode": report["mode"],
+              "artifacts": evidence_artifacts,
+          }, indent=2) + "\n")
+          lines = [
+              ("# Drift-only compatibility report" if drift_only else "# Consolidated compatibility report"), "", f"- Mode: {report['mode']}",
+              f"- Event: {event_name}", f"- Product regressions: {len(report['product_regressions'])}",
+              f"- Unapproved differences: {unapproved_differences}",
+              f"- Infrastructure skips: {len(infrastructure_skips)}", "", "## Job results", "",
+          ]
+          lines.extend(f"- `{name}`: `{status}`" for name, status in sorted(result_names.items()))
+          if errors:
+              lines.extend(["", "## Blocking findings", "", *[f"- {error}" for error in errors]])
+          (report_root / "report.md").write_text("\n".join(lines) + "\n")
+          print(json.dumps(report, indent=2))
+          if errors:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload consolidated compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.selector == 'drift' && 'compatibility-drift-report' || github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0' && 'compatibility-drift-report' || 'compatibility-consolidated-report' }}
+          path: target/compat/consolidated-report/
+          if-no-files-found: error
+
+  compatibility-release-gate:
+    name: Compatibility release gate
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && (inputs.selector == 'mock' || inputs.selector == 'drift')) && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [fast-pr, compatibility-report]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+      - name: Checkout compatibility validators
+        uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Download consolidated report
+        uses: actions/download-artifact@v4
+        with:
+          pattern: compatibility-consolidated-report
+          path: target/compat/release-gate
+          merge-multiple: true
+
+      - name: Validate conformance release artifacts
+        run: scripts/compat/validate-artifacts.sh --conformance-root target/compat/release-gate --release-gate
+
+      - name: Require zero product regressions and unapproved differences
+        env:
+          REPORT_RESULT: ${{ needs.compatibility-report.result }}
+          FAST_PR_RESULT: ${{ needs.fast-pr.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test "$REPORT_RESULT" = success || { echo "Consolidated compatibility report failed: $REPORT_RESULT" >&2; exit 1; }
+          if [[ "$EVENT_NAME" == pull_request && "$FAST_PR_RESULT" != success ]]; then
+            echo "Fast PR compatibility lane failed: $FAST_PR_RESULT" >&2
+            exit 1
+          fi
+          test -s target/compat/release-gate/report.json
+          python3 - target/compat/release-gate/report.json <<'PY'
+          import json
+          import sys
+          report = json.load(open(sys.argv[1]))
+          if report.get("release_evidence") is not True or report.get("evidence_validated") is not True:
+              raise SystemExit("release gate requires validated release evidence metadata")
+          jobs = report.get("jobs", {})
+          if report.get("mode") == "real":
+              required = report.get("required_jobs", [])
+              failed = [name for name in required if jobs.get(name) != "success"]
+              if failed:
+                  raise SystemExit("release gate found non-passing required jobs: " + ", ".join(failed))
+              if report.get("infrastructure_skips"):
+                  raise SystemExit("release gate found infrastructure or environment skips")
+          if report.get("product_regressions"):
+              raise SystemExit("release gate found product regressions")
+          if report.get("unapproved_differences", 0):
+              raise SystemExit("release gate found unapproved differences")
+          if report.get("errors"):
+              raise SystemExit("release gate found blocking report errors")
+          print("compatibility release gate: PASS")
+          PY

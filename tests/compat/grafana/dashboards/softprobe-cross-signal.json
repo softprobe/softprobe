@@ -1,0 +1,178 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Deterministic cross-signal dashboard with native Prometheus, Loki, and Tempo panels, tenant-A pivots, and dashboard variables.",
+  "editable": false,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Open tenant-A logs",
+      "type": "link",
+      "url": "/explore?left=%7B%22datasource%22%3A%22softprobe-loki-a%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bservice_name%3D%5C%22checkout%5C%22%7D%22%2C%22refId%22%3A%22A%22%7D%5D%7D"
+    },
+    {
+      "asDropdown": false,
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Open tenant-A traces",
+      "type": "link",
+      "url": "/explore?left=%7B%22datasource%22%3A%22softprobe-tempo-a%22%2C%22queries%22%3A%5B%7B%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7B%7D%22%2C%22refId%22%3A%22A%22%7D%5D%7D"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-a"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom-a"
+          },
+          "editorMode": "code",
+          "expr": "k6_vus",
+          "legendFormat": "vus",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Metrics",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "softprobe-loki-a"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLines": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "softprobe-loki-a"
+          },
+          "editorMode": "code",
+          "expr": "{}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Logs",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "softprobe-tempo-a"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "softprobe-tempo-a"
+          },
+          "query": "{}",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces",
+      "type": "table"
+    }
+  ],
+  "refresh": false,
+  "schemaVersion": 39,
+  "tags": [
+    "softprobe",
+    "cross-signal",
+    "deterministic"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "load-generator",
+          "value": "load-generator"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "softprobe-prom-a"
+        },
+        "definition": "label_values(k6_http_reqs, job)",
+        "includeAll": false,
+        "label": "Metric job",
+        "name": "job",
+        "options": [],
+        "query": "label_values(k6_http_reqs, job)",
+        "refresh": 1,
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "checkout",
+          "value": "checkout"
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "softprobe-loki-a"
+        },
+        "definition": "label_values({service_name=~\".+\"}, service_name)",
+        "includeAll": false,
+        "label": "Log service",
+        "name": "service",
+        "options": [],
+        "query": "label_values({service_name=~\".+\"}, service_name)",
+        "refresh": 1,
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Softprobe cross-signal smoke",
+  "uid": "softprobe-cross-signal",
+  "version": 1
+}

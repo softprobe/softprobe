@@ -9,7 +9,7 @@
 
 services:
   auth-mock:
-    image: wiremock/wiremock:3.9.2
+    image: wiremock/wiremock@sha256:d13997cd7b52583528a766019cfe7d4e91c4d224a67bdaa6f60efbb532f32176
     container_name: thelake-grafana-auth-mock
     command: ["--port", "8080", "--global-response-templating"]
     volumes:
@@ -23,7 +23,10 @@ services:
       retries: 20
 
   grafana:
-    image: grafana/grafana:11.2.0
+    # GRAFANA_COMPOSE_IMAGE is resolved by the launcher for the canonical
+    # manifest check; keep the compose image itself immutable so a tag-only or
+    # placeholder environment override cannot weaken the manual stack.
+    image: grafana/grafana@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
     container_name: thelake-grafana-manual
     depends_on:
       auth-mock:

@@ -24,8 +24,9 @@ use super::attach::{
 };
 use super::object_store::configure_object_store;
 use super::util::{
-    ensure_metrics_fidelity_columns, ensure_variant_column_types, escape_sql_literal, size_literal,
-    WriteAttemptError,
+    ensure_log_timestamp_precision, ensure_metrics_fidelity_columns, ensure_trace_fidelity_columns,
+    ensure_trace_timestamp_precision, ensure_variant_column_types, escape_sql_literal,
+    size_literal, WriteAttemptError,
 };
 
 pub(super) struct WriterPool {
@@ -335,8 +336,20 @@ impl DuckLakeWriter {
                         conn.execute_batch(&ddl).map_err(|e| {
                             WriteAttemptError::Retryable(anyhow!("CREATE TABLE failed: {e}"))
                         })?;
+                        if variant_table_name == "traces" {
+                            ensure_trace_fidelity_columns(conn, qualified_table)
+                                .map_err(WriteAttemptError::Fatal)?;
+                        }
                         ensure_variant_column_types(conn, qualified_table, &variant_table_name)
                             .map_err(WriteAttemptError::from_variant_guard)?;
+                        if variant_table_name == "traces" {
+                            ensure_trace_timestamp_precision(conn, qualified_table)
+                                .map_err(WriteAttemptError::Fatal)?;
+                        }
+                        if variant_table_name == "logs" {
+                            ensure_log_timestamp_precision(conn, qualified_table)
+                                .map_err(WriteAttemptError::Fatal)?;
+                        }
                         if variant_table_name == "metrics" {
                             ensure_metrics_fidelity_columns(conn, qualified_table)
                                 .map_err(WriteAttemptError::Fatal)?;
@@ -400,10 +413,19 @@ impl DuckLakeWriter {
     ) -> Result<PathBuf> {
         let base_dir = std::env::temp_dir().join("splake-ducklake");
         std::fs::create_dir_all(&base_dir)?;
+        // The staging dir is shared by every engine in the process (and other
+        // processes on the host). Nanosecond timestamps alone collided under
+        // concurrent writers, truncating a peer's open parquet mid-write and
+        // failing its CREATE TABLE with "TProtocolException: Invalid data";
+        // PID + monotonic sequence make the name collision-free.
+        static TEMP_PARQUET_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = TEMP_PARQUET_SEQ.fetch_add(1, Ordering::Relaxed);
         let temp_path = base_dir.join(format!(
-            "{}-{}.parquet",
+            "{}-{}-{}-{}.parquet",
             table_name,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            seq
         ));
         let file = std::fs::File::create(&temp_path)?;
         let mut writer = ArrowWriter::try_new(
@@ -539,6 +561,9 @@ impl DuckLakeWriter {
 mod tests {
     use super::*;
     use crate::config::{Config, DuckLakeConfig};
+    use crate::models::Log;
+    use crate::storage::schema::{arrow, OtlpLogsTable};
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn spans_schema_has_no_process_global_promoted_columns() {
@@ -565,5 +590,145 @@ mod tests {
             schema.field_with_name("division_name").is_err(),
             "promoted telemetry columns come from runtime-scoped promotion apply, not process config"
         );
+    }
+
+    #[test]
+    fn migrates_existing_microsecond_log_columns_without_truncating_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE upgrade_logs (
+                timestamp TIMESTAMPTZ NOT NULL,
+                observed_timestamp TIMESTAMPTZ
+             );
+             INSERT INTO upgrade_logs VALUES
+                ('2023-11-14 22:13:20.123456+00', '2023-11-14 22:13:20.654321+00');",
+        )
+        .unwrap();
+
+        ensure_log_timestamp_precision(&conn, "upgrade_logs").unwrap();
+
+        let observed: (String, i64, String, i64) = conn
+            .query_row(
+                "SELECT typeof(timestamp), epoch_ns(timestamp),
+                        typeof(observed_timestamp), epoch_ns(observed_timestamp)
+                 FROM upgrade_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            (
+                "TIMESTAMP_NS".into(),
+                1_700_000_000_123_456_000,
+                "TIMESTAMP_NS".into(),
+                1_700_000_000_654_321_000,
+            )
+        );
+    }
+
+    #[test]
+    fn migrates_existing_microsecond_trace_columns_without_losing_epoch_values() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE upgrade_traces (
+                timestamp TIMESTAMPTZ NOT NULL,
+                end_timestamp TIMESTAMPTZ
+             );
+             INSERT INTO upgrade_traces VALUES
+                ('2023-11-14 22:13:20.123456+00', '2023-11-14 22:13:20.654321+00');",
+        )
+        .unwrap();
+
+        ensure_trace_timestamp_precision(&conn, "upgrade_traces").unwrap();
+
+        let observed: (String, i64, String, i64) = conn
+            .query_row(
+                "SELECT typeof(timestamp), epoch_ns(timestamp),
+                        typeof(end_timestamp), epoch_ns(end_timestamp)
+                 FROM upgrade_traces",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            (
+                "TIMESTAMP_NS".into(),
+                1_700_000_000_123_456_000,
+                "TIMESTAMP_NS".into(),
+                1_700_000_000_654_321_000,
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_unsupported_log_timestamp_schema_before_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE upgrade_logs_refusal (
+                timestamp VARCHAR NOT NULL,
+                observed_timestamp TIMESTAMPTZ
+             );",
+        )
+        .unwrap();
+
+        let error = ensure_log_timestamp_precision(&conn, "upgrade_logs_refusal").unwrap_err();
+        assert!(error.to_string().contains("cannot safely migrate"));
+        let timestamp_type: String = conn
+            .query_row(
+                "SELECT column_type FROM (DESCRIBE upgrade_logs_refusal)
+                 WHERE column_name = 'timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(timestamp_type, "VARCHAR");
+    }
+
+    #[test]
+    fn duckdb_read_parquet_preserves_log_nanoseconds() {
+        let timestamp_ns = 1_700_000_000_000_000_001;
+        let log = Log {
+            session_id: None,
+            timestamp: chrono::DateTime::from_timestamp_nanos(timestamp_ns),
+            observed_timestamp: None,
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: "one".into(),
+            attributes: HashMap::new(),
+            resource_attributes: HashMap::new(),
+            trace_id: None,
+            span_id: None,
+        };
+        let batch = arrow::logs_to_record_batch(&[log], &OtlpLogsTable::schema()).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "softprobe-log-timestamp-regression-{}.parquet",
+            timestamp_ns
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut parquet = ArrowWriter::try_new(
+            file,
+            batch.schema(),
+            Some(WriterProperties::builder().build()),
+        )
+        .unwrap();
+        parquet.write(&batch).unwrap();
+        parquet.close().unwrap();
+
+        let escaped_path = escape_sql_literal(path.to_string_lossy().as_ref());
+        let conn = Connection::open_in_memory().unwrap();
+        let observed: (String, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT typeof(timestamp), epoch_ns(timestamp) FROM read_parquet('{escaped_path}')"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(observed, ("TIMESTAMP_NS".into(), timestamp_ns));
     }
 }

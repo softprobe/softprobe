@@ -571,6 +571,88 @@ async fn telemetry_search_sessions_returns_summary_rows() {
 }
 
 #[tokio::test]
+async fn timestamp_ns_span_queries_work_through_http_paths() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-timestamp-ns-regression";
+    let trace_id = [0x42; 16];
+    let span_hex = hex::encode([0x43; 8]);
+
+    let body =
+        serde_json::to_string(&llm_generation_request(session_id, trace_id, [0x43; 8])).unwrap();
+    let ingest = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let response = router.clone().oneshot(ingest).await.expect("ingest");
+    assert_eq!(response.status(), StatusCode::OK);
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    let search = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "session_id": session_id,
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router.clone().oneshot(search).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    for uri in [
+        format!("/v1/llm/observations/{span_hex}"),
+        format!("/v1/llm/traces/{}", hex::encode(trace_id)),
+        format!("/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let telemetry = Request::builder()
+        .method("POST")
+        .uri("/v1/telemetry/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "scope": "traces",
+                "timeRange": {
+                    "from": "2024-07-18T00:00:00Z",
+                    "to": "2024-07-20T00:00:00Z"
+                },
+                "filter": { "field": "trace_id", "op": "eq", "value": hex::encode(trace_id) },
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router.oneshot(telemetry).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn telemetry_session_details_returns_spans_logs_and_metrics() {
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-details-e2e";

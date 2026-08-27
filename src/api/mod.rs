@@ -13,8 +13,10 @@ pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;
+use crate::compat::loki::loki_routes;
 use crate::compat::prometheus::prometheus_routes;
 use crate::compat::stubs::compat_stub_routes;
+use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
@@ -163,6 +165,8 @@ pub async fn create_router(
             get(telemetry::trace_details),
         )
         .merge(prometheus_routes())
+        .merge(loki_routes())
+        .merge(tempo_routes())
         .merge(compat_stub_routes())
         .with_state(state.clone());
 

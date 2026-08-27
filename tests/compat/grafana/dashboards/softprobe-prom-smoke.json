@@ -266,6 +266,54 @@
       ],
       "title": "HTTP server req duration count rate",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(k6_http_reqs{job=\"load-generator\"})",
+          "legendFormat": "checkout requests",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Checkout request total",
+      "type": "stat"
     }
   ],
   "refresh": "10s",

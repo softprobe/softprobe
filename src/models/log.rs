@@ -73,6 +73,23 @@ impl Log {
         // Extract session_id from log record or resource attributes
         let session_id = Self::extract_session_id(&log_record, resource_attributes);
 
+        // Reject timestamps outside the signed-nanosecond range so they can
+        // never silently persist as epoch/null downstream.
+        for label in [
+            ("time_unix_nano", log_record.time_unix_nano),
+            (
+                "observed_time_unix_nano",
+                log_record.observed_time_unix_nano,
+            ),
+        ] {
+            anyhow::ensure!(
+                label.1 <= i64::MAX as u64,
+                "log {} exceeds signed nanosecond range ({})",
+                label.0,
+                label.1
+            );
+        }
+
         // Extract timestamp (nanoseconds since epoch)
         let timestamp = if log_record.time_unix_nano > 0 {
             chrono::DateTime::from_timestamp_nanos(log_record.time_unix_nano as i64)

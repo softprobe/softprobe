@@ -1,0 +1,29 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/validate",
+    "bodyPatterns": [
+      {
+        "equalToJson": "{\"apiKey\":\"grafana-phase4-tenant-a\"}"
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "success": true,
+      "data": {
+        "tenantId": "grafana-phase4-tenant-a",
+        "resources": [
+          {
+            "resourceType": "BIGQUERY_STORAGE",
+            "configJson": "{\"dataset_id\":\"grafana-phase4\",\"bucket_name\":\"warehouse\"}"
+          }
+        ]
+      }
+    }
+  }
+}

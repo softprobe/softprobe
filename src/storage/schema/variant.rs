@@ -19,7 +19,12 @@ pub const VARIANT_FLOAT64_KEYS: &[&str] = &["sp.cost.total"];
 /// Telemetry columns stored as DuckLake `VARIANT` (staged as JSON Utf8).
 pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
     match table_name {
-        "traces" => &["attributes"],
+        "traces" => &[
+            "attributes",
+            "resource_attributes",
+            "instrumentation_scope",
+            "links",
+        ],
         "logs" => &["attributes", "resource_attributes"],
         "metrics" => &["attributes", "resource_attributes"],
         _ => &[],
@@ -174,7 +179,7 @@ mod tests {
         );
         assert_eq!(
             parquet_select_with_variant_casts("traces"),
-            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes)"
+            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes, resource_attributes::JSON::VARIANT AS resource_attributes, instrumentation_scope::JSON::VARIANT AS instrumentation_scope, links::JSON::VARIANT AS links)"
         );
         assert_eq!(
             parquet_select_with_variant_casts("logs"),

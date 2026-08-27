@@ -946,8 +946,9 @@ mod tests {
             "expected session init to load ducklake"
         );
         assert!(
-            DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = true;"),
-            "expected session init to enable unsafe_enable_version_guessing"
+            DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = false;"),
+            "session init must disable DuckLake version guessing so interactive \
+             queries read the latest committed snapshot instead of a stale one"
         );
     }
 

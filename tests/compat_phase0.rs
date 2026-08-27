@@ -1,64 +1,36 @@
 //! Compatibility Phase 0 contract suite (auth, manifests, isolation fixtures).
 
+#[path = "compat/support/auth.rs"]
+mod auth_support;
 #[path = "util/config.rs"]
 mod config;
 
 use arrow::array::{Array, Float64Array, ListArray, UInt64Array};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::middleware::from_fn_with_state;
-use axum::routing::post;
 use axum::Router;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
-use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::compat::capability::{parse_capability_yaml, EMBEDDED_CAPABILITY_V0};
 use softprobe_runtime::compat::errors::CompatErrorCode;
 use softprobe_runtime::compat::stubs::declared_compat_probe_paths;
 use softprobe_runtime::models::{Metric, SummaryQuantile};
-use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::storage::schema::tables::OtlpMetricsTable;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::MockServer;
 
 async fn authenticated_router(
     auth_success: bool,
     tenant_id: &str,
 ) -> (Router, MockServer, TempDir) {
-    let mock = MockServer::start().await;
-    let body = if auth_success {
-        serde_json::json!({
-            "success": true,
-            "data": { "tenantId": tenant_id, "resources": [] }
-        })
-    } else {
-        serde_json::json!({ "success": false })
-    };
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(&mock)
-        .await;
-
     let temp = TempDir::new().expect("temp");
-    let control = ControlPlaneRuntime {
-        resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
-    };
-    let (router, state) = create_router(
+    let (router, _state, mock) = auth_support::authenticated_router(
         Arc::new(config::file_backed_test_config(&temp)),
-        post(ingest_traces),
-        Some(control),
+        tenant_id,
+        auth_success,
     )
-    .await
-    .expect("router");
-    let router = router
-        .merge(runtime_control_routes().with_state(state.clone()))
-        .layer(from_fn_with_state(state, runtime_auth_middleware));
+    .await;
     (router, mock, temp)
 }
 
@@ -266,15 +238,39 @@ async fn compat_routes_authenticated_return_expected_status() {
                 assert_eq!(json["errorType"], "bad_data", "{method} {path}: {json}");
             }
         } else if path.starts_with("/loki/") {
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method} {path}");
-            assert_eq!(json["status"], "error", "{method} {path}: {json}");
-            assert!(
-                json["error"]
-                    .as_str()
-                    .unwrap_or("")
-                    .starts_with("unsupported_feature:"),
+            // Phase 2: Loki routes are live. Query endpoints validate their
+            // required query parameter; discovery endpoints return empty
+            // success data against an empty lake.
+            if path.ends_with("/query") || path.ends_with("/query_range") {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {json}");
+                assert_eq!(json["status"], "error", "{method} {path}: {json}");
+                assert!(
+                    json["error"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with("bad_request:"),
+                    "{method} {path}: {json}"
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
+                assert_eq!(json["status"], "success", "{method} {path}: {json}");
+                assert!(json["data"].is_array(), "{method} {path}: {json}");
+            }
+        } else if path.starts_with("/api/traces/") || path.starts_with("/api/v2/traces/") {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {json}");
+            assert_eq!(
+                json["softprobe_code"], "bad_request",
                 "{method} {path}: {json}"
             );
+        } else if path == "/api/search" {
+            assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
+            assert!(json["traces"].is_array(), "{method} {path}: {json}");
+        } else if path == "/api/search/tags" {
+            assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
+            assert!(json["tagNames"].is_array(), "{method} {path}: {json}");
+        } else if path.starts_with("/api/search/tag/") {
+            assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
+            assert!(json["tagValues"].is_array(), "{method} {path}: {json}");
         } else {
             assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method} {path}");
             assert_eq!(
@@ -375,6 +371,29 @@ async fn compat_query_tenant_id_param_does_not_override_auth() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["status"], "success");
     assert_eq!(json["data"]["resultType"], "vector");
+}
+
+#[tokio::test]
+async fn tempo_query_tenant_id_param_does_not_override_auth() {
+    // Negative isolation: Tempo query-string tenant_id must not change authenticated scope.
+    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/search?tenant_id=attacker")
+                .header("Authorization", "Bearer good-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["traces"], serde_json::json!([]));
 }
 
 #[tokio::test]

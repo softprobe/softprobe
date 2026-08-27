@@ -1,0 +1,17 @@
+name: Ensure compatibility toolchain
+description: Install ruby/python3/curl on self-hosted runners when missing.
+runs:
+  using: composite
+  steps:
+    - name: Ensure ruby/python3/curl
+      shell: bash
+      run: |
+        set -euo pipefail
+        missing=()
+        command -v ruby >/dev/null 2>&1 || missing+=("ruby-full")
+        command -v python3 >/dev/null 2>&1 || missing+=("python3")
+        command -v curl >/dev/null 2>&1 || missing+=("curl")
+        if [ "${#missing[@]}" -gt 0 ]; then
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+        fi

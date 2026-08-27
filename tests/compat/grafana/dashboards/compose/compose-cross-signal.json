@@ -1,0 +1,83 @@
+{
+  "annotations": { "list": [] },
+  "description": "Compose-lane cross-signal dashboard: seeded Prometheus, Loki, and Tempo panels with tenant-A pivots and variables.",
+  "editable": false,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        {
+          "expr": "grafana_phase4_requests_total{job=\"$job\"}",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Requests ($job)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "softprobe-loki-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "sortOrder": "Descending" },
+      "targets": [
+        {
+          "expr": "{service_name=~\"$service\"} |= \"error\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors ($service)",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "softprobe-tempo-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"checkout\" }",
+          "queryType": "search",
+          "refId": "A",
+          "limit": 20
+        }
+      ],
+      "title": "Checkout traces",
+      "type": "traces"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["compose-smoke"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "checkout", "value": "checkout" },
+        "datasource": { "type": "prometheus", "uid": "softprobe-prom-a" },
+        "name": "job",
+        "query": "label_values(grafana_phase4_requests_total, job)",
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "checkout", "value": "checkout" },
+        "datasource": { "type": "loki", "uid": "softprobe-loki-a" },
+        "name": "service",
+        "query": "label_values({service_name=~\".+\"}, service_name)",
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "2023-11-14T22:13:20Z", "to": "2023-11-14T22:14:20Z" },
+  "timezone": "utc",
+  "title": "Softprobe Compose Cross Signal",
+  "uid": "compose-cross-signal",
+  "version": 1
+}

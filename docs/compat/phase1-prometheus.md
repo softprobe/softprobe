@@ -41,7 +41,8 @@ src/compat/backends/ducklake_metrics.rs
 src/compat/backends/metrics.rs   # MetricsQueryBackend + matchers
 ```
 
-Wiring: `api/mod.rs` merges `prometheus_routes()`; Loki/Tempo remain stubs.
+Wiring: `api/mod.rs` merges `prometheus_routes()`; Loki Phase 2 is implemented
+as a query-only subset, while Tempo remains a stub surface.
 Manual Grafana: `make grafana-up` (OpenTelemetry Demo traffic; see `tests/compat/grafana/README.md`).
 
 ---

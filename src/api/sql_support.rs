@@ -17,18 +17,14 @@ pub(crate) fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Microseconds, not milliseconds: DuckDB TIMESTAMPTZ is microsecond-precision
-/// and cursors carry a real column value round-trip. Rendering at millisecond
-/// precision truncates the literal *below* the true value, so a keyset
-/// predicate built from it (`start_time < cursor`) silently drops every row in
-/// the same millisecond -- the last page comes back empty with a null
-/// next_cursor and no error at all. Verified on DuckDB 1.5.5: paging 8 sessions
-/// at limit=2 lost the final two.
-pub(crate) fn timestamp_literal(value: &DateTime<Utc>) -> String {
-    format!(
-        "{}::TIMESTAMPTZ",
-        sql_string_literal(&value.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-    )
+/// Render a nanosecond-precision literal for trace/span timestamp columns.
+pub(crate) fn timestamp_ns_literal(value: &DateTime<Utc>) -> String {
+    timestamp_ns_literal_from_str(&value.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+}
+
+/// Render a nanosecond-precision literal from an RFC3339 API value.
+pub(crate) fn timestamp_ns_literal_from_str(value: &str) -> String {
+    format!("{}::TIMESTAMP_NS", sql_string_literal(value))
 }
 
 pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {
@@ -56,7 +52,7 @@ pub(crate) fn cursor_predicate(
     let decoded = decode_cursor(cursor)?;
     Ok(format!(
         "({timestamp_col} < {ts} OR ({timestamp_col} = {ts} AND {id_col} < {id}))",
-        ts = timestamp_literal(&decoded.t),
+        ts = timestamp_ns_literal(&decoded.t),
         id = sql_string_literal(&decoded.id),
     ))
 }
@@ -74,15 +70,15 @@ pub(crate) fn push_optional_time_bounds(
             }
             conditions.push(format!(
                 "timestamp >= {} AND timestamp <= {}",
-                timestamp_literal(&from),
-                timestamp_literal(&to)
+                timestamp_ns_literal(&from),
+                timestamp_ns_literal(&to)
             ));
         }
         (Some(from), None) => {
-            conditions.push(format!("timestamp >= {}", timestamp_literal(&from)));
+            conditions.push(format!("timestamp >= {}", timestamp_ns_literal(&from)));
         }
         (None, Some(to)) => {
-            conditions.push(format!("timestamp <= {}", timestamp_literal(&to)));
+            conditions.push(format!("timestamp <= {}", timestamp_ns_literal(&to)));
         }
         (None, None) => {}
     }
@@ -120,5 +116,17 @@ mod tests {
             .with_timezone(&Utc);
         let mut conditions = Vec::new();
         assert!(push_optional_time_bounds(&mut conditions, Some(from), Some(to)).is_err());
+    }
+
+    #[test]
+    fn timestamp_ns_literal_preserves_nanoseconds() {
+        let timestamp = DateTime::parse_from_rfc3339("2026-07-18T23:22:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            timestamp_ns_literal(&timestamp),
+            "'2026-07-18T23:22:00.123456789Z'::TIMESTAMP_NS"
+        );
     }
 }

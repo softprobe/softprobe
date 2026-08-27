@@ -2,6 +2,58 @@ use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+/// Internal JSON carriers used only while the canonical span model is persisted.
+/// They keep OTLP scope/link metadata out of the user attribute namespace on read.
+pub const INSTRUMENTATION_SCOPE_ATTRIBUTE: &str = "__softprobe.instrumentation_scope";
+pub const LINKS_ATTRIBUTE: &str = "__softprobe.links";
+/// Namespace prefix reserved for internal carriers; client telemetry must not use it.
+pub const RESERVED_ATTRIBUTE_PREFIX: &str = "__softprobe.";
+
+pub fn encode_instrumentation_scope(
+    scope: &opentelemetry_proto::tonic::common::v1::InstrumentationScope,
+) -> String {
+    let attributes = crate::models::key_values_to_map(&scope.attributes)
+        .into_iter()
+        .map(|(key, value)| {
+            serde_json::json!({
+                "key": key,
+                "value": {"stringValue": value},
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "name": scope.name,
+        "version": scope.version,
+        "attributes": attributes,
+    })
+    .to_string()
+}
+
+pub fn encode_links(links: &[opentelemetry_proto::tonic::trace::v1::span::Link]) -> String {
+    serde_json::json!(links
+        .iter()
+        .map(|link| {
+            let attributes = crate::models::key_values_to_map(&link.attributes)
+                .into_iter()
+                .map(|(key, value)| {
+                    serde_json::json!({
+                        "key": key,
+                        "value": {"stringValue": value},
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "traceId": hex::encode(&link.trace_id),
+                "spanId": hex::encode(&link.span_id),
+                "traceState": link.trace_state,
+                "attributes": attributes,
+                "flags": link.flags,
+            })
+        })
+        .collect::<Vec<_>>())
+    .to_string()
+}
+
 /// Span domain model - unified representation across all layers
 /// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
@@ -33,8 +85,7 @@ pub struct Span {
     // Includes user-provided sp.* business attributes for search
     pub attributes: HashMap<String, String>,
 
-    // Ingest-only resource attributes used for promotion extraction (active specs in this runtime's DuckLake schema).
-    // These are not a physical traces-table column; selected values become promoted columns.
+    // Resource attributes retained for Tempo resource projection and promotion extraction.
     pub resource_attributes: HashMap<String, String>,
 
     // Field 13: Events ARRAY<STRUCT<name, timestamp, attributes>>
@@ -98,6 +149,26 @@ impl Span {
         otlp_span: opentelemetry_proto::tonic::trace::v1::Span,
         resource_attributes: &HashMap<String, String>,
     ) -> Result<Self> {
+        // Reject timestamps outside the signed-nanosecond range so they can
+        // never silently persist as epoch/null downstream.
+        for label in [
+            ("start_time_unix_nano", otlp_span.start_time_unix_nano),
+            ("end_time_unix_nano", otlp_span.end_time_unix_nano),
+        ] {
+            anyhow::ensure!(
+                label.1 <= i64::MAX as u64,
+                "span {} exceeds signed nanosecond range ({})",
+                label.0,
+                label.1
+            );
+        }
+        for event in &otlp_span.events {
+            anyhow::ensure!(
+                event.time_unix_nano <= i64::MAX as u64,
+                "span event time exceeds signed nanosecond range ({})",
+                event.time_unix_nano
+            );
+        }
         let attributes = crate::models::key_values_to_map(&otlp_span.attributes);
 
         // Extract events
@@ -291,7 +362,9 @@ impl Span {
 
 #[cfg(test)]
 mod tests {
-    use super::{Span, SpanEvent};
+    use super::{encode_instrumentation_scope, encode_links, Span, SpanEvent};
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::trace::v1::span::Link;
     use std::collections::HashMap;
 
     fn base_span() -> Span {
@@ -320,6 +393,40 @@ mod tests {
             http_response_headers: None,
             http_response_body: None,
         }
+    }
+
+    #[test]
+    fn otlp_scope_and_link_carriers_keep_key_value_shape() {
+        let scope = InstrumentationScope {
+            name: "otel-rust".into(),
+            version: "1.0".into(),
+            attributes: vec![KeyValue {
+                key: "scope.attr".into(),
+                value: Some(AnyValue {
+                    value: Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                            "yes".into(),
+                        ),
+                    ),
+                }),
+            }],
+            dropped_attributes_count: 0,
+        };
+        let scope_json: serde_json::Value =
+            serde_json::from_str(&encode_instrumentation_scope(&scope)).unwrap();
+        assert_eq!(scope_json["attributes"][0]["key"], "scope.attr");
+
+        let links_json: serde_json::Value = serde_json::from_str(&encode_links(&[Link {
+            trace_id: vec![1, 2],
+            span_id: vec![3, 4],
+            trace_state: "vendor=value".into(),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+            flags: 1,
+        }]))
+        .unwrap();
+        assert_eq!(links_json[0]["traceState"], "vendor=value");
+        assert!(links_json[0]["attributes"].is_array());
     }
 
     #[test]

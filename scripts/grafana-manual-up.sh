@@ -12,6 +12,22 @@ cd "$ROOT"
 COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
 COMPOSE_FILE="$ROOT/tests/compat/grafana/docker-compose.manual.yml"
+GRAFANA_COMPOSE_IMAGE="${GRAFANA_COMPOSE_IMAGE:-$(python3 - "$ROOT/docs/compat/references.v0.yaml" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(
+    r"(?ms)^\s+grafana:\s*\n\s+image:\s*([^\s#]+)\s*\n\s+tag:\s*[\"']?([^\s\"']+).*?\n\s+digest:\s*[\"']?(sha256:[0-9a-fA-F]{64})",
+    text,
+)
+if not match:
+    raise SystemExit("canonical Grafana manifest entry is missing an immutable digest")
+print(f"{match.group(1)}@{match.group(3)}")
+PY
+)}"
+export GRAFANA_COMPOSE_IMAGE
 OVERLAY_DIR="$ROOT/tests/compat/grafana/otel-demo"
 COLLECTOR_EXTRAS="$OVERLAY_DIR/otelcol-config-extras.yml"
 COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"

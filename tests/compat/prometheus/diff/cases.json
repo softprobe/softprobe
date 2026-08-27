@@ -12,7 +12,7 @@
   {
     "id": "rate_counter",
     "path": "/api/v1/query",
-    "params": { "query": "rate(demo_counter[2m])", "time": "1700000120" }
+    "params": { "query": "rate(demo_counter_total[2m])", "time": "1700000120" }
   },
   {
     "id": "range_selector",
@@ -22,6 +22,25 @@
       "start": "1700000000",
       "end": "1700000120",
       "step": "60"
+    }
+  },
+  {
+    "id": "labels",
+    "path": "/api/v1/labels",
+    "params": { "match[]": "http_requests{job=\"api\"}" }
+  },
+  {
+    "id": "label_values",
+    "path": "/api/v1/label/job/values",
+    "params": { "match[]": "http_requests{job=\"api\"}" }
+  },
+  {
+    "id": "series",
+    "path": "/api/v1/series",
+    "params": {
+      "match[]": "http_requests{job=\"api\"}",
+      "start": "1700000000",
+      "end": "1700000120"
     }
   }
 ]

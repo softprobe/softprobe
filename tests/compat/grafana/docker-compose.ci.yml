@@ -1,0 +1,186 @@
+# Self-contained Phase 4 Grafana system lane.
+#
+# The runtime is built from this checkout inside a local Rust builder/runtime
+# container. The only external service credentials are fixed test-only values
+# resolved by the local WireMock auth service; no hosted Softprobe endpoint is
+# required.
+
+services:
+  auth-mock:
+    image: wiremock/wiremock@sha256:d13997cd7b52583528a766019cfe7d4e91c4d224a67bdaa6f60efbb532f32176
+    command: ["--port", "8080"]
+    volumes:
+      - ./fixtures/auth:/home/wiremock:ro
+    ports:
+      - "${GRAFANA_AUTH_MOCK_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/__admin/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [grafana_compat]
+
+  postgres:
+    image: postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+    environment:
+      POSTGRES_PASSWORD: ducklake
+      POSTGRES_USER: ducklake
+      POSTGRES_DB: ducklake
+    ports:
+      - "${GRAFANA_POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - grafana-postgres-data:/var/lib/postgresql/data
+    networks: [grafana_compat]
+
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${GRAFANA_MINIO_PORT:-19000}:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - grafana-minio-data:/data
+    networks: [grafana_compat]
+
+  minio-init:
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    # Single-element list so compose passes the whole script as one sh argument;
+    # a plain string is shell-lexed into separate args and `sh -ec mc` prints usage.
+    command:
+      - >-
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb --ignore-existing local/warehouse
+    networks: [grafana_compat]
+
+  softprobe:
+    image: ${SOFTPROBE_BUILDER_IMAGE:-rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4}
+    depends_on:
+      auth-mock:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: ${SOFTPROBE_LOG_LEVEL:-info}
+      DUCKDB_DOWNLOAD_LIB: "1"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      DUCKLAKE_METADATA_SCHEMA: softprobe
+      SOFTPROBE_ADMIN_API_KEY: grafana-phase4-admin
+      SOFTPROBE_AUTH_URL: http://auth-mock:8080/validate
+      SOFTPROBE_LISTEN_ADDR: 0.0.0.0:8090
+      OTEL_GRPC_PORT: "4317"
+      CONFIG_FILE: /workspace/tests/compat/grafana/fixtures/softprobe-config.yaml
+      CARGO_TARGET_DIR: /tmp/thelake-grafana-target
+    working_dir: /workspace
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        apt-get update -qq
+        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
+        cargo run --locked --bin softprobe-runtime
+    volumes:
+      - ../../..:/workspace:ro
+      # Shared warm cargo target: the seed binary reuses softprobe's compiled
+      # dependency tree instead of paying a second full cold build.
+      - grafana-cargo-target:/tmp/thelake-grafana-target
+    ports:
+      - "${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}:8090"
+      - "${GRAFANA_SOFTPROBE_GRPC_PORT:-14317}:4317"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/ready >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 300
+      start_period: 600s
+    networks: [grafana_compat]
+
+  grafana-seed:
+    image: ${SOFTPROBE_BUILDER_IMAGE:-rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4}
+    depends_on:
+      softprobe:
+        condition: service_healthy
+    environment:
+      DUCKDB_DOWNLOAD_LIB: "1"
+      SOFTPROBE_AUTH_URL: http://auth-mock:8080/validate
+      GRAFANA_SEED_SOFTPROBE_URL: http://softprobe:8090
+      GRAFANA_SEED_RECEIPT: /artifacts/seed-receipt.json
+      SOFTPROBE_ADMIN_API_KEY: grafana-phase4-admin
+      SOFTPROBE_TENANT_A_API_KEY: grafana-phase4-tenant-a
+      SOFTPROBE_TENANT_B_API_KEY: grafana-phase4-tenant-b
+      SOFTPROBE_TENANT_A_ID: grafana-phase4-tenant-a
+      SOFTPROBE_TENANT_B_ID: grafana-phase4-tenant-b
+      CARGO_TARGET_DIR: /tmp/thelake-grafana-target
+      SEED_DEBUG: ${SEED_DEBUG:-}
+    working_dir: /workspace
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        apt-get update -qq
+        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
+        cargo run --locked --bin grafana_seed_otlp
+    volumes:
+      - ../../..:/workspace:ro
+      - grafana-cargo-target:/tmp/thelake-grafana-target
+      - ${GRAFANA_SEED_ARTIFACT_DIR:-../../../target/compat/grafana}:/artifacts
+    networks: [grafana_compat]
+
+  grafana:
+    image: ${GRAFANA_COMPOSE_IMAGE:?GRAFANA_COMPOSE_IMAGE must be supplied from docs/compat/references.v0.yaml}
+    depends_on:
+      softprobe:
+        condition: service_healthy
+      grafana-seed:
+        condition: service_completed_successfully
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: light
+      GF_LOG_LEVEL: warn
+      SOFTPROBE_URL: ${GRAFANA_SOFTPROBE_URL:-http://softprobe:8090}
+      SOFTPROBE_API_KEY: grafana-phase4-tenant-a
+      SOFTPROBE_TENANT_A_API_KEY: grafana-phase4-tenant-a
+      SOFTPROBE_TENANT_B_API_KEY: grafana-phase4-tenant-b
+      SOFTPROBE_TENANT_A_ID: grafana-phase4-tenant-a
+      SOFTPROBE_TENANT_B_ID: grafana-phase4-tenant-b
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [grafana_compat]
+
+volumes:
+  grafana-postgres-data:
+  grafana-minio-data:
+  grafana-cargo-target:
+
+networks:
+  grafana_compat:

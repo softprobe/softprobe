@@ -6,55 +6,15 @@
 //! Error bodies use protocol-native envelopes (see [`crate::compat::envelopes`]).
 
 use crate::api::AppState;
-use crate::authn::TenantInfo;
-use crate::compat::envelopes::{error_envelope, error_response};
+use crate::compat::envelopes::error_envelope;
 use crate::compat::errors::CompatError;
-use crate::compat::tenant::{
-    scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
-    TEMPO_SCOPE_HEADER,
-};
-use axum::extract::Extension;
-use axum::response::Response;
-use axum::routing::get;
+use crate::compat::tenant::ProtocolScope;
 use axum::Router;
 use serde_json::Value;
 
-fn stub_unsupported(
-    tenant: TenantInfo,
-    protocol: ProtocolScope,
-    scope_header: Option<&str>,
-    feature: &'static str,
-) -> Response {
-    match TenantContext::from_authenticated(tenant, protocol, scope_header, QueryLimits::default())
-    {
-        Ok(_) => error_response(protocol, CompatError::unsupported(feature)),
-        Err(err) => error_response(protocol, err),
-    }
-}
-
-async fn stub_loki(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMap) -> Response {
-    let scope = scope_header_value(&headers, LOKI_SCOPE_HEADER);
-    stub_unsupported(tenant.0.clone(), ProtocolScope::Loki, scope, "loki_api")
-}
-
-async fn stub_tempo(tenant: Extension<TenantInfo>, headers: axum::http::HeaderMap) -> Response {
-    let scope = scope_header_value(&headers, TEMPO_SCOPE_HEADER);
-    stub_unsupported(tenant.0.clone(), ProtocolScope::Tempo, scope, "tempo_api")
-}
-
-/// Loki + Tempo routes that return `501 unsupported_feature` after auth + scope checks.
+/// Compatibility routes that remain declared but unsupported.
 pub fn compat_stub_routes() -> Router<AppState> {
     Router::new()
-        .route("/loki/api/v1/query", get(stub_loki))
-        .route("/loki/api/v1/query_range", get(stub_loki))
-        .route("/loki/api/v1/labels", get(stub_loki))
-        .route("/loki/api/v1/label/{name}/values", get(stub_loki))
-        .route("/loki/api/v1/series", get(stub_loki))
-        .route("/api/traces/{trace_id}", get(stub_tempo))
-        .route("/api/v2/traces/{trace_id}", get(stub_tempo))
-        .route("/api/search", get(stub_tempo))
-        .route("/api/search/tags", get(stub_tempo))
-        .route("/api/search/tag/{tag}/values", get(stub_tempo))
 }
 
 /// Isolation fixture: every declared Phase 0 matrix route path pattern.

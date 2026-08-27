@@ -1,0 +1,430 @@
+{
+  "evidence": {
+    "issue": "#29",
+    "phase": "Phase 2",
+    "reference_manifest": "docs/compat/references.v0.yaml",
+    "reference_image": "grafana/loki@sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986",
+    "normalization": "tests/compat/support/loki.rs::normalize_loki_response"
+  },
+  "capability": {
+    "protocol": "loki",
+    "phase": "phase_2",
+    "supported_endpoints": [
+      "/loki/api/v1/query",
+      "/loki/api/v1/query_range",
+      "/loki/api/v1/labels",
+      "/loki/api/v1/label/{name}/values",
+      "/loki/api/v1/series"
+    ],
+    "supported_features": [
+      "stream_selectors",
+      "label_matchers",
+      "line_filters",
+      "json_and_logfmt",
+      "structured_metadata",
+      "post_filter_limit",
+      "nanosecond_timestamps",
+      "duplicate_entries"
+    ],
+    "unsupported_features": [
+      "interval_sampling",
+      "step_sampling",
+      "unwrap",
+      "metric_aggregations"
+    ],
+    "supported_features_extra": [
+      "vector_literal_instant_metric_expressions"
+    ],
+    "ordering_policy": "timestamp_asc,stream_labels_asc,line_asc,structured_metadata_asc; direction reverses the complete order"
+  },
+  "records": [
+    {
+      "timestamp_ns": "1786827600000000001",
+      "line": "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}",
+      "stream": {
+        "service_name": "checkout",
+        "deployment_environment": "prod"
+      },
+      "metadata": {
+        "request_id": "r1",
+        "user_id": "u1"
+      }
+    },
+    {
+      "timestamp_ns": "1786827600000000001",
+      "line": "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}",
+      "stream": {
+        "service_name": "checkout",
+        "deployment_environment": "prod"
+      },
+      "metadata": {
+        "request_id": "r2",
+        "user_id": "u1"
+      }
+    },
+    {
+      "timestamp_ns": "1786827601000000000",
+      "line": "level=warn msg=\"checkout retry\" duration_ms=25",
+      "stream": {
+        "service_name": "checkout",
+        "deployment_environment": "prod"
+      },
+      "metadata": {
+        "request_id": "r3",
+        "user_id": "u2"
+      }
+    },
+    {
+      "timestamp_ns": "1786827602000000000",
+      "line": "{\"level\":\"error\",\"msg\":\"payment failed\",\"status\":500,\"duration_ms\":42}",
+      "stream": {
+        "service_name": "payments",
+        "deployment_environment": "staging"
+      },
+      "metadata": {
+        "request_id": "r4",
+        "user_id": "u3"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "loki-query-forward-duplicate-nanoseconds",
+      "path": "/loki/api/v1/query",
+      "params": {
+        "query": "{service_name=\"checkout\"} |= \"checkout\" | json | level=\"info\"",
+        "time": "1786827600000000002",
+        "direction": "forward",
+        "limit": "10"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 2,
+        "entry_lines": [
+          "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}",
+          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}"
+        ]
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-query-backward-limit-order",
+      "path": "/loki/api/v1/query",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "start": "1786827600000000001",
+        "end": "1786827601000000001",
+        "direction": "backward",
+        "limit": "1"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 1,
+        "entry_lines": [
+          "level=warn msg=\"checkout retry\" duration_ms=25"
+        ]
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-query-range-selectors-line-filters",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=~\"checkout|payments\",deployment_environment!=\"staging\"} |~ \"checkout (started|finished|retry)\"",
+        "start": "1786827600000000001",
+        "end": "1786827602000000000",
+        "direction": "backward",
+        "limit": "10"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 3,
+        "entry_lines": [
+          "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}",
+          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}",
+          "level=warn msg=\"checkout retry\" duration_ms=25"
+        ]
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-query-range-since-interval-step",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "end": "1786827603000000000",
+        "since": "3s",
+        "interval": "1s",
+        "step": "1s",
+        "direction": "forward",
+        "limit": "10"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "softprobe_code": "unsupported_feature",
+        "result_type": "streams"
+      }
+    },
+    {
+      "id": "loki-query-json-unwrap-declared",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"payments\"} | json | status=\"500\" | unwrap duration_ms",
+        "start": "1786827602000000000",
+        "end": "1786827602000000001",
+        "direction": "forward"
+      },
+      "expect": {
+        "status": 501,
+        "envelope": "error",
+        "softprobe_code": "unsupported_feature"
+      }
+    },
+    {
+      "id": "loki-query-logfmt-parser",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"} | logfmt | level=\"warn\"",
+        "start": "1786827601000000000",
+        "end": "1786827601000000001",
+        "direction": "forward"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 1,
+        "entry_lines": [
+          "level=warn msg=\"checkout retry\" duration_ms=25"
+        ]
+      }
+    },
+    {
+      "id": "loki-post-filter-limit-forward-order",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"} |~ \"finished|retry\"",
+        "start": "1786827600000000001",
+        "end": "1786827602000000001",
+        "direction": "forward",
+        "limit": "1"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 1,
+        "entry_lines": [
+          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}"
+        ]
+      }
+    },
+    {
+      "id": "loki-label-names-discovery",
+      "path": "/loki/api/v1/labels",
+      "params": {
+        "start": "1786827600000000001",
+        "end": "1786827602000000001"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "data_shape": "array",
+        "values": [
+          "deployment_environment",
+          "service_name"
+        ]
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-label-values-matchers",
+      "path": "/loki/api/v1/label/service_name/values",
+      "params": {
+        "match[]": "{deployment_environment=~\"prod|staging\"}",
+        "start": "1786827600000000001",
+        "end": "1786827602000000001"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "data_shape": "array",
+        "values": [
+          "checkout",
+          "payments"
+        ]
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-series-discovery",
+      "path": "/loki/api/v1/series",
+      "params": {
+        "match[]": "{service_name=~\"checkout|payments\"}",
+        "start": "1786827600000000001",
+        "end": "1786827602000000001"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "data_shape": "array"
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-empty-boundary-half-open",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "start": "1786827600000000001",
+        "end": "1786827600000000001"
+      },
+      "expect": {
+        "status": 200,
+        "envelope": "success",
+        "result_type": "streams",
+        "data_shape": "streams",
+        "entry_count": 0
+      },
+      "differential": true
+    },
+    {
+      "id": "loki-invalid-reversed-window",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "start": "1786827602000000000",
+        "end": "1786827600000000001"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    },
+    {
+      "id": "loki-invalid-missing-window",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "end": "1786827602000000000"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    },
+    {
+      "id": "loki-invalid-step-zero",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "start": "1786827600000000001",
+        "end": "1786827601000000000",
+        "step": "0"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    },
+    {
+      "id": "loki-invalid-interval-format",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "start": "1786827600000000001",
+        "end": "1786827601000000000",
+        "interval": "not-a-duration"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    },
+    {
+      "id": "loki-unsupported-count-over-time",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "count_over_time({service_name=\"checkout\"}[1m])",
+        "start": "1786827600000000001",
+        "end": "1786827601000000000"
+      },
+      "expect": {
+        "status": 501,
+        "envelope": "error",
+        "softprobe_code": "unsupported_feature"
+      }
+    },
+    {
+      "id": "loki-unsupported-unwrap-without-parser",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"payments\"} | unwrap duration_ms",
+        "start": "1786827602000000000",
+        "end": "1786827602000000001"
+      },
+      "expect": {
+        "status": 501,
+        "envelope": "error",
+        "softprobe_code": "unsupported_feature"
+      }
+    },
+    {
+      "id": "loki-unsupported-parser-field-expression",
+      "path": "/loki/api/v1/query_range",
+      "params": {
+        "query": "{service_name=\"payments\"} | json status",
+        "start": "1786827602000000000",
+        "end": "1786827602000000001"
+      },
+      "expect": {
+        "status": 501,
+        "envelope": "error",
+        "softprobe_code": "unsupported_feature"
+      }
+    },
+    {
+      "id": "loki-malformed-selector",
+      "path": "/loki/api/v1/query",
+      "params": {
+        "query": "checkout",
+        "time": "1786827600000000001"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    },
+    {
+      "id": "loki-invalid-limit-zero",
+      "path": "/loki/api/v1/query",
+      "params": {
+        "query": "{service_name=\"checkout\"}",
+        "time": "1786827600000000001",
+        "limit": "0"
+      },
+      "expect": {
+        "status": 400,
+        "envelope": "error",
+        "softprobe_code": "bad_request"
+      }
+    }
+  ]
+}
