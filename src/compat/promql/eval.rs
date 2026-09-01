@@ -82,8 +82,29 @@ pub async fn eval_range(
         ));
     }
 
+    ctx.limits
+        .validate_range_eval_points(start_ms, end_ms, step_ms, 1)?;
+
     let range_ms = (end_ms - start_ms).abs();
-    let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
+    let requested_step_ms = step_ms;
+    let mut prefetch =
+        PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
+    let step_ms = ctx.limits.coerce_range_step_ms(
+        start_ms,
+        end_ms,
+        step_ms,
+        prefetch.total_series(),
+    );
+    if step_ms != requested_step_ms {
+        prefetch =
+            PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
+    }
+    ctx.limits.validate_range_eval_points(
+        start_ms,
+        end_ms,
+        step_ms,
+        prefetch.total_series(),
+    )?;
 
     // §9.1 step 5: collapse table already holds sum-by-job series at 1h grain.
     if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
@@ -677,6 +698,10 @@ struct PrefetchBackend {
 }
 
 impl PrefetchBackend {
+    fn total_series(&self) -> usize {
+        self.entries.iter().map(|(_, series)| series.len()).sum()
+    }
+
     fn flat_series(&self) -> Vec<MetricSeries> {
         let mut out = Vec::new();
         for (_, series) in &self.entries {
