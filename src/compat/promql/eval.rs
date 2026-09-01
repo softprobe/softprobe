@@ -86,20 +86,9 @@ pub async fn eval_range(
         .validate_range_eval_points(start_ms, end_ms, step_ms, 1)?;
 
     let range_ms = (end_ms - start_ms).abs();
-    let requested_step_ms = step_ms;
-    let mut prefetch =
+    let prefetch =
         PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
-    let step_ms = ctx.limits.coerce_range_step_ms(
-        start_ms,
-        end_ms,
-        step_ms,
-        prefetch.total_series(),
-    );
-    if step_ms != requested_step_ms {
-        prefetch =
-            PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
-    }
-    ctx.limits.validate_range_eval_points(
+    let step_ms = ctx.limits.fit_range_step_ms(
         start_ms,
         end_ms,
         step_ms,
