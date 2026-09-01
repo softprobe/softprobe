@@ -48,7 +48,7 @@ fail() {
 }
 
 # --- 1. working tree committed ---
-dirty="$(git status --porcelain | grep -vE '^\?\? \.codegraph/|^\?\? \.cursor/hooks/\.state/' || true)"
+dirty="$(git status --porcelain | grep -vE '^\?\? \.codegraph/|^\?\? \.agent/|^\?\? \.cursor/hooks/\.state/' || true)"
 if [[ -n "$dirty" ]]; then
   preview="$(printf '%s\n' "$dirty" | head -n 40)"
   fail "Code is not committed. Dirty paths:
