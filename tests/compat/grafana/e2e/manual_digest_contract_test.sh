@@ -29,12 +29,37 @@ if re.search(r"image:\s*\$\{GRAFANA_REFERENCE_IMAGE:-[^}]*:[^}]+\}", compose_tex
     raise SystemExit("manual Grafana compose still permits a mutable tag fallback")
 if "GRAFANA_COMPOSE_IMAGE" not in compose_text:
     raise SystemExit("manual Grafana compose is not wired to the canonical immutable image")
-if re.search(r"image:\s*[^\n@]*:[0-9][^\s]*\s*$", compose_text, re.M):
-    raise SystemExit("manual Grafana compose contains a tag-only image")
+# Postgres is a dev catalog pin (not part of references.v0.yaml); Grafana/WireMock must be digest-pinned.
+for line in compose_text.splitlines():
+    stripped = line.strip()
+    if not stripped.startswith("image:"):
+        continue
+    if "postgres" in stripped or "GRAFANA_PG_IMAGE" in stripped:
+        continue
+    if "@" not in stripped and re.search(r":[^\s]+", stripped):
+        raise SystemExit(f"manual Grafana compose contains a tag-only image: {stripped}")
 if "GRAFANA_COMPOSE_IMAGE" not in launcher_text:
     raise SystemExit("manual Grafana launcher does not pass the manifest-derived image")
 if immutable_image not in (compose_text + launcher_text) and "GRAFANA_COMPOSE_IMAGE:?" not in compose_text:
     raise SystemExit(f"manual Grafana path does not require canonical image {immutable_image}")
+
+# Manual stack is single-tenant (auth-mock → local-dev-tenant). Loki/Tempo/
+# tenant-Prom datasources expand SOFTPROBE_TENANT_* at provision time; empty
+# values regress Explore to "Authentication to data source failed".
+# A≡B is intentional — dual-tenant lives in docker-compose.ci.yml only.
+required_env = {
+    "SOFTPROBE_API_KEY": "local-dev-key",
+    "SOFTPROBE_TENANT_A_API_KEY": "local-dev-key",
+    "SOFTPROBE_TENANT_B_API_KEY": "local-dev-key",
+    "SOFTPROBE_TENANT_A_ID": "local-dev-tenant",
+    "SOFTPROBE_TENANT_B_ID": "local-dev-tenant",
+}
+for key, value in required_env.items():
+    if not re.search(rf"(?m)^\s*{re.escape(key)}:\s*{re.escape(value)}\s*$", compose_text):
+        raise SystemExit(
+            f"manual Grafana compose must set {key}: {value} "
+            "(single-tenant provisioned datasources)"
+        )
 PY
 
 printf 'Grafana manual immutable-reference contract: PASS\n'

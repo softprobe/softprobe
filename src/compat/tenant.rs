@@ -23,6 +23,7 @@ pub struct QueryLimits {
     pub max_series: usize,
     pub max_response_bytes: usize,
     pub max_labels_per_series: usize,
+    pub max_range_eval_points: usize,
     pub query_timeout: Duration,
 }
 
@@ -33,6 +34,7 @@ impl From<&CapabilityLimits> for QueryLimits {
             max_series: limits.max_series,
             max_response_bytes: limits.max_response_bytes,
             max_labels_per_series: limits.max_labels_per_series,
+            max_range_eval_points: limits.max_range_eval_points,
             query_timeout: Duration::from_secs(limits.query_timeout_seconds),
         }
     }
@@ -84,6 +86,42 @@ impl QueryLimits {
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Reject `query_range` grids that would allocate excessive in-memory samples.
+    pub fn validate_range_eval_points(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        step_ms: i64,
+        series_count: usize,
+    ) -> Result<(), CompatError> {
+        if step_ms <= 0 {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "step must be > 0",
+            ));
+        }
+        if end_ms < start_ms {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "end must be >= start",
+            ));
+        }
+        let span = i128::from(end_ms).saturating_sub(i128::from(start_ms));
+        let steps = span / i128::from(step_ms) + 1;
+        let total = steps.saturating_mul(series_count as i128);
+        let max = i128::from(self.max_range_eval_points as u64);
+        if total > max {
+            return Err(CompatError::new(
+                CompatErrorCode::LimitExceeded,
+                format!(
+                    "range evaluation would produce {total} points (max_range_eval_points {})",
+                    self.max_range_eval_points
+                ),
+            ));
         }
         Ok(())
     }
@@ -262,11 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_time_range_still_rejects_end_before_start() {
+    fn validate_range_eval_points_rejects_excessive_grid() {
         let limits = QueryLimits::default();
         let err = limits
-            .validate_time_range_ms(Some(1000), Some(0))
-            .expect_err("end < start");
-        assert_eq!(err.code, CompatErrorCode::BadRequest);
+            .validate_range_eval_points(0, 86_400_000, 1, 1)
+            .expect_err("step=1ms over 24h exceeds cap");
+        assert_eq!(err.code, CompatErrorCode::LimitExceeded);
+        assert!(err.message.contains("max_range_eval_points"));
+        let err = limits
+            .validate_range_eval_points(0, 3_600_000, 15_000, 500)
+            .expect_err("many series × steps exceeds cap");
+        assert_eq!(err.code, CompatErrorCode::LimitExceeded);
+        limits
+            .validate_range_eval_points(0, 3_600_000, 15_000, 10)
+            .expect("1h @ 15s with modest series is within budget");
     }
 }

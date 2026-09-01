@@ -32,6 +32,7 @@ pub struct CapabilityLimits {
     pub max_series: usize,
     pub max_response_bytes: usize,
     pub max_labels_per_series: usize,
+    pub max_range_eval_points: usize,
     pub query_timeout_seconds: u64,
 }
 

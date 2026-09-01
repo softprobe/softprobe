@@ -6,8 +6,9 @@
 # receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
 #
 # Softprobe DuckLake cannot sustain the full demo metrics firehose (docker_stats,
-# host_metrics, redis, postgres, …) plus traces/logs while Grafana refreshes.
-# Keep GOLD-relevant metric sources only; leave traces/logs on debug (+ span_metrics).
+# host_metrics, redis, postgres, …) while Grafana refreshes.
+# Keep GOLD-relevant metric sources only. Export Astronomy Shop application logs
+# (not infra collectors) so Loki Explore label pickers stay live in the now-1h window.
 
 processors:
   # Keep GOLD / Astronomy Shop + k6. k6 OTLP names use dots (`k6.http.reqs`);
@@ -17,6 +18,12 @@ processors:
     metrics:
       metric:
         - 'not IsMatch(name, "(?i)^(k6[_\\.]|demo[_\\.]|http\\.|http_|rpc\\.|rpc_|traces\\.span\\.metrics|traces_span_metrics|calls$|duration$|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
+  # Application logs only — skip collector/docker noise that drowns DuckLake ingest.
+  filter/softprobe_gold_logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
   batch/softprobe:
     timeout: 20s
     send_batch_size: 10000
@@ -69,5 +76,12 @@ service:
       exporters: [debug, otlphttp/softprobe]
     logs:
       receivers: [otlp]
-      processors: [resourcedetection, memory_limiter, transform/sanitize_logs]
-      exporters: [debug]
+      processors:
+        [
+          resourcedetection,
+          memory_limiter/softprobe,
+          transform/sanitize_logs,
+          filter/softprobe_gold_logs,
+          batch/softprobe,
+        ]
+      exporters: [debug, otlphttp/softprobe]

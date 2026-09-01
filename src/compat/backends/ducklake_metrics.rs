@@ -39,17 +39,17 @@ pub struct DuckLakeMetricsBackend {
 }
 
 /// Cached open attribute/resource keys from DuckLake variant stats.
-static VARIANT_KEYS_CACHE: Lazy<Mutex<TimedCache<BTreeSet<String>>>> =
+static VARIANT_KEYS_CACHE: Lazy<Mutex<TimedCache<TenantCacheKey, BTreeSet<String>>>> =
     Lazy::new(|| Mutex::new(TimedCache::default()));
 
 /// Cached metrics promotion source→column map.
-static PROMOTIONS_CACHE: Lazy<Mutex<TimedCache<BTreeMap<String, String>>>> =
+static PROMOTIONS_CACHE: Lazy<Mutex<TimedCache<TenantCacheKey, BTreeMap<String, String>>>> =
     Lazy::new(|| Mutex::new(TimedCache::default()));
 
 /// Grafana polls `/api/v1/label/__name__/values` on every refresh. One resolve
 /// at a time; later callers wait for the cached result instead of stampeding
 /// the query workers and starving panel `query_range`.
-static NAME_VALUES_CACHE: Lazy<Mutex<TimedCache<Arc<Vec<String>>>>> =
+static NAME_VALUES_CACHE: Lazy<Mutex<TimedCache<DiscoveryCacheKey, Arc<Vec<String>>>>> =
     Lazy::new(|| Mutex::new(TimedCache::default()));
 
 /// Day-scoped equality posting lists (§4.4 / AC-G3). Inverted-index analog
@@ -63,11 +63,35 @@ static POSTING_SET_CACHE: Lazy<Mutex<PostingSetCache>> =
 static SERIES_META_CACHE: Lazy<Mutex<SeriesMetaStore>> =
     Lazy::new(|| Mutex::new(SeriesMetaStore::default()));
 
-#[derive(Default)]
-struct TimedCache<T> {
-    key: Option<u64>,
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TenantCacheKey {
+    engine_id: usize,
+    tenant_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DiscoveryCacheKey {
+    engine_id: usize,
+    tenant_id: String,
+    start_bucket: Option<i64>,
+    end_bucket: Option<i64>,
+    matchers_fingerprint: u64,
+}
+
+struct TimedCache<K, T> {
+    key: Option<K>,
     value: Option<T>,
     expires: Option<Instant>,
+}
+
+impl<K, T> Default for TimedCache<K, T> {
+    fn default() -> Self {
+        Self {
+            key: None,
+            value: None,
+            expires: None,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -704,16 +728,14 @@ impl DuckLakeMetricsBackend {
     }
 
     async fn load_metrics_promotions(&self, ctx: &TenantContext) -> BTreeMap<String, String> {
-        let cache_key = {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (Arc::as_ptr(&self.query) as usize).hash(&mut hasher);
-            ctx.tenant_id().hash(&mut hasher);
-            hasher.finish()
+        let cache_key = TenantCacheKey {
+            engine_id: Arc::as_ptr(&self.query) as usize,
+            tenant_id: ctx.tenant_id().to_string(),
         };
         {
             let guard = PROMOTIONS_CACHE.lock().await;
-            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, guard.key) {
-                if exp > Instant::now() && k == cache_key {
+            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, &guard.key) {
+                if exp > Instant::now() && k == &cache_key {
                     return v.clone();
                 }
             }
@@ -746,16 +768,14 @@ impl DuckLakeMetricsBackend {
     }
 
     async fn load_variant_identity_keys(&self, ctx: &TenantContext) -> BTreeSet<String> {
-        let cache_key = {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (Arc::as_ptr(&self.query) as usize).hash(&mut hasher);
-            ctx.tenant_id().hash(&mut hasher);
-            hasher.finish()
+        let cache_key = TenantCacheKey {
+            engine_id: Arc::as_ptr(&self.query) as usize,
+            tenant_id: ctx.tenant_id().to_string(),
         };
         {
             let guard = VARIANT_KEYS_CACHE.lock().await;
-            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, guard.key) {
-                if exp > Instant::now() && k == cache_key {
+            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, &guard.key) {
+                if exp > Instant::now() && k == &cache_key {
                     return v.clone();
                 }
             }
@@ -831,7 +851,8 @@ impl DuckLakeMetricsBackend {
                 continue;
             }
             if m.name == "__name__" {
-                let cands = storage_metric_name_candidates(&m.value);
+                let cands =
+                    crate::compat::backends::postings_resolve::posting_name_values(&m.value);
                 let lits: Vec<String> = cands.iter().map(|s| sql_string_literal(s)).collect();
                 parts.push(format!("metric_name IN ({})", lits.join(", ")));
             } else if m.name == "job" || m.name == "instance" || is_safe_prom_label_name(&m.name) {
@@ -980,8 +1001,8 @@ impl DuckLakeMetricsBackend {
         );
         {
             let guard = NAME_VALUES_CACHE.lock().await;
-            if let (Some(v), Some(exp)) = (&guard.value, guard.expires) {
-                if exp > Instant::now() && guard.key == Some(cache_key) {
+            if let (Some(v), Some(exp), Some(k)) = (&guard.value, guard.expires, &guard.key) {
+                if exp > Instant::now() && k == &cache_key {
                     return Ok((**v).clone());
                 }
             }
@@ -1863,49 +1884,28 @@ fn discovery_cache_key(
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     matchers: &[LabelMatcher],
-) -> u64 {
+) -> DiscoveryCacheKey {
     let bucket = |ms: Option<i64>| ms.map(|v| v.div_euclid(30_000) * 30_000);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    engine_token.hash(&mut hasher);
-    tenant_id.hash(&mut hasher);
-    if matchers.is_empty() {
-        // Grafana polls with shifting start/end; engine + tenant + TTL is enough.
-        return hasher.finish();
-    }
-    bucket(start_ms).hash(&mut hasher);
-    bucket(end_ms).hash(&mut hasher);
     for m in matchers {
         m.name.hash(&mut hasher);
         m.value.hash(&mut hasher);
     }
-    hasher.finish()
-}
-
-/// Map a Prometheus `__name__` matcher to the DuckLake storage `metric_name`
-/// identity used for SQL pushdown (classic histogram/summary suffixes removed).
-#[cfg(test)]
-fn classic_base_metric_name(prom_name: &str) -> &str {
-    for suffix in ["_bucket", "_sum", "_count"] {
-        if let Some(base) = prom_name.strip_suffix(suffix) {
-            if !base.is_empty() {
-                return base;
-            }
-        }
+    DiscoveryCacheKey {
+        engine_id: engine_token,
+        tenant_id: tenant_id.to_string(),
+        start_bucket: if matchers.is_empty() {
+            None
+        } else {
+            bucket(start_ms)
+        },
+        end_bucket: if matchers.is_empty() {
+            None
+        } else {
+            bucket(end_ms)
+        },
+        matchers_fingerprint: hasher.finish(),
     }
-    prom_name
-}
-
-/// Equality candidates for DuckLake `metric_name` (underscored Prom + dotted OTel).
-/// Avoid `regexp_replace(metric_name, …)` in WHERE — that forces a full scan.
-#[cfg(test)]
-fn storage_metric_name_candidates(prom_name: &str) -> Vec<String> {
-    let base = classic_base_metric_name(prom_name);
-    let mut out = vec![base.to_string()];
-    let dotted = base.replace('_', ".");
-    if dotted != base {
-        out.push(dotted);
-    }
-    out
 }
 
 /// Matchers safe to push into `GROUP BY metric_name` (no OR groups, only `__name__` equality).
@@ -2052,6 +2052,7 @@ fn parse_f64_list(value: &Value) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compat::backends::postings_resolve::posting_name_values;
 
     #[test]
     fn matcher_predicates_push_name_job_instance_via_variant() {
@@ -2194,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn matcher_predicates_strip_classic_histogram_suffix() {
+    fn matcher_predicates_use_posting_name_values_for_equality() {
         let empty = BTreeMap::new();
         let sql = DuckLakeMetricsBackend::matcher_predicates(
             &[LabelMatcher {
@@ -2205,30 +2206,25 @@ mod tests {
             &empty,
         );
         assert!(
-            sql.contains("'http_server_duration'"),
-            "pushdown must use base storage name, got {sql}"
+            sql.contains("'http_server_duration_bucket'"),
+            "pushdown must query exact Prom classic suffix series, got {sql}"
         );
         assert!(
-            sql.contains("'http.server.duration'"),
-            "pushdown must also try dotted OTel name, got {sql}"
+            posting_name_values("http_server_duration_bucket")
+                .iter()
+                .all(|v| sql.contains(&format!("'{v}'"))),
+            "sql must include every posting candidate, got {sql}"
         );
         assert!(
             !sql.contains("regexp_replace"),
             "row-wise regexp on metric_name prevents file prune, got {sql}"
         );
-        assert!(
-            !sql.contains("'http_server_duration_bucket'"),
-            "must not filter storage metric_name by expanded Prom name"
-        );
         assert_eq!(
-            classic_base_metric_name("http_server_duration_sum"),
-            "http_server_duration"
+            posting_name_values("http_server_duration_sum"),
+            vec!["http_server_duration_sum".to_string()]
         );
-        assert_eq!(classic_base_metric_name("http_requests"), "http_requests");
-        assert_eq!(
-            storage_metric_name_candidates("k6_vus"),
-            vec!["k6_vus".to_string(), "k6.vus".to_string()]
-        );
+        assert_eq!(posting_name_values("k6_vus"), vec!["k6_vus".to_string()]);
+        assert!(posting_name_values("queue_count").contains(&"queue_count".to_string()));
     }
 
     #[test]

@@ -198,6 +198,33 @@ PY
   fi
 }
 
+wait_for_demo_logs() {
+  echo "==> waiting for Softprobe Loki labels in the live Explore window"
+  local ok=0
+  local body=""
+  local end_ns start_ns
+  for _ in $(seq 1 90); do
+    end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
+    start_ns="$((end_ns - 3600 * 1000000000))"
+    body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+      -H "X-Scope-OrgID: $TENANT_ID" \
+      "$SOFTPROBE_URL_HOST/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
+    if [[ -n "$body" ]] && [[ "$body" == *'"status":"success"'* ]] \
+      && [[ "$body" == *'"data":['* ]] && [[ "$body" != *'"data":[]'* ]]; then
+      ok=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$ok" != 1 ]]; then
+    echo "ERROR: no Loki labels appeared in the last hour after starting OTel Demo." >&2
+    echo "  last /loki/api/v1/labels: ${body:-<empty>}" >&2
+    echo "  collector: docker logs otel-collector 2>&1 | tail -40" >&2
+    exit 1
+  fi
+  echo "==> Softprobe Loki labels (live window): $(echo "$body" | head -c 400)…"
+}
+
 # Reuse if Softprobe + Grafana + demo collector already healthy *and* ingest is live.
 if our_softprobe_running \
   && curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
@@ -221,9 +248,18 @@ try:
 except Exception:
  print(0)' || echo 0)"
   if [[ "${live_changes:-0}" -ge 2 ]]; then
-    echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live scrapes OK)."
-    print_ready
-    exit 0
+    end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
+    start_ns="$((end_ns - 3600 * 1000000000))"
+    loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+      -H "X-Scope-OrgID: $TENANT_ID" \
+      "$SOFTPROBE_URL_HOST/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
+    if [[ -n "$loki_body" ]] && [[ "$loki_body" == *'"status":"success"'* ]] \
+      && [[ "$loki_body" == *'"data":['* ]] && [[ "$loki_body" != *'"data":[]'* ]]; then
+      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom + Loki OK)."
+      print_ready
+      exit 0
+    fi
+    echo "already up with live Prom but Loki labels empty in the last hour; rebuilding stack."
   fi
   echo "already up but Prom series are flat (changes=${live_changes:-0}); rebuilding stack for live ingest."
 fi
@@ -442,4 +478,5 @@ echo "==> starting OpenTelemetry Demo $OTEL_DEMO_TAG (minimal, Softprobe backend
 demo_compose up --pull missing --remove-orphans --detach
 
 wait_for_demo_metrics
+wait_for_demo_logs
 print_ready
