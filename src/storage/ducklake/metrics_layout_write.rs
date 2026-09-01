@@ -312,7 +312,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
     // blows scan_cap / 100ms on 30m–3h. Keep last value per series per 15s
     // (Grafana floor), Greptime-style pre-aggregate at ingest. Regular gauge
     // samples must stay at native scrape cadence for PromQL *_over_time parity.
-    let (mut regular, mut dual): (Vec<SampleRow>, Vec<SampleRow>) =
+    let (mut dual, mut regular): (Vec<SampleRow>, Vec<SampleRow>) =
         out.samples.into_iter().partition(|s| s.classic_dual_write);
     coalesce_samples_to_step(&mut dual, 15_000);
     regular.extend(dual);
@@ -1113,6 +1113,27 @@ mod tests {
         .unwrap();
         // Re-ensure must stay idempotent with data present.
         ensure_metrics_layout_core_tables(&conn, &catalog).unwrap();
+    }
+
+    #[test]
+    fn prepare_ingest_keeps_gauge_scrape_cadence() {
+        let base = Utc.timestamp_millis_opt(1_700_000_000_000).unwrap();
+        let metrics: Vec<Metric> = (0..5)
+            .map(|i| {
+                gauge(
+                    "metric",
+                    "j",
+                    base + chrono::Duration::milliseconds(i * 10_000),
+                    (i + 1) as f64,
+                )
+            })
+            .collect();
+        let prepared = prepare_ingest(&metrics, DEFAULT_MAX_LABELS_PER_SERIES);
+        assert_eq!(
+            prepared.samples.len(),
+            5,
+            "native 10s gauges must not coalesce to 15s buckets"
+        );
     }
 
     #[test]

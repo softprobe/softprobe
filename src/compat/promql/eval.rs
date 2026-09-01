@@ -784,13 +784,20 @@ impl PrefetchBackend {
             }
         }
 
-        // Bucket at Grafana step when it is fine enough for range-vector fns.
-        // When step > [range] (e.g. 180d panels), bucket at range/4 so rate/irate
-        // still see multiple points per window — but never disable bucketing
-        // (that caused multi-day raw hist scans and blew the 100ms SLO).
-        let effective_step = match min_range_window {
-            Some(w) if step_ms > w => Some((w / 4).max(15_000)),
-            _ => Some(step_ms),
+        // Short panels (≤24h): skip Grafana step-bucketing on prefetch when step is
+        // coarse vs scrape cadence or vs a range-vector window — preserves PromQL
+        // parity for 30s scrapes at 1m steps and *_over_time windows. Long panels
+        // still bucket at range/4 when step exceeds [range] to protect the SLO.
+        let query_span_ms = (end_ms - start_ms).abs();
+        let effective_step = if query_span_ms <= crate::compat::backends::grain::RAW_RANGE_MS
+            && (min_range_window.is_some() || step_ms > 30_000)
+        {
+            None
+        } else {
+            match min_range_window {
+                Some(w) if step_ms > w => Some((w / 4).max(15_000)),
+                _ => Some(step_ms),
+            }
         };
 
         // Independent selectors (binary ops, joins) fetch in parallel so
