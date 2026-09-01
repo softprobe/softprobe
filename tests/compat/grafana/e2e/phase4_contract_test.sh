@@ -123,7 +123,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 dashboards = {}
-for path in sorted(root.glob("*.json")):
+for path in sorted(root.rglob("*.json")):
     document = json.loads(path.read_text())
     dashboard = document.get("dashboard", document)
     uid = dashboard.get("uid")
@@ -173,7 +173,7 @@ PY
 round_trip_tmp="$(mktemp -d "${TMPDIR:-/tmp}/grafana-round-trip-contract.XXXXXX")"
 trap 'rm -rf "$round_trip_tmp"' EXIT
 # "-" reads the validation script from stdin; argv[1] is the dashboard fixture.
-python3 - "$DASHBOARDS/softprobe-cross-signal.json" "$round_trip_tmp" <<'PY'
+python3 - "$DASHBOARDS/smoke/softprobe-cross-signal.json" "$round_trip_tmp" <<'PY'
 import copy
 import json
 import pathlib

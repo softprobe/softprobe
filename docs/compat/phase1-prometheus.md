@@ -28,7 +28,8 @@ Rules:
 - **`query_range` / PromQL range eval:** one DuckDB fetch per unique selector
   (window = `[start − lookback|range − offset, end − offset]`), then evaluate
   every `step` in memory. Do **not** issue SQL per step (Grafana refresh was
-  O(steps) otherwise). Equality pushdown for `__name__` / `job` reduces scanned rows.
+  O(steps) otherwise). Equality pushdown for `__name__` / `job` / `instance`
+  uses typed `metric_name` and VARIANT field access (not JSON extract).
 
 ---
 
@@ -69,13 +70,22 @@ Explicit unsupported (non-exhaustive): `@`, subqueries, `on()`/`ignoring()`, `gr
 
 | Limit | Behavior |
 |-------|----------|
-| `max_query_range_seconds` | `QueryLimits::validate_time_range_ms` (handlers + backend) |
+| `max_query_range_seconds` | `QueryLimits::validate_time_range_ms` (`0` = unlimited; handlers + backend) |
 | `max_series` | Hard fail on series / distinct label values over cap |
 | scan_cap (`max(max_series*10, 10000)`) | `LIMIT scan_cap+1` over the time window (or full table if unbounded); equality `__name__` / `job` matchers are pushed into SQL (classic `_bucket`/`_sum`/`_count` stripped to base storage name). Remaining matchers apply in-memory after projection. Overrun → `limit_exceeded`. |
 | `query_timeout` | Deadline via `TenantContext::remaining()` |
 | `max_response_bytes` | Enforced on success envelope encode; overrun → `limit_exceeded` |
 
 ---
+
+## Performance (findings + plan)
+
+Storage-feature utilization, small-file/compaction gaps, and an open
+competitor-comparable benchmark plan (VictoriaMetrics
+`prometheus-benchmark` via OTLP write + Prom query):
+[`../perf/prometheus-query-findings.md`](../perf/prometheus-query-findings.md).
+Physical layout goals and machine ACs:
+[`../metrics-timeseries-layout.md`](../metrics-timeseries-layout.md).
 
 ## Mini differential (Slice C)
 

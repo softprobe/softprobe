@@ -46,7 +46,7 @@ See `capability.v0.yaml` `limits` for defaults. Phase 1 Prometheus adapters enfo
 
 | Limit | Behavior |
 |-------|----------|
-| `max_query_range_seconds` | `limit_exceeded` / Prom `bad_data` when both start and end are present and the span is too large |
+| `max_query_range_seconds` | `0` / unset = unlimited (no Softprobe length reject). When >0, `limit_exceeded` / Prom `bad_data` if the span exceeds the cap |
 | `max_series` | Hard fail when series identities or distinct label values exceed the cap |
 | scan_cap (`max(max_series*10, 10000)`) | Full-window scan with `LIMIT scan_cap+1`; overrun → `limit_exceeded` (narrow the time window). Matchers are applied after the scan and do not reduce SQL load |
 | `query_timeout_seconds` | Deadline on `TenantContext`; overrun → `limit_exceeded` |

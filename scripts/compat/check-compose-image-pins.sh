@@ -39,6 +39,9 @@ for line_number, line in enumerate(open(compose_path, encoding="utf-8"), 1):
         if not digest.search(resolved):
             errors.append(f"line {line_number}: builder image is not immutable: {resolved}")
         continue
+    # Dev DuckLake catalog for manual stack — not part of references.v0.yaml compat pins.
+    if "postgres" in image or "GRAFANA_PG_IMAGE" in image:
+        continue
     if not digest.search(image):
         errors.append(f"line {line_number}: image is not immutable: {image}")
 

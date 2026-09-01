@@ -13,6 +13,8 @@ capability_ids:
   - loki.labels
   - loki.label_values
   - loki.series
+  - loki.index_stats
+  - loki.tail
   - tempo.v1_trace
   - tempo.v2_trace
   - tempo.search
@@ -124,6 +126,13 @@ protocols:
       - method: [GET]
         path: /loki/api/v1/series
         status: supported
+      - method: [GET]
+        path: /loki/api/v1/index/stats
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/tail
+        status: supported
+        notes: WebSocket live tail; polls DuckLake for new entries.
     language_features:
       logql: subset_phase_2
       logql_supported:
@@ -301,10 +310,12 @@ errors:
   forbidden:
     http_status: 403
 limits:
-  max_query_range_seconds: 86400
+  # 0 = unlimited (Greptime-like; retention TTL bounds data, not this ceiling)
+  max_query_range_seconds: 0
   max_series: 10000
   max_response_bytes: 16777216
   max_labels_per_series: 40
+  max_range_eval_points: 11000
   query_timeout_seconds: 30
 auth:
   bearer: softprobe_api_key

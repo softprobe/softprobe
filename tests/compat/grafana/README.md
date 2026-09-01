@@ -6,12 +6,9 @@ Grafana or WireMock image.
 
 ## Manual stack (team-reproducible)
 
-From the repo root:
-
 ```bash
 make grafana-up      # Softprobe + Grafana + OpenTelemetry Demo (Astronomy Shop)
 # open http://127.0.0.1:3000  (admin / admin)
-# Dashboards → Softprobe → …
 # Store UI:    http://127.0.0.1:8080
 make grafana-down
 ```
@@ -23,31 +20,47 @@ What it starts:
 
 | Piece | Where |
 |-------|--------|
-| Softprobe runtime | host `:8090` (sqlite DuckLake under `/tmp/thelake-grafana-manual/`) |
-| Auth mock | compose `:18080` → Bearer `local-dev-key` → tenant `local-dev-tenant` |
-| Grafana | compose `:3000`, Prom datasource → `host.docker.internal:8090` |
-| Traffic | Official [OpenTelemetry Demo](https://github.com/open-telemetry/opentelemetry-demo) **3.0.0** (minimal, Softprobe BYO OTLP backend) |
+| Softprobe runtime | host `:8090` |
+| DuckLake catalog | Postgres 19 (`postgres:19beta3` until stable `:19` tag ships) on `:5434` |
+| Parquet data | `/tmp/thelake-grafana-manual/data/` |
+| Auth mock | `:18080` → Bearer `local-dev-key` |
+| Grafana | `:3000` → Prom datasource Softprobe |
+| Traffic | OpenTelemetry Demo **3.0.0** (minimal, Softprobe BYO backend) |
 
-Requires Docker and ~3 GB RAM. Demo checkout: `~/.cache/thelake/otel-demo/3.0.0`
-(see [`otel-demo/README.md`](otel-demo/README.md)).
+Requires Docker + ~3 GB RAM. Demo cache: `~/.cache/thelake/otel-demo/3.0.0`.
 
-### Dashboards (folder Softprobe)
+Collector extras send **metrics and filtered application logs** to Softprobe (OTLP
++ ad Prometheus + spanmetrics), in small batches, so Grafana GOLD panels and Loki
+Explore get live data. Traces stay on the collector `debug` exporter (spanmetrics
+still produced). `grafana-up` refuses to declare ready on lookback-only flat
+Prom series or an empty Loki label list in the live hour window.
 
-Provisioned from [`dashboards/`](dashboards/). Each maps a supported PromQL family
-onto live Astronomy Shop metrics:
+### Dashboard folders
 
-| Dashboard | Covers |
+#### Astronomy Shop (service monitoring)
+
+Real SRE-style monitoring against live demo metrics:
+
+| Dashboard | Focus |
 |-----------|--------|
-| Softprobe · Overview | Load-generator + ad/cart/HTTP/CPU overview |
-| Softprobe Prometheus smoke | Bookmark-compatible short smoke set |
-| Softprobe · Selectors & matchers | `=`, `=~`, `!=`, `!~`, multi-matcher |
-| Softprobe · rate / irate / increase / delta | `rate`, `irate`, `increase`, `delta`, `idelta` |
-| Softprobe · Aggregations | `sum\|min\|max\|avg\|count` + `by`/`without`, `topk`/`bottomk` |
-| Softprobe · Arithmetic, compare, set ops | `+-*/%^`, compare/`bool`, `and`/`or`/`unless` |
-| Softprobe · over_time, math, offset | `*_over_time`, `abs`/`ceil`/`floor`/`round`, `offset` |
-| Softprobe · Classic histogram series | `_bucket` / `_sum` / `_count` (no `histogram_quantile`) |
+| GOLD overview | Shop-wide HTTP/RPC/spanmetrics rates, business KPIs, loadgen, containers |
+| Ad (Java) | `demo_ad_*`, HTTP server, JVM |
+| Cart (.NET) | cart latency histograms, ASP.NET / .NET runtime |
+| Checkout (Go) | RPC/HTTP client, Go memory/goroutines |
+| Frontend (Node.js) | HTTP server/client, event loop, V8 |
+| Payment (Node.js) | `demo_payment_transactions`, Node runtime |
+| Recommendation (Python) | recommendations, CPython GC, process |
+| Shipping | shipped items, HTTP RED |
+| Currency & Quote | FX conversions, quotes, OTel SDK queues |
+| Product Catalog | spanmetrics (sparse app metrics in this build) |
+| Load generator (k6) | VUs, iterations, duration histograms, failures |
+| Infrastructure | containers, Postgres, nginx, httpcheck |
 
-The representative native-signal fixtures are also provisioned from this folder:
+#### Softprobe PromQL (capability smoke)
+
+Declared PromQL subset coverage (selectors, rate family, aggregations, operators, over_time/math/offset, classic histograms). See [`dashboards/promql/`](dashboards/promql/).
+
+#### Softprobe (Loki / Tempo / cross-signal)
 
 | Fixture | Contract coverage |
 |---------|-------------------|
@@ -66,13 +79,16 @@ checks in G7.
 Unsupported on purpose (capability): `@`, subqueries, `on()`/`ignoring()`,
 `group_left`/`group_right`, histogram quantiles, full function catalog.
 
-Correctness vs Prometheus remains `make test-prom-compat`.
+### Notes
+
+- Prefer `rate()` / gauges for charts; avoid `avg_over_time()` on cumulative counters.
+- Docker stats use `container_name`, not `job`.
+- High-cardinality `sum(rate(k6_http_reqs))` rises as series appear — prefer `k6_iterations` / business counters.
+- Correctness vs Prometheus: `make test-prom-compat`.
 
 Scripts: [`scripts/grafana-manual-up.sh`](../../../scripts/grafana-manual-up.sh),
 [`scripts/grafana-manual-down.sh`](../../../scripts/grafana-manual-down.sh).
-Compose: [`docker-compose.manual.yml`](docker-compose.manual.yml).
-
-Do **not** use the root `docker-compose.yml` Grafana service (legacy DuckDB plugin / wrong pin).
+Demo overlay: [`otel-demo/`](otel-demo/).
 
 ## Prom-only CI smoke
 

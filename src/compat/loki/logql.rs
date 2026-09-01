@@ -157,25 +157,25 @@ fn leading_function_name(input: &str) -> Option<&str> {
 fn split_pipeline(input: &str) -> Result<Vec<String>, CompatError> {
     let mut out = Vec::new();
     let mut start = 0;
-    let mut quote = false;
+    let mut quote = None::<char>;
     let mut escaped = false;
     for (i, ch) in input.char_indices() {
-        if quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quote = false;
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if ch == '\\' => escaped = true,
+            Some('"') if ch == '"' => quote = None,
+            Some('`') if ch == '`' => quote = None,
+            Some(_) => {}
+            None if ch == '"' => quote = Some('"'),
+            None if ch == '`' => quote = Some('`'),
+            None if ch == '|' => {
+                out.push(input[start..i].trim().to_string());
+                start = i + 1;
             }
-        } else if ch == '"' {
-            quote = true;
-        } else if ch == '|' {
-            out.push(input[start..i].trim().to_string());
-            start = i + 1;
+            None => {}
         }
     }
-    if quote {
+    if quote.is_some() {
         return Err(bad("unterminated pipeline string"));
     }
     out.push(input[start..].trim().to_string());
@@ -259,7 +259,19 @@ fn split_commas(input: &str) -> Result<Vec<&str>, CompatError> {
 }
 
 fn quoted(raw: &str) -> Result<String, CompatError> {
-    serde_json::from_str(raw).map_err(|_| bad("LogQL values must be double-quoted strings"))
+    if raw.starts_with('`') {
+        let Some(inner) = raw.strip_prefix('`') else {
+            return Err(bad("unterminated backtick string"));
+        };
+        let Some(value) = inner.strip_suffix('`') else {
+            return Err(bad("unterminated backtick string"));
+        };
+        if value.contains('`') {
+            return Err(bad("backtick strings may not contain backticks"));
+        }
+        return Ok(value.to_string());
+    }
+    serde_json::from_str(raw).map_err(|_| bad("LogQL values must be quoted strings"))
 }
 
 fn regex(pattern: &str) -> Result<(), CompatError> {
@@ -586,6 +598,21 @@ mod tests {
         assert_eq!(
             request.line_filters,
             vec![LogLineFilter::NotRegex("debug".into())]
+        );
+    }
+
+    #[test]
+    fn parses_backtick_line_filters_including_grafana_builder_empty_filter() {
+        let request = parse_logql(r#"{service_name="currency"} |= ``"#).unwrap();
+        assert_eq!(
+            request.line_filters,
+            vec![LogLineFilter::Contains(String::new())]
+        );
+
+        let request = parse_logql(r#"{job="api"} |= `failed|timeout`"#).unwrap();
+        assert_eq!(
+            request.line_filters,
+            vec![LogLineFilter::Contains("failed|timeout".into())]
         );
     }
 }

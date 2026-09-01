@@ -164,8 +164,11 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
     let conn = attach(&metadata_path, &data_path);
     let (count, sum, buckets): (Option<i64>, Option<f64>, Option<String>) = conn
         .query_row(
-            "SELECT count, sum, CAST(bucket_counts AS VARCHAR) \
-             FROM softprobe.metrics WHERE metric_name = 'http.server.duration'",
+            "SELECT h.count, h.sum, CAST(h.bucket_counts AS VARCHAR) \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'http.server.duration'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -177,36 +180,79 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
         "bucket_counts={buckets:?}"
     );
 
-    let (qcount, quantiles): (Option<i64>, Option<String>) = conn
+    let (qcount, qsum): (Option<i64>, Option<f64>) = conn
         .query_row(
-            "SELECT count, CAST(quantiles AS VARCHAR) \
-             FROM softprobe.metrics WHERE metric_name = 'rpc.latency'",
+            "SELECT h.count, h.sum \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'rpc.latency'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("SQL read summary");
+        .expect("SQL read summary count/sum");
     assert_eq!(qcount, Some(100));
-    assert!(quantiles.as_deref().unwrap_or("").contains("0.99"));
+    assert_eq!(qsum, Some(500.0));
+    // Quantile expansion stays out of scope for metric_hist_samples (§6.4).
 
-    let stub = router
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/query?query=up")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(stub.status(), StatusCode::OK);
-    let stub_json: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(stub.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(stub_json["status"], "success");
-    assert_eq!(stub_json["data"]["resultType"], "vector");
+    // AC-H1 Prom path: classic `_count` / `_bucket` query_range over hist table.
+    // Fixture timestamp is 2022-01-01T00:00:00Z (1_640_995_200s).
+    // Short (30m) and mid (3h) windows must both return series — mid used to divert
+    // onto empty metric_samples_1h (AC-H3 regression).
+    let windows = [
+        ("1640994300", "1640996100"), // ±30m around sample
+        // Mid window must stay ≤ raw hist grain after lookback expansion (AC-H3).
+        ("1640992500", "1640996100"), // 1h mid window
+    ];
+    for (start, end) in windows {
+        for query in [
+            "http_server_duration_count",
+            "http_server_duration_bucket",
+            "rpc_latency_count",
+        ] {
+            let uri = format!("/api/v1/query_range?query={query}&start={start}&end={end}&step=15");
+            let resp = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "AC-H1/H3 HTTP {query} window={start}..{end} status"
+            );
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                body["status"], "success",
+                "AC-H1/H3 {query} window={start}..{end} body={body}"
+            );
+            assert_eq!(body["data"]["resultType"], "matrix");
+            let result = body["data"]["result"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !result.is_empty(),
+                "AC-H1/H3 {query} window={start}..{end}: expected non-empty Prom series from metric_hist_samples, got {body}"
+            );
+            let values = result[0]["values"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !values.is_empty(),
+                "AC-H1/H3 {query} window={start}..{end}: expected sample points, got {body}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -274,27 +320,20 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         .expect("write metrics");
 
     let conn = attach(&metadata_path, &data_path);
-    let (count, sum, buckets, bounds, temporality): (
+    let (count, sum, buckets, bounds): (
         Option<i64>,
         Option<f64>,
         Option<String>,
         Option<String>,
-        Option<String>,
     ) = conn
         .query_row(
-            "SELECT count, sum, CAST(bucket_counts AS VARCHAR), CAST(explicit_bounds AS VARCHAR), \
-             aggregation_temporality \
-             FROM softprobe.metrics WHERE metric_name = 'http.server.duration'",
+            "SELECT h.count, h.sum, CAST(h.bucket_counts AS VARCHAR), CAST(h.explicit_bounds AS VARCHAR) \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'http.server.duration'",
             [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("query histogram");
     assert_eq!(count, Some(10));
@@ -307,22 +346,20 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         bounds.as_deref().unwrap_or("").contains("10"),
         "explicit_bounds={bounds:?}"
     );
-    assert_eq!(temporality.as_deref(), Some("CUMULATIVE"));
 
-    let (qcount, qsum, quantiles): (Option<i64>, Option<f64>, Option<String>) = conn
+    let (qcount, qsum): (Option<i64>, Option<f64>) = conn
         .query_row(
-            "SELECT count, sum, CAST(quantiles AS VARCHAR) \
-             FROM softprobe.metrics WHERE metric_name = 'rpc.latency'",
+            "SELECT h.count, h.sum \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'rpc.latency'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("query summary");
     assert_eq!(qcount, Some(100));
     assert_eq!(qsum, Some(500.0));
-    assert!(
-        quantiles.as_deref().unwrap_or("").contains("0.5"),
-        "quantiles={quantiles:?}"
-    );
 }
 
 #[tokio::test]
@@ -355,14 +392,16 @@ async fn classic_histogram_absent_sum_persists_null_in_ducklake() {
         .expect("write histogram without sum");
 
     let conn = attach(&metadata_path, &data_path);
-    let (value, sum): (f64, Option<f64>) = conn
+    let sum: Option<f64> = conn
         .query_row(
-            "SELECT value, sum FROM softprobe.metrics WHERE metric_name = 'http.server.duration'",
+            "SELECT h.sum FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'http.server.duration'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .expect("query absent-sum histogram");
-    assert_eq!(value, 0.0);
     assert_eq!(
         sum, None,
         "absent OTLP histogram sum must persist as SQL NULL"
@@ -404,16 +443,17 @@ async fn nested_otlp_attributes_round_trip_ducklake() {
     let conn = attach(&metadata_path, &data_path);
     let attrs_json: String = conn
         .query_row(
-            "SELECT CAST(attributes AS JSON) FROM softprobe.metrics WHERE metric_name = 'app.gauge'",
+            "SELECT CAST(labels AS JSON) FROM softprobe.metric_series WHERE metric_name = 'app.gauge'",
             [],
             |row| row.get(0),
         )
-        .expect("read attributes JSON");
-    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).expect("parse attrs");
+        .expect("read labels JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).expect("parse labels");
+    // Nested sp.json: values rehydrate; OTel keys are Prom-sanitized on the series labels map.
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
     assert_eq!(parsed["meta"]["ok"], true);
-    assert_eq!(parsed["http.route"], "/api");
+    assert_eq!(parsed["http_route"], "/api");
 }
 
 #[tokio::test]
@@ -525,11 +565,11 @@ async fn http_otlp_nested_attributes_round_trip_ducklake() {
     let conn = attach(&metadata_path, &data_path);
     let attrs_json: String = conn
         .query_row(
-            "SELECT CAST(attributes AS JSON) FROM softprobe.metrics WHERE metric_name = 'app.nested'",
+            "SELECT CAST(labels AS JSON) FROM softprobe.metric_series WHERE metric_name = 'app.nested'",
             [],
             |row| row.get(0),
         )
-        .expect("read nested attrs");
+        .expect("read nested labels");
     let parsed: serde_json::Value = serde_json::from_str(&attrs_json).unwrap();
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
@@ -541,8 +581,7 @@ async fn legacy_metrics_table_widens_on_gauge_ingest() {
     use softprobe_runtime::ingest_engine::IngestPipeline;
 
     use crate::util::metrics_fidelity_contract::{
-        contract_legacy_metrics_table_widens_on_gauge_ingest, legacy_metrics_create_ddl,
-        MetricsFidelityBackend,
+        contract_legacy_metrics_table_widens_on_gauge_ingest, MetricsFidelityBackend,
     };
 
     struct SqliteBackend {
@@ -563,12 +602,6 @@ async fn legacy_metrics_table_widens_on_gauge_ingest() {
             batches: Vec<Vec<softprobe_runtime::models::Metric>>,
         ) -> anyhow::Result<()> {
             self.pipeline.write_metric_batches(batches).await
-        }
-
-        fn create_legacy_metrics_table(&self) {
-            let conn = self.attach();
-            conn.execute_batch(&legacy_metrics_create_ddl(&self.metrics_table()))
-                .expect("legacy create");
         }
     }
 

@@ -1,16 +1,21 @@
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
-use crate::storage::ducklake::{ducklake_qualified_table_name, escape_sql_literal};
+use crate::storage::ducklake::{
+    configure_duckdb_resources, ducklake_qualified_table_name, escape_sql_literal,
+    QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+};
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use duckdb::types::Value as DuckValue;
 use duckdb::Connection;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tracing::{info, warn};
 
 pub struct DuckDBQueryEngine {
@@ -18,6 +23,8 @@ pub struct DuckDBQueryEngine {
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
     config: Config,
+    /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
+    inflight: AsyncMutex<HashMap<u64, Vec<oneshot::Sender<Result<QueryResult>>>>>,
 }
 
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
@@ -78,6 +85,48 @@ fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
         s = replace_standalone_ident(&s, from, to);
     }
     s
+}
+
+/// True when SQL mutates a DuckLake catalog and must be wrapped in BEGIN…COMMIT.
+///
+/// Without an explicit COMMIT, INSERT…SELECT can write parquet under DATA_PATH while
+/// leaving the catalog snapshot unchanged — Prom workers then see empty 5m/1h/collapse.
+fn sql_is_ducklake_mutating(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let head: String = trimmed
+        .chars()
+        .take(12)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    head.starts_with("INSERT")
+        || head.starts_with("UPDATE")
+        || head.starts_with("DELETE")
+        || head.starts_with("CREATE")
+        || head.starts_with("ALTER")
+        || head.starts_with("DROP")
+        || head.starts_with("COPY")
+        || head.starts_with("CALL")
+        || head.starts_with("MERGE")
+}
+
+/// INSERT/UPDATE/DELETE need Softprobe BEGIN…COMMIT so Prom workers see
+/// catalog snapshots. DuckLake `CALL` procedures (expire/merge/cleanup) manage
+/// their own transactions — wrapping them can no-op metadata changes (AC-N3).
+fn sql_needs_softprobe_txn_wrap(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let head: String = trimmed
+        .chars()
+        .take(12)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    head.starts_with("INSERT")
+        || head.starts_with("UPDATE")
+        || head.starts_with("DELETE")
+        || head.starts_with("CREATE")
+        || head.starts_with("ALTER")
+        || head.starts_with("DROP")
+        || head.starts_with("COPY")
+        || head.starts_with("MERGE")
 }
 
 use once_cell::sync::Lazy;
@@ -249,10 +298,17 @@ struct DuckDBCore {
 }
 
 /// Query result containing columns and rows
+#[derive(Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
+}
+
+fn sql_coalesce_key(sql: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sql.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl DuckDBQueryEngine {
@@ -440,12 +496,66 @@ impl DuckDBQueryEngine {
             workers,
             next_worker: AtomicUsize::new(0),
             config: config.clone(),
+            inflight: AsyncMutex::new(HashMap::new()),
         })
+    }
+
+    /// Catalog alias for `__ducklake_metadata_<alias>` / `{alias}.promotion_specs`.
+    pub fn catalog_alias(&self) -> &str {
+        &self.config.ducklake.catalog_alias
+    }
+
+    /// Layout table prefix matching ingest (`softprobe` or `softprobe.<metadata_schema>`).
+    ///
+    /// Prom resolve/scan and the maintenance ladder must use this — not bare
+    /// [`Self::catalog_alias`] — or they miss tenant-scoped `metric_*` tables.
+    pub fn layout_catalog_prefix(&self) -> String {
+        let cfg = &self.config.ducklake;
+        if cfg.metadata_schema == "main" {
+            cfg.catalog_alias.clone()
+        } else {
+            format!("{}.{}", cfg.catalog_alias, cfg.metadata_schema)
+        }
     }
 
     /// Execute arbitrary SQL query and return results as JSON
     /// Used by Grafana SQL API endpoint
     pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {
+        let key = sql_coalesce_key(query);
+        {
+            let mut pending = self.inflight.lock().await;
+            if let Some(waiters) = pending.get_mut(&key) {
+                let (tx, rx) = oneshot::channel();
+                waiters.push(tx);
+                drop(pending);
+                return rx
+                    .await
+                    .map_err(|_| anyhow!("DuckDB in-flight coalesced waiter dropped"))?;
+            }
+            pending.insert(key, Vec::new());
+        }
+        let result = self.dispatch_query(query).await;
+        let waiters = {
+            let mut pending = self.inflight.lock().await;
+            pending.remove(&key).unwrap_or_default()
+        };
+        match &result {
+            Ok(rows) => {
+                for waiter in waiters {
+                    let _ = waiter.send(Ok(rows.clone()));
+                }
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                for waiter in waiters {
+                    let _ = waiter.send(Err(anyhow!(msg.clone())));
+                }
+            }
+        }
+        result
+    }
+
+    async fn dispatch_query(&self, query: &str) -> Result<QueryResult> {
         let index = self.next_worker.fetch_add(1, Ordering::Relaxed);
         let worker = &self.workers[index % self.workers.len()];
         let sender = worker
@@ -457,12 +567,24 @@ impl DuckDBQueryEngine {
             sql: query.to_string(),
             respond_to: tx,
         };
+        let queued = std::time::Instant::now();
         sender
             .send(request)
             .await
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
-        rx.await
-            .map_err(|_| anyhow!("DuckDB worker dropped response"))?
+        let result = rx
+            .await
+            .map_err(|_| anyhow!("DuckDB worker dropped response"))?;
+        let elapsed = queued.elapsed();
+        if elapsed >= std::time::Duration::from_millis(200) {
+            let preview: String = query.chars().take(160).collect();
+            warn!(
+                elapsed_ms = elapsed.as_millis() as u64,
+                sql = %preview,
+                "slow DuckDB query (queue + execute)"
+            );
+        }
+        result
     }
 
     /// Execute one query with a tenant-specific DuckLake metadata schema.
@@ -555,6 +677,47 @@ impl DuckDBCore {
             eprintln!("SOFTPROBE_LOG_SQL prep={query_prep}\nSOFTPROBE_LOG_SQL run={query_run}");
         }
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
+
+        // DuckLake publishes snapshots only on COMMIT. SQL-API DML (harness materialize,
+        // ad-hoc INSERT) must not leave orphan parquet invisible to Prom workers.
+        // CALL expire/merge/cleanup must NOT be txn-wrapped (AC-N3).
+        if self.use_attached_catalog() && sql_needs_softprobe_txn_wrap(&query_run) {
+            let trimmed = query_run.trim().trim_end_matches(';');
+            let batch = format!("BEGIN TRANSACTION;\n{trimmed};\nCOMMIT;");
+            let query_start = std::time::Instant::now();
+            self.try_wrap_cache_httpfs_filesystems(state);
+            state
+                .conn
+                .execute_batch(&batch)
+                .map_err(|e| anyhow!("DuckLake mutating SQL failed: {e}"))?;
+            if diag {
+                println!("DIAG execute_query(dml): {:?}", query_start.elapsed());
+            }
+            return Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                row_count: 0,
+            });
+        }
+        if self.use_attached_catalog() && sql_is_ducklake_mutating(&query_run) {
+            // CALL / other mutating non-wrap path (expire, merge, cleanup, set_option).
+            let trimmed = query_run.trim().trim_end_matches(';');
+            let query_start = std::time::Instant::now();
+            self.try_wrap_cache_httpfs_filesystems(state);
+            state
+                .conn
+                .execute_batch(trimmed)
+                .map_err(|e| anyhow!("DuckLake CALL/mutating SQL failed: {e}"))?;
+            if diag {
+                println!("DIAG execute_query(call): {:?}", query_start.elapsed());
+            }
+            return Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                row_count: 0,
+            });
+        }
+
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
@@ -677,6 +840,11 @@ impl DuckDBCore {
 
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
+        if let Err(err) =
+            configure_duckdb_resources(conn, QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
+        {
+            warn!("Failed to cap DuckDB threads/memory: {}", err);
+        }
         // Extension loading is connection-scoped. Match interactive production query behavior
         // by explicitly loading the DuckLake backend extension in each worker connection.
         match self.ducklake_config().catalog_type.as_str() {
@@ -728,12 +896,24 @@ impl DuckDBCore {
         ducklake_qualified_table_name(&self.ducklake_config(), table)
     }
 
+    /// Catalog prefix for layout tables (`softprobe` or `softprobe.<schema>`).
+    fn ducklake_catalog_prefix(&self) -> String {
+        let cfg = self.ducklake_config();
+        if cfg.metadata_schema == "main" {
+            cfg.catalog_alias.clone()
+        } else {
+            format!("{}.{}", cfg.catalog_alias, cfg.metadata_schema)
+        }
+    }
+
     /// Replace internal telemetry aliases with real DuckLake table refs.
+    ///
+    /// Metrics aliases rewrite to the layout JOIN (§6.7 / AC-D4), not fat `metrics`.
     fn ducklake_inline_sql(&self, sql: &str) -> String {
         let traces = self.ducklake_qualified_table("traces");
         let logs = self.ducklake_qualified_table("logs");
-        let metrics = self.ducklake_qualified_table("metrics");
         let scores = self.ducklake_qualified_table("scores");
+        let metrics_prefix = self.ducklake_catalog_prefix();
         let mut s = sql.to_string();
         for name in [
             "tm_icb_metric",
@@ -741,7 +921,9 @@ impl DuckDBCore {
             "tm_all_metric",
             "tm_buf_metric",
         ] {
-            s = replace_standalone_ident(&s, name, &metrics);
+            let rel =
+                crate::storage::schema::union_metrics_layout_relation_sql(&metrics_prefix, name);
+            s = replace_standalone_ident(&s, name, &rel);
         }
         for name in ["tm_icb_log", "tm_cq_log", "tm_all_log", "tm_buf_log"] {
             s = replace_standalone_ident(&s, name, &logs);
@@ -908,6 +1090,37 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_union_metrics_inlines_layout_join_not_fat_table() {
+        let prep =
+            rewrite_reserved_telemetry_view_names("SELECT metric_name, value FROM union_metrics");
+        assert!(
+            prep.contains("tm_all_metric"),
+            "public name must rewrite to tm_* alias: {prep}"
+        );
+        let rel =
+            crate::storage::schema::union_metrics_layout_relation_sql("softprobe", "tm_all_metric");
+        let out = replace_standalone_ident(&prep, "tm_all_metric", &rel);
+        assert!(
+            out.contains("metric_samples") && out.contains("metric_series"),
+            "AC-D4: must join layout tables, got {out}"
+        );
+        assert!(
+            !out.contains("FROM softprobe.metrics")
+                && !out.contains("FROM softprobe.softprobe.metrics"),
+            "must not scan fat metrics table: {out}"
+        );
+        let committed =
+            rewrite_reserved_telemetry_view_names("SELECT value FROM committed_metrics");
+        assert!(committed.contains("tm_cq_metric"));
+        let cq = replace_standalone_ident(
+            &committed,
+            "tm_cq_metric",
+            &crate::storage::schema::union_metrics_layout_relation_sql("softprobe", "tm_cq_metric"),
+        );
+        assert!(cq.contains("metric_samples"));
+    }
+
+    #[test]
     fn duck_value_map_keys_are_plain_strings() {
         let entries = vec![
             (
@@ -950,6 +1163,30 @@ mod tests {
             "session init must disable DuckLake version guessing so interactive \
              queries read the latest committed snapshot instead of a stale one"
         );
+    }
+
+    #[test]
+    fn sql_is_ducklake_mutating_detects_dml() {
+        assert!(sql_is_ducklake_mutating(
+            "INSERT INTO softprobe.metric_samples_1h SELECT 1"
+        ));
+        assert!(sql_is_ducklake_mutating("  create table t(i int)"));
+        assert!(sql_is_ducklake_mutating(
+            "CALL softprobe.ducklake_merge_adjacent_files('t')"
+        ));
+        assert!(!sql_is_ducklake_mutating(
+            "SELECT count(*) FROM softprobe.metric_samples"
+        ));
+        assert!(!sql_is_ducklake_mutating("EXPLAIN SELECT 1"));
+        assert!(sql_needs_softprobe_txn_wrap(
+            "INSERT INTO softprobe.metric_samples_1h SELECT 1"
+        ));
+        assert!(!sql_needs_softprobe_txn_wrap(
+            "CALL ducklake_expire_snapshots('softprobe', older_than => now() - INTERVAL '60 seconds')"
+        ));
+        assert!(!sql_needs_softprobe_txn_wrap(
+            "CALL ducklake_merge_adjacent_files('softprobe', 'metric_samples')"
+        ));
     }
 
     #[test]
@@ -1050,5 +1287,14 @@ mod tests {
             ),
             Poison::Collateral
         );
+    }
+
+    #[test]
+    fn identical_sql_shares_coalesce_key() {
+        let a = sql_coalesce_key("SELECT 1");
+        let b = sql_coalesce_key("SELECT 1");
+        let c = sql_coalesce_key("SELECT 2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

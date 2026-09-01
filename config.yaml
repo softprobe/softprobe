@@ -18,12 +18,12 @@ query:
 maintenance:
   enabled: true
   target_file_size_bytes: 67108864  # 64MB
-  interval_seconds: 3600  # 1 hour
+  interval_seconds: 300
   metadata_enabled: true
-  metadata_interval_seconds: 3600
-  max_snapshot_age_seconds: 604800
+  metadata_interval_seconds: 60
+  max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: true
-  remove_orphan_older_than_seconds: 3600
+  remove_orphan_older_than_seconds: 60
 
 ducklake:
   catalog_type: "postgres"
@@ -31,8 +31,9 @@ ducklake:
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
-  # Inline collector-sized batches into Postgres catalog (avoid tiny GCS/S3 parquet).
-  data_inlining_row_limit: 10000
+  # 0 = Parquet always so TWCS can merge skinny tables. VARIANT shredding
+  # (series.labels) already required Parquet. Opt-in 10000 only for inlined-reader tests.
+  data_inlining_row_limit: 0
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 

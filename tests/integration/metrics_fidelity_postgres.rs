@@ -107,9 +107,8 @@ async fn setup() -> PostgresBackend {
 
 #[async_trait]
 impl MetricsFidelityBackend for PostgresBackend {
-    fn metrics_table(&self) -> String {
-        // Writer prefers catalog.schema.table when metadata_schema != main.
-        format!("softprobe.{}.metrics", self.metadata_schema)
+    fn catalog_prefix(&self) -> String {
+        format!("softprobe.{}", self.metadata_schema)
     }
 
     fn attach(&self) -> duckdb::Connection {
@@ -121,18 +120,6 @@ impl MetricsFidelityBackend for PostgresBackend {
         batches: Vec<Vec<softprobe_runtime::models::Metric>>,
     ) -> anyhow::Result<()> {
         self.storage.writer.write_metric_batches(batches).await
-    }
-
-    fn create_legacy_metrics_table(&self) {
-        let conn = self.attach();
-        let table = self.metrics_table();
-        conn.execute_batch(&format!(
-            "CREATE SCHEMA IF NOT EXISTS softprobe.{schema};
-             {ddl}",
-            schema = self.metadata_schema,
-            ddl = crate::util::metrics_fidelity_contract::legacy_metrics_create_ddl(&table),
-        ))
-        .expect("legacy create on postgres ducklake");
     }
 }
 

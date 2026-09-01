@@ -2,10 +2,10 @@
   "annotations": {
     "list": []
   },
-  "description": "Vector selectors and label matchers (=, =~, !=, !~).",
+  "description": "Next.js frontend HTTP + event loop + V8 heap.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_http_reqs{job=\"load-generator\"}",
-          "legendFormat": "{{method}}",
+          "expr": "sum(rate(http_server_duration_count{job=\"frontend\"}[5m]))",
+          "legendFormat": "server/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "equality job=",
+      "title": "HTTP server duration count/s",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_http_reqs{job=~\"load.*\"}",
-          "legendFormat": "{{method}}",
+          "expr": "sum(rate(http_client_duration_count{job=\"frontend\"}[5m]))",
+          "legendFormat": "client/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "regex job=~",
+      "title": "HTTP client duration count/s",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (container_cpu_utilization{job!=\"otel-collector\"})",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (le) (rate(http_server_duration_bucket{job=\"frontend\"}[5m]))",
+          "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "not-equal job!=",
+      "title": "HTTP server duration buckets",
       "type": "timeseries"
     },
     {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "demo_ad_served_total{category!~\"telescopes\"}",
-          "legendFormat": "{{category}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "calls/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "regex not-match category!~",
+      "title": "Spanmetrics calls/s",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "http_server_request_duration_count{job=~\".+\"}",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "util",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "multi-matcher HTTP server",
+      "title": "Event loop utilization",
       "type": "timeseries"
     },
     {
@@ -258,33 +258,206 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "nginx_requests",
-          "legendFormat": "nginx",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "p99",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "instant vector (no range fn)",
+      "title": "Event loop delay p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "p50",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Event loop delay p50/p90",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "p90",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Event loop delay p90",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(traces_span_metrics_calls{job=\"frontend\"})",
+          "legendFormat": "heap",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "V8 heap used",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"frontend\"}[5m]))",
+          "legendFormat": "gc/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "V8 GC duration rate",
       "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "tags": [
+    "astronomy-shop",
+    "otel-demo",
     "softprobe",
-    "prometheus",
-    "promql",
-    "selectors"
+    "frontend",
+    "nodejs"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Selectors & matchers",
-  "uid": "softprobe-prom-selectors",
+  "title": "Astronomy Shop · Frontend (Node.js)",
+  "uid": "astronomy-shop-frontend",
   "version": 1
 }

@@ -1,0 +1,30 @@
+# Lightweight Prom micro-benchmark stack (no Grafana, no OTel Demo).
+# Softprobe runs on the host at :8090.
+
+services:
+  auth-mock:
+    image: wiremock/wiremock:3.9.2
+    container_name: thelake-prom-bench-auth
+    command: ["--port", "8080", "--global-response-templating"]
+    volumes:
+      - ../../../mocks/auth:/home/wiremock:ro
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/__admin/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    container_name: thelake-prom-bench-otelcol
+    depends_on:
+      auth-mock:
+        condition: service_healthy
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otelcol-config.yaml:/etc/otelcol/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

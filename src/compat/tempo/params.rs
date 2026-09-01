@@ -123,7 +123,9 @@ fn validate_bounds(
             return Err(bad("end must be greater than or equal to start"));
         }
         let range_ns = i128::from(end) - i128::from(start);
-        if range_ns > i128::from(limits.max_query_range_seconds) * 1_000_000_000 {
+        if limits.max_query_range_seconds > 0
+            && range_ns > i128::from(limits.max_query_range_seconds) * 1_000_000_000
+        {
             return Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
                 "query range exceeds max_query_range_seconds",

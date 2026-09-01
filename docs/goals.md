@@ -54,6 +54,12 @@ operational telemetry.
    - Expose Prometheus-, Loki-, and Tempo-compatible **query** APIs so
      existing Grafana datasources can read lake evidence without a second
      write pipeline. See [compat/matrix.md](compat/matrix.md).
+   - Prom path should use DuckLake VARIANT shredding / promotion and stay
+     **acceptably** fast for Grafana (not TSDB-class). Findings and open
+     benchmark plan: [perf/prometheus-query-findings.md](perf/prometheus-query-findings.md).
+   - Metrics physical layout (proposed): day-sharded postings + skinny samples
+     + 5m/1h downsamples + `job` collapse — see
+     [metrics-timeseries-layout.md](metrics-timeseries-layout.md).
 
 ## Non-goals
 
@@ -71,4 +77,6 @@ operational telemetry.
 - [Schema promotion](promotion.md)
 - [Ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md)
 - [Compatibility matrix (Prom/Loki/Tempo)](compat/matrix.md)
+- [Prometheus query performance findings + benchmark](perf/prometheus-query-findings.md)
+- [Metrics time-series layout (proposed) — goals and ACs](metrics-timeseries-layout.md)
 - [Legacy documentation](legacy/README.md)

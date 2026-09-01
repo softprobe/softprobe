@@ -69,7 +69,10 @@ pub fn parse_loki_params_with_limits(
             return Err(bad("end must be greater than or equal to start"));
         }
         let range_ns = (i128::from(end) - i128::from(start)) as u128;
-        if range_ns > u128::from(limits.max_query_range_seconds) * 1_000_000_000 {
+        // 0 = unlimited (AC-W1 / §9.2) — same semantics as Prom validate_time_range_ms.
+        if limits.max_query_range_seconds > 0
+            && range_ns > u128::from(limits.max_query_range_seconds) * 1_000_000_000
+        {
             return Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
                 "query range exceeds max_query_range_seconds",
@@ -77,7 +80,9 @@ pub fn parse_loki_params_with_limits(
         }
     }
     if let Some(since) = since_ns {
-        if since as u128 > u128::from(limits.max_query_range_seconds) * 1_000_000_000 {
+        if limits.max_query_range_seconds > 0
+            && since as u128 > u128::from(limits.max_query_range_seconds) * 1_000_000_000
+        {
             return Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
                 "since exceeds max_query_range_seconds",
@@ -103,6 +108,95 @@ pub fn parse_loki_params_with_limits(
         interval_ns,
         step_ns,
         since_ns,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LokiIndexStatsParams {
+    pub query: String,
+    pub start_ns: i64,
+    pub end_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LokiTailParams {
+    pub query: String,
+    pub start_ns: Option<i64>,
+    pub limit: usize,
+    pub delay_for_secs: u64,
+}
+
+pub fn parse_index_stats_params(
+    pairs: &[(String, String)],
+    limits: &QueryLimits,
+) -> Result<LokiIndexStatsParams, CompatError> {
+    let map = pairs
+        .iter()
+        .fold(HashMap::<String, Vec<String>>::new(), |mut m, (k, v)| {
+            m.entry(k.clone()).or_default().push(v.clone());
+            m
+        });
+    let first = |key: &str| map.get(key).and_then(|v| v.first()).map(String::as_str);
+    let query = first("query")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| bad("missing query parameter"))?
+        .to_string();
+    let start_ns = parse_optional_ns(first("start"))?.ok_or_else(|| bad("missing start"))?;
+    let end_ns = parse_optional_ns(first("end"))?.ok_or_else(|| bad("missing end"))?;
+    if end_ns < start_ns {
+        return Err(bad("end must be greater than or equal to start"));
+    }
+    limits.validate_time_range_ms(Some(start_ns / 1_000_000), Some(end_ns / 1_000_000))?;
+    Ok(LokiIndexStatsParams {
+        query,
+        start_ns,
+        end_ns,
+    })
+}
+
+pub fn parse_tail_params(
+    pairs: &[(String, String)],
+    limits: &QueryLimits,
+) -> Result<LokiTailParams, CompatError> {
+    let map = pairs
+        .iter()
+        .fold(HashMap::<String, Vec<String>>::new(), |mut m, (k, v)| {
+            m.entry(k.clone()).or_default().push(v.clone());
+            m
+        });
+    let first = |key: &str| map.get(key).and_then(|v| v.first()).map(String::as_str);
+    let query = first("query")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| bad("missing query parameter"))?
+        .to_string();
+    let start_ns = parse_optional_ns(first("start"))?;
+    let limit = match first("limit") {
+        None | Some("") => 100,
+        Some(raw) => raw.parse::<usize>().map_err(|_| bad("invalid limit"))?,
+    };
+    if limit == 0 {
+        return Err(bad("limit must be greater than zero"));
+    }
+    if limit > limits.max_series.saturating_mul(100).max(1000) {
+        return Err(CompatError::new(
+            CompatErrorCode::LimitExceeded,
+            "limit exceeds Loki compatibility limit",
+        ));
+    }
+    let delay_for_secs = match first("delay_for") {
+        None | Some("") => 0,
+        Some(raw) => raw
+            .parse::<u64>()
+            .map_err(|_| bad("invalid delay_for"))?
+            .min(5),
+    };
+    Ok(LokiTailParams {
+        query,
+        start_ns,
+        limit,
+        delay_for_secs,
     })
 }
 
@@ -134,7 +228,7 @@ fn parse_optional_ns(raw: Option<&str>) -> Result<Option<i64>, CompatError> {
     Err(bad(format!("invalid time '{raw}'")))
 }
 
-fn parse_duration_ns(raw: &str) -> Result<i64, CompatError> {
+pub(crate) fn parse_duration_ns(raw: &str) -> Result<i64, CompatError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(bad("duration must not be empty"));
@@ -223,8 +317,6 @@ mod tests {
 
     #[test]
     fn accepts_stream_sampling_parameters_without_sampling() {
-        // Grafana always sends step for range queries; the lake must accept it
-        // (results are currently unsampled — see capability manifest note).
         let params = parse_loki_params(
             &[
                 ("query".into(), "{service_name=\"api\"}".into()),
@@ -236,5 +328,22 @@ mod tests {
         )
         .expect("step is accepted");
         assert_eq!(params.step_ns, Some(1_000_000_000));
+    }
+
+    #[test]
+    fn unlimited_max_query_range_accepts_explore_labels_window() {
+        let limits = QueryLimits::default();
+        assert_eq!(limits.max_query_range_seconds, 0);
+        let parsed = parse_loki_params_with_limits(
+            &[
+                ("start".into(), "1788244951417000000".into()),
+                ("end".into(), "1788248551417000000".into()),
+            ],
+            false,
+            &limits,
+        )
+        .expect("1h Grafana Explore labels window");
+        assert_eq!(parsed.start_ns, Some(1_788_244_951_417_000_000));
+        assert_eq!(parsed.end_ns, Some(1_788_248_551_417_000_000));
     }
 }

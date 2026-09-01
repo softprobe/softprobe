@@ -12,6 +12,29 @@ pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
     conn.query_row(&sql, [], |_| Ok(())).is_ok()
 }
 
+/// Query workers: one DuckDB thread each. Default `threads = nproc` on every
+/// connection made Grafana refresh occupy hundreds of OS threads and 15s timeouts.
+pub(crate) const QUERY_DUCKDB_THREADS: i64 = 1;
+pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
+/// Writers / TWCS: classic Prom dual-write + live OTEL need more than 512MB.
+pub(crate) const WRITER_DUCKDB_THREADS: i64 = 2;
+pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
+/// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs (TWCS skip
+/// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
+pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
+pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
+
+/// Cap CPU and RAM for one DuckDB connection.
+pub(crate) fn configure_duckdb_resources(
+    conn: &Connection,
+    threads: i64,
+    memory_limit: &str,
+) -> Result<()> {
+    conn.execute(&format!("SET threads = {threads}"), [])?;
+    conn.execute(&format!("SET memory_limit = '{memory_limit}'"), [])?;
+    Ok(())
+}
+
 /// Pin DuckLake extension conflict-retry defaults (official concurrent-write mechanism).
 pub(super) fn apply_ducklake_retry_settings(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -130,6 +153,27 @@ mod tests {
         assert_eq!(
             ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
             "schema => 'tenant_a', table_name => 'traces'"
+        );
+    }
+
+    #[test]
+    fn query_resource_caps_pin_single_thread() {
+        let conn = Connection::open_in_memory().expect("duckdb");
+        configure_duckdb_resources(&conn, QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
+            .expect("set resource caps");
+        let threads: i64 = conn
+            .query_row("SELECT current_setting('threads')", [], |row| row.get(0))
+            .expect("threads setting");
+        assert_eq!(threads, QUERY_DUCKDB_THREADS);
+    }
+
+    #[test]
+    fn compaction_memory_cap_exceeds_writer_so_twcs_can_merge() {
+        assert_eq!(COMPACTION_DUCKDB_THREADS, WRITER_DUCKDB_THREADS);
+        assert_ne!(COMPACTION_DUCKDB_MEMORY, WRITER_DUCKDB_MEMORY);
+        assert!(
+            COMPACTION_DUCKDB_MEMORY.ends_with("GB"),
+            "TWCS merge of closed-day metric_series OOM'd at writer 512MB"
         );
     }
 }

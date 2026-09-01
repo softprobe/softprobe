@@ -1,8 +1,17 @@
+use super::encode::compute_index_stats;
 use super::encode::{
-    instant_metric_vector_response, labels_response, series_response, streams_response,
+    instant_metric_vector_response, labels_response, matrix_response, series_response,
+    streams_response,
 };
 use super::logql::{parse_logql, parse_metric_expression, parse_selector};
-use super::params::{parse_loki_params_with_limits, LokiParams};
+use super::params::{
+    parse_index_stats_params, parse_loki_params_with_limits, parse_tail_params, LokiParams,
+};
+use super::stats::{parse_stats_query, stats_query_request};
+use super::tail;
+use super::volume::{
+    default_step_ns, eval_logs_volume, parse_logs_volume_query, volume_query_request,
+};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::compat::backends::ducklake_logs::DuckLakeLogsBackend;
@@ -12,17 +21,18 @@ use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::tenant::{
     scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
 };
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use std::sync::Arc;
 
 const PROTOCOL: ProtocolScope = ProtocolScope::Loki;
 const INSTANT_QUERY_LOOKBACK_NS: i64 = 30_000_000_000;
 
-async fn backend_for(
+pub(crate) async fn backend_for(
     state: &AppState,
     ctx: &TenantContext,
 ) -> Result<DuckLakeLogsBackend, CompatError> {
@@ -97,12 +107,40 @@ async fn run_query(
         return instant_metric_vector_response(value, timestamp_ns, ctx.limits.max_response_bytes)
             .unwrap_or_else(|err| error_response(PROTOCOL, err));
     }
+    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let (start_ns, end_ns) = effective_window(&params, range, now_ns);
+    if let Ok(Some(volume)) = parse_logs_volume_query(query) {
+        let start_ns = start_ns.unwrap_or(now_ns);
+        let end_ns = end_ns.unwrap_or(now_ns.saturating_add(1));
+        let step_ns = params
+            .step_ns
+            .or(params.interval_ns)
+            .unwrap_or_else(|| default_step_ns(start_ns, end_ns));
+        let range_ns = if volume.range_ns <= 1 {
+            step_ns
+        } else {
+            volume.range_ns
+        };
+        let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
+        let request = volume_query_request(volume.request, start_ns, end_ns, cap);
+        let backend = match backend_for(state, &ctx).await {
+            Ok(backend) => backend,
+            Err(err) => return error_response(PROTOCOL, err),
+        };
+        return match backend.query_range(&ctx, request).await {
+            Ok(hits) => {
+                let series =
+                    eval_logs_volume(&hits, &volume.group_by, start_ns, end_ns, step_ns, range_ns);
+                matrix_response(&series, ctx.limits.max_response_bytes)
+                    .unwrap_or_else(|err| error_response(PROTOCOL, err))
+            }
+            Err(err) => error_response(PROTOCOL, err),
+        };
+    }
     let mut request = match parse_logql(query) {
         Ok(request) => request,
         Err(err) => return error_response(PROTOCOL, err),
     };
-    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-    let (start_ns, end_ns) = effective_window(&params, range, now_ns);
     request.start_ns = start_ns;
     request.end_ns = end_ns;
     request.limit = params.limit;
@@ -197,6 +235,57 @@ async fn series_handler(
     }
 }
 
+async fn index_stats_handler(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let ctx = match tenant_context(tenant, &headers) {
+        Ok(ctx) => ctx,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let params = match parse_index_stats_params(&pairs(&uri), &ctx.limits) {
+        Ok(params) => params,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let request = match parse_stats_query(&params.query) {
+        Ok(request) => request,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
+    let request = stats_query_request(request, params.start_ns, params.end_ns, cap);
+    let backend = match backend_for(&state, &ctx).await {
+        Ok(backend) => backend,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    match backend.query_range(&ctx, request).await {
+        Ok(hits) => Json(compute_index_stats(&hits)).into_response(),
+        Err(err) => error_response(PROTOCOL, err),
+    }
+}
+
+async fn tail_handler(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantInfo>,
+    headers: HeaderMap,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let ctx = match tenant_context(tenant, &headers) {
+        Ok(ctx) => ctx,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    let params = match parse_tail_params(&pairs(&uri), &ctx.limits) {
+        Ok(params) => params,
+        Err(err) => return error_response(PROTOCOL, err),
+    };
+    if let Err(err) = parse_logql(&params.query) {
+        return error_response(PROTOCOL, err);
+    }
+    ws.on_upgrade(move |socket| tail::run(state, ctx, socket, params))
+}
+
 fn discovery_request(
     pairs: &[(String, String)],
     limits: &QueryLimits,
@@ -251,6 +340,8 @@ pub fn loki_routes() -> Router<AppState> {
             get(label_values_handler),
         )
         .route("/loki/api/v1/series", get(series_handler))
+        .route("/loki/api/v1/index/stats", get(index_stats_handler))
+        .route("/loki/api/v1/tail", get(tail_handler))
 }
 
 #[cfg(test)]

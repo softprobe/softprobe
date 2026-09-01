@@ -28,7 +28,7 @@ grep -Fq 'GRAFANA_COMPOSE_IMAGE=' "$ROOT_DIR/Makefile"
 grep -Fq 'Docker unavailable' "$ROOT_DIR/Makefile"
 grep -Fq 'GNU timeout unavailable' "$ROOT_DIR/Makefile"
 
-grep -Fq '"uid": "softprobe-prom-a"' "$ROOT_DIR/tests/compat/grafana/dashboards/softprobe-cross-signal.json"
+grep -Fq '"uid": "softprobe-prom-a"' "$ROOT_DIR/tests/compat/grafana/dashboards/smoke/softprobe-cross-signal.json"
 
 grep -Fq 'GRAFANA_REFERENCE_DIGEST' "$ROOT_DIR/scripts/grafana-system-smoke.sh"
 grep -Fq 'validate_grafana_reference_pin' "$ROOT_DIR/scripts/grafana-system-smoke.sh"

@@ -27,10 +27,12 @@ pub struct ErrorSpec {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CapabilityLimits {
+    /// Softprobe Prom range ceiling. `0` = unlimited (AC-W1).
     pub max_query_range_seconds: u64,
     pub max_series: usize,
     pub max_response_bytes: usize,
     pub max_labels_per_series: usize,
+    pub max_range_eval_points: usize,
     pub query_timeout_seconds: u64,
 }
 
@@ -94,6 +96,10 @@ mod tests {
         assert!(m.otlp_write_canonical);
         assert_eq!(m.errors.unsupported_feature.http_status, 501);
         assert_eq!(m.limits.max_labels_per_series, 40);
+        assert_eq!(
+            m.limits.max_query_range_seconds, 0,
+            "AC-W1: unlimited range ceiling"
+        );
         assert!(m.auth.scope_header_must_match_tenant);
     }
 }

@@ -44,13 +44,17 @@ import pathlib
 import sys
 
 directory = pathlib.Path(sys.argv[1])
-for path in sorted(directory.glob("*.json")):
-    document = json.loads(path.read_text())
-    dashboard = document.get("dashboard", document)
-    uid = dashboard.get("uid")
-    if not uid:
-        raise SystemExit(f"dashboard fixture has no uid: {path}")
-    print(uid)
+for sub in ("smoke", "promql", "astronomy", "compose"):
+    root = directory / sub
+    if not root.is_dir():
+        continue
+    for path in sorted(root.glob("*.json")):
+        document = json.loads(path.read_text())
+        dashboard = document.get("dashboard", document)
+        uid = dashboard.get("uid")
+        if not uid:
+            raise SystemExit(f"dashboard fixture has no uid: {path}")
+        print(uid)
 PY
   )
 fi
@@ -664,13 +668,23 @@ mock_dashboard() {
 import json
 import pathlib
 import sys
-dashboard_dir, uid = sys.argv[1:]
-path = pathlib.Path(dashboard_dir) / f"{uid}.json"
-dashboard = json.loads(path.read_text())
-print(json.dumps({
-    "meta": {"isFolder": False, "folderTitle": "Softprobe", "folderUid": "softprobe-folder"},
-    "dashboard": dashboard,
-}))
+
+def load_dashboard(path):
+    document = json.loads(path.read_text())
+    return document.get("dashboard", document)
+
+directory, uid = sys.argv[1], sys.argv[2]
+root = pathlib.Path(directory)
+for path in sorted(root.rglob("*.json")):
+    dashboard = load_dashboard(path)
+    if dashboard.get("uid") == uid:
+        print(json.dumps({
+            "meta": {"isFolder": False, "folderTitle": "Softprobe", "folderUid": "softprobe-folder"},
+            "dashboard": dashboard,
+        }))
+        break
+else:
+    raise SystemExit(f"dashboard not found: {uid}")
 PY
 }
 
@@ -768,7 +782,7 @@ import pathlib
 import sys
 
 items = []
-for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
+for path in sorted(pathlib.Path(sys.argv[1]).rglob("*.json")):
     dashboard = json.loads(path.read_text())
     items.append({"uid": dashboard["uid"], "title": dashboard.get("title", dashboard["uid"])})
 print(json.dumps(items))
@@ -1306,7 +1320,20 @@ def panel_structure(dashboard):
 
 obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
 uid = sys.argv[2]
-fixture = json.loads((pathlib.Path(sys.argv[3]) / f"{uid}.json").read_text())
+dashboard_dir = pathlib.Path(sys.argv[3])
+
+def load_dashboard(path):
+    document = json.loads(path.read_text())
+    return document.get("dashboard", document)
+
+fixture = None
+for path in sorted(dashboard_dir.rglob("*.json")):
+    candidate = load_dashboard(path)
+    if candidate.get("uid") == uid:
+        fixture = candidate
+        break
+if fixture is None:
+    raise SystemExit(f"dashboard fixture not found: {uid}")
 dashboard = obj.get("dashboard", {})
 meta = obj.get("meta", {})
 if dashboard.get("uid") != uid:

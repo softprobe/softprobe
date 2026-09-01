@@ -1,0 +1,21 @@
+# Softprobe metrics-layout harness infra (Postgres catalog only).
+# Auth mock runs on the host (scripts/bench-metrics-layout.sh) — Docker
+# published ports were reset-by-peer on this runner's bridge networking.
+
+services:
+  postgres:
+    image: ${LAYOUT_PG_IMAGE:-postgres:19beta3}
+    container_name: ${LAYOUT_PG_CONTAINER_NAME:-thelake-metrics-layout-postgres}
+    environment:
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ducklake
+      POSTGRES_DB: ducklake
+    ports:
+      - "${LAYOUT_PG_HOST_PORT:-5435}:5432"
+    volumes:
+      - ${THELAKE_LAYOUT_STATE_DIR:-/tmp/thelake-metrics-layout}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

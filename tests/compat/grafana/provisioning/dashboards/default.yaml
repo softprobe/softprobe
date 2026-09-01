@@ -1,6 +1,25 @@
 apiVersion: 1
 
 providers:
+  - name: Softprobe PromQL
+    orgId: 1
+    folder: Softprobe PromQL
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/promql
+
+  - name: Astronomy Shop
+    orgId: 1
+    folder: Astronomy Shop
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/astronomy
+
   - name: Softprobe Phase 4
     orgId: 1
     folder: Softprobe
@@ -9,4 +28,14 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
-      path: /var/lib/grafana/dashboards
+      path: /var/lib/grafana/dashboards/smoke
+
+  - name: Softprobe Compose
+    orgId: 1
+    folder: Softprobe
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/compose
