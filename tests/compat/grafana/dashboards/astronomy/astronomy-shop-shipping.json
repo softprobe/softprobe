@@ -2,10 +2,10 @@
   "annotations": {
     "list": []
   },
-  "description": "Classic _bucket/_sum/_count expansion (no histogram_quantile).",
+  "description": "Shipping business + HTTP server RED.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(demo_shipping_items_shipped{job=\"shipping\"}[5m]))",
+          "legendFormat": "shipped/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "cart latency _count rate",
+      "title": "Items shipped/s",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(demo_cart_add_item_latency_sum[5m]))",
+          "expr": "demo_shipping_items_shipped{job=\"shipping\"}",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "cart latency _sum rate",
+      "title": "Items shipped (raw)",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (le) (rate(demo_cart_add_item_latency_bucket[5m]))",
-          "legendFormat": "{{le}}",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"shipping\"}[5m]))",
+          "legendFormat": "req/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "cart latency _bucket rate",
+      "title": "HTTP server request rate",
       "type": "timeseries"
     },
     {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (http_server_request_duration_count)",
-          "legendFormat": "{{job}}",
+          "expr": "http_server_active_requests{job=\"shipping\"}",
+          "legendFormat": "active",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP server duration _count",
+      "title": "HTTP server active requests",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (http_server_request_duration_sum)",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (le) (rate(http_server_request_duration_bucket{job=\"shipping\"}[5m]))",
+          "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP server duration _sum",
+      "title": "HTTP duration buckets",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (le) (http_server_request_duration_bucket)",
-          "legendFormat": "{{le}}",
+          "expr": "sum(rate(http_server_request_body_size_sum{job=\"shipping\"}[5m]))",
+          "legendFormat": "bytes/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP server duration _bucket (sample)",
+      "title": "Request body size rate",
       "type": "timeseries"
     },
     {
@@ -301,13 +301,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(k6_http_req_duration_count[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(http_server_response_body_size_sum{job=\"shipping\"}[5m]))",
+          "legendFormat": "bytes/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6_http_req_duration _count rate",
+      "title": "Response body size rate",
       "type": "timeseries"
     },
     {
@@ -344,33 +344,33 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (le) (rate(k6_http_req_duration_bucket[5m]))",
-          "legendFormat": "{{le}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"shipping\"}[5m]))",
+          "legendFormat": "calls/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6_http_req_duration _bucket rate",
+      "title": "Spanmetrics calls/s",
       "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "tags": [
+    "astronomy-shop",
+    "otel-demo",
     "softprobe",
-    "prometheus",
-    "promql",
-    "histograms"
+    "shipping"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Classic histogram series",
-  "uid": "softprobe-prom-histograms",
+  "title": "Astronomy Shop \u00b7 Shipping",
+  "uid": "astronomy-shop-shipping",
   "version": 1
 }

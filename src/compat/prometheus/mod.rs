@@ -5,6 +5,8 @@ mod handlers;
 mod params;
 
 pub mod diff_normalize;
+pub mod gold_overview;
 
+pub use gold_overview::GOLD_OVERVIEW_EXPRS;
 pub use handlers::prometheus_routes;
 pub use params::{pairs_from_query, parse_time_ms};

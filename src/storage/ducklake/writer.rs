@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use super::attach::{
-    apply_ducklake_retry_settings, catalog_is_attached, ducklake_attach_options,
-    ducklake_attach_target, ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified,
-    prepare_local_ducklake_paths,
+    apply_ducklake_retry_settings, catalog_is_attached, configure_duckdb_resources,
+    ducklake_attach_options, ducklake_attach_target, ducklake_qualified_table_name,
+    ducklake_set_option_scope_for_qualified, prepare_local_ducklake_paths, WRITER_DUCKDB_MEMORY,
+    WRITER_DUCKDB_THREADS,
 };
 use super::object_store::configure_object_store;
 use super::util::{
@@ -205,10 +206,22 @@ impl DuckLakeWriter {
         dk: &DuckLakeConfig,
         table: &TelemetryTable,
     ) -> Result<()> {
+        if matches!(table, TelemetryTable::Metrics) {
+            // Layout family replaces fat `metrics` for DDL ensure (promotions / empty bootstrap).
+            let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+            let pool = self.get_or_create_pool(dk)?;
+            return tokio::task::spawn_blocking(move || {
+                pool.with_conn(|conn| {
+                    crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)
+                })
+            })
+            .await
+            .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))?;
+        }
         let (table_name, schema) = match table {
             TelemetryTable::Traces => ("traces", TraceTable::schema()),
             TelemetryTable::Logs => ("logs", OtlpLogsTable::schema()),
-            TelemetryTable::Metrics => ("metrics", OtlpMetricsTable::schema()),
+            TelemetryTable::Metrics => unreachable!("handled above"),
         };
         let arrow_schema = Arc::new(schema);
         let batch = RecordBatch::new_empty(arrow_schema);
@@ -451,6 +464,11 @@ impl DuckLakeWriter {
         }
         if dk.catalog_type == "sqlite" {
             conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
+        }
+        if let Err(err) =
+            configure_duckdb_resources(&conn, WRITER_DUCKDB_THREADS, WRITER_DUCKDB_MEMORY)
+        {
+            warn!("Failed to cap DuckDB writer threads/memory: {}", err);
         }
         Ok(conn)
     }

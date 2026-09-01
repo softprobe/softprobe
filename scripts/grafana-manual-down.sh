@@ -57,6 +57,7 @@ else
 fi
 
 echo "==> stopping Grafana compose"
-$COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
+THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" \
+  $COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
 
 echo "grafana manual stack down"

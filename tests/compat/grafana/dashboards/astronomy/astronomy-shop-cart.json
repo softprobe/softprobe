@@ -2,10 +2,10 @@
   "annotations": {
     "list": []
   },
-  "description": "sum|min|max|avg|count with by/without; topk|bottomk.",
+  "description": "Cart service latency histograms + ASP.NET / .NET runtime.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (k6_http_reqs)",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(demo_cart_add_item_latency_count{job=\"cart\"}[5m]))",
+          "legendFormat": "add/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "sum by (job)",
+      "title": "Add-item latency count/s",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg without (method) (k6_http_reqs)",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(demo_cart_get_cart_latency_count{job=\"cart\"}[5m]))",
+          "legendFormat": "get/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg without (method)",
+      "title": "Get-cart latency count/s",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "count by (job) (k6_http_reqs)",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (le) (rate(demo_cart_add_item_latency_bucket{job=\"cart\"}[5m]))",
+          "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "count by (job)",
+      "title": "Add-item latency buckets",
       "type": "timeseries"
     },
     {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "min by (job) (container_cpu_utilization)",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(demo_cart_add_item_latency_sum{job=\"cart\"}[5m]))",
+          "legendFormat": "sum/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "min by (job) CPU",
+      "title": "Add-item latency sum/s",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "max by (job) (container_memory_percent)",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
+          "legendFormat": "req/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "max by (job) memory %",
+      "title": "HTTP server request rate",
       "type": "timeseries"
     },
     {
@@ -258,13 +258,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(3, sum by (job) (container_cpu_utilization))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(demo_cart_add_item_latency_count{job=\"cart\"}[5m]))",
+          "legendFormat": "ff/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk(3, CPU)",
+      "title": "Feature-flag evaluations/s",
       "type": "timeseries"
     },
     {
@@ -301,13 +301,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "bottomk(3, sum by (job) (container_cpu_utilization))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
+          "legendFormat": "cpu",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "bottomk(3, CPU)",
+      "title": ".NET process CPU time",
       "type": "timeseries"
     },
     {
@@ -344,33 +344,206 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "avg by (job) (rate(http_server_request_duration_count[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(http_server_request_duration_sum{job=\"cart\"})",
+          "legendFormat": "rss",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "avg by (job) HTTP duration count rate",
+      "title": ".NET working set",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
+          "legendFormat": "gc/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": ".NET GC collections",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(http_server_request_duration_count{job=\"cart\"}[5m]))",
+          "legendFormat": "matches/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "ASP.NET routing match attempts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "http_server_active_requests{job=\"cart\"}",
+          "legendFormat": "queue",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Thread pool queue length",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "http_server_active_requests{job=\"cart\"}",
+          "legendFormat": "conn",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Kestrel active connections",
       "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "tags": [
+    "astronomy-shop",
+    "otel-demo",
     "softprobe",
-    "prometheus",
-    "promql",
-    "aggregations"
+    "cart",
+    "dotnet"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Aggregations",
-  "uid": "softprobe-prom-aggregations",
+  "title": "Astronomy Shop · Cart (.NET)",
+  "uid": "astronomy-shop-cart",
   "version": 1
 }

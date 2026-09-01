@@ -2,22 +2,72 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
-# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — keep upstream
-# exporters you still want; base 3.0.0 core uses debug + span_metrics on traces).
+# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — repeat upstream
+# receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
+#
+# Softprobe DuckLake cannot sustain the full demo metrics firehose (docker_stats,
+# host_metrics, redis, postgres, …) plus traces/logs while Grafana refreshes.
+# Keep GOLD-relevant metric sources only; leave traces/logs on debug (+ span_metrics).
+
+processors:
+  # Keep GOLD / Astronomy Shop + k6. k6 OTLP names use dots (`k6.http.reqs`);
+  # Softprobe sanitizes to underscores after ingest — filter must match both.
+  filter/softprobe_gold:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'not IsMatch(name, "(?i)^(k6[_\\.]|demo[_\\.]|http\\.|http_|rpc\\.|rpc_|traces\\.span\\.metrics|traces_span_metrics|calls$|duration$|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
+  batch/softprobe:
+    timeout: 20s
+    send_batch_size: 10000
+    send_batch_max_size: 10000
+  memory_limiter/softprobe:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
 
 exporters:
   otlphttp/softprobe:
     endpoint: http://host.docker.internal:8090
     tls:
       insecure: true
+    timeout: 30s
+    compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 15s
+      max_elapsed_time: 120s
+    sending_queue:
+      enabled: true
+      num_consumers: 1
+      queue_size: 64
 
 service:
   pipelines:
     traces:
-      exporters: [debug, span_metrics, otlphttp/softprobe]
+      receivers: [otlp]
+      processors:
+        [
+          resourcedetection,
+          memory_limiter,
+          transform/sanitize_spans,
+          gen_ai_normalizer,
+        ]
+      exporters: [debug, span_metrics]
     metrics:
+      receivers: [otlp, prometheus/ad, span_metrics]
+      processors:
+        [
+          resourcedetection,
+          memory_limiter/softprobe,
+          filter/softprobe_gold,
+          batch/softprobe,
+        ]
       exporters: [debug, otlphttp/softprobe]
     logs:
-      exporters: [debug, otlphttp/softprobe]
+      receivers: [otlp]
+      processors: [resourcedetection, memory_limiter, transform/sanitize_logs]
+      exporters: [debug]

@@ -483,23 +483,25 @@ async fn invalid_matcher_regex_is_bad_data() {
 }
 
 #[tokio::test]
-async fn query_range_window_too_large_is_limit_exceeded() {
+async fn query_range_long_windows_not_range_rejected() {
+    // AC-W1 / AC-W2 / AC-W6: 30d / 180d / 365d must not fail with range exceeds.
     let (router, _temp) = build_tenant_router().await;
-    let q = encode_query(&[
-        ("query", "up"),
-        ("start", "0"),
-        ("end", "9999999999"),
-        ("step", "60"),
-    ]);
-    let (status, body) = get_json(&router, &format!("/api/v1/query_range?{q}")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("max_query_range_seconds"),
-        "{body}"
-    );
+    let end: i64 = 1_700_000_000;
+    for days in [30i64, 180, 365] {
+        let start = end - days * 86_400;
+        let q = encode_query(&[
+            ("query", "up"),
+            ("start", &start.to_string()),
+            ("end", &end.to_string()),
+            ("step", "3600"),
+        ]);
+        let (status, body) = get_json(&router, &format!("/api/v1/query_range?{q}")).await;
+        assert_eq!(status, StatusCode::OK, "days={days} body={body}");
+        assert_eq!(body["status"], "success", "days={days} body={body}");
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            !err.contains("max_query_range_seconds") && !err.contains("range exceeds"),
+            "days={days} must not range-reject: {body}"
+        );
+    }
 }

@@ -120,6 +120,10 @@ path = "src/bin/perf_stress.rs"
 name = "grafana_seed_otlp"
 path = "src/bin/grafana_seed_otlp.rs"
 
+[[bin]]
+name = "layout_otlp_fixture"
+path = "src/bin/layout_otlp_fixture.rs"
+
 [profile.release]
 opt-level = 2
 lto = "off"

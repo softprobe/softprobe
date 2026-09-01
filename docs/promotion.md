@@ -273,6 +273,25 @@ columns:
       key: service.name
 ```
 
+### Recommended metrics hot labels (Prometheus / Grafana)
+
+For Prom-compatible dashboards, apply the versioned manifest
+[`docs/promotion/metrics-prom-hot-labels.yaml`](./metrics-prom-hot-labels.yaml)
+via `POST /v1/promotions/apply` **before** ingest. It promotes frequent Prom
+dimensions (`service_name` ← `service.name`, `instance_id` ←
+`service.instance.id`, `host_name`, `deployment_environment`, `http_method`,
+`http_route`) onto the `metrics` table.
+
+Bench (`make bench-prom-baseline`) and Grafana manual (`make grafana-up`)
+scripts apply this manifest automatically. Softprobe still does **not**
+auto-promote arbitrary attribute keys; merge this document with any other
+`telemetry_columns` fragment before apply (one active telemetry spec per
+tenant).
+
+The Prometheus query path prefers these typed columns and falls back to
+per-key `CAST(attributes['k'] AS VARCHAR)` / resource VARIANT access. It never
+`CAST(... AS JSON)` whole attribute blobs on the sample scan.
+
 ### Lifecycle
 
 ```text

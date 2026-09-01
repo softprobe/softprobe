@@ -2,10 +2,10 @@
   "annotations": {
     "list": []
   },
-  "description": "Live OpenTelemetry Demo traffic. Prefer gauges / low-cardinality series for readable shapes.",
+  "description": "FX conversions (currency) and quote service.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
@@ -43,13 +43,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
+          "expr": "sum(rate(demo_exchange_conversions_counter{job=\"currency\"}[5m]))",
+          "legendFormat": "fx/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 VUs (gauge)",
+      "title": "Currency conversions/s",
       "type": "timeseries"
     },
     {
@@ -86,13 +86,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(k6_iterations[5m]))",
-          "legendFormat": "iterations/s",
+          "expr": "demo_exchange_conversions_counter{job=\"currency\"}",
+          "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "k6 iterations rate",
+      "title": "Currency conversions (raw)",
       "type": "timeseries"
     },
     {
@@ -129,13 +129,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (category) (rate(demo_ad_served_total[5m]))",
-          "legendFormat": "{{category}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"currency\"}[5m]))",
+          "legendFormat": "calls/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "ad served rate",
+      "title": "Currency spanmetrics calls/s",
       "type": "timeseries"
     },
     {
@@ -172,13 +172,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(demo_cart_add_item_latency_count[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"quote\"}[5m]))",
+          "legendFormat": "quotes/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "cart add-item latency count rate",
+      "title": "Quotes/s",
       "type": "timeseries"
     },
     {
@@ -215,13 +215,13 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(http_server_request_duration_count[5m]))",
+          "expr": "sum(traces_span_metrics_calls{job=\"quote\"})",
           "legendFormat": "{{job}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "HTTP server duration count rate",
+      "title": "Quotes (raw)",
       "type": "timeseries"
     },
     {
@@ -258,32 +258,120 @@
             "uid": "softprobe-prom"
           },
           "editorMode": "code",
-          "expr": "topk(5, sum by (container_name) (container_cpu_utilization))",
-          "legendFormat": "{{container_name}}",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"quote\"}[5m]))",
+          "legendFormat": "calls/s",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "topk container CPU by container_name",
+      "title": "Quote spanmetrics calls/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(traces_span_metrics_calls{job=\"quote\"}[5m]))",
+          "legendFormat": "spans/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Quote OTel spans started/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "softprobe-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(traces_span_metrics_calls{job=\"quote\"})",
+          "legendFormat": "queue",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Quote span queue size",
       "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "tags": [
+    "astronomy-shop",
+    "otel-demo",
     "softprobe",
-    "prometheus",
-    "otel-demo"
+    "currency",
+    "quote"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Softprobe \u00b7 Overview (Astronomy Shop)",
-  "uid": "softprobe-prom-overview",
-  "version": 2
+  "title": "Astronomy Shop · Currency & Quote",
+  "uid": "astronomy-shop-currency-quote",
+  "version": 1
 }

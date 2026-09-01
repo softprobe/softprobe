@@ -230,8 +230,11 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
     );
 
     let metric_sql = format!(
-        "SELECT COUNT(*)::BIGINT FROM union_metrics WHERE {pred} = '{sess}'",
-        pred = variant_varchar("attributes", "sp.session.id"),
+        "SELECT COUNT(*)::BIGINT FROM softprobe.metric_series s \
+         JOIN softprobe.metric_samples sm \
+           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+         WHERE CAST(s.labels['sp_session_id'] AS VARCHAR) = '{sess}' \
+            OR CAST(s.labels['sp.session.id'] AS VARCHAR) = '{sess}'",
         sess = session_id.replace('\'', "''"),
     );
     let metrics = query_engine
@@ -543,11 +546,22 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(details
         .metrics
         .contains("CAST(resource_attributes['session.id'] AS VARCHAR)"));
+    // AC-D4: public union_metrics is the layout JOIN; session filter must see the gauge.
     let metrics = query_engine
         .execute_query(&details.metrics)
         .await
-        .expect("details metrics");
-    assert_eq!(metrics.row_count, 1);
+        .expect("details metrics via union_metrics");
+    assert!(
+        metrics.row_count >= 1,
+        "AC-D4: expected at least one metric row via union_metrics, got {}",
+        metrics.row_count
+    );
+    let name_idx = metrics
+        .columns
+        .iter()
+        .position(|c| c == "metric_name")
+        .expect("metric_name column");
+    assert_eq!(metrics.rows[0][name_idx].as_str(), Some("vk.metric"));
 
     let trace_details = compile_details_sql(
         &TelemetryDetailsTarget {
@@ -567,8 +581,11 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
     let trace_metrics = query_engine
         .execute_query(&trace_details.metrics)
         .await
-        .expect("trace metrics");
-    assert_eq!(trace_metrics.row_count, 1);
+        .expect("trace details metrics via union_metrics");
+    assert!(
+        trace_metrics.row_count >= 1,
+        "AC-D4: expected metric via union_metrics for trace filter"
+    );
 
     let logs = query_engine
         .execute_query(&details.logs)

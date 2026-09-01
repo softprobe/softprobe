@@ -5,7 +5,7 @@ use crate::promotion::{
 };
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::schema::arrow;
-use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, TraceTable};
+use crate::storage::schema::tables::{OtlpLogsTable, TraceTable};
 use ::arrow::record_batch::RecordBatch;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -278,12 +278,30 @@ impl DuckLakeWriter {
         ensure_promoted_columns_not_reserved(TelemetryTable::Metrics, &columns)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Self::apply_metric_promotions(&mut metrics, &columns)?;
-        let schema = Arc::new(OtlpMetricsTable::schema_with_promoted_columns(&columns));
+        // Layout ingest (§8): series + postings + samples|hist in one txn. Stop fat `metrics`.
         let dk = self.effective_ducklake(scope);
-        let record_batches = vec![arrow::metrics_to_record_batch(&metrics, schema.as_ref())?];
-        self.write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
-            .await?;
-        Ok(())
+        self.write_metrics_layout_batches(&dk, metrics).await
+    }
+
+    /// One-txn write into metric_series / postings / samples / hist_samples.
+    pub(super) async fn write_metrics_layout_batches(
+        &self,
+        dk: &crate::config::DuckLakeConfig,
+        metrics: Vec<Metric>,
+    ) -> Result<()> {
+        if metrics.is_empty() {
+            return Ok(());
+        }
+        let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+        let max_labels = super::DEFAULT_MAX_LABELS_PER_SERIES;
+        let pool = self.get_or_create_pool(dk)?;
+        tokio::task::spawn_blocking(move || {
+            pool.with_conn(|conn| {
+                super::write_metrics_layout_txn(conn, &catalog, &metrics, max_labels)
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("metrics layout writer blocking task join failed: {e}"))?
     }
 
     pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
@@ -318,14 +336,11 @@ impl DuckLakeWriter {
                 .write_tenant_metric_batches(&scope, &manifests, batches)
                 .await;
         }
-        let schema = self.metrics_schema().await?;
-        let mut record_batches = Vec::new();
-        for batch in batches {
-            if !batch.is_empty() {
-                record_batches.push(arrow::metrics_to_record_batch(&batch, schema.as_ref())?);
-            }
+        let metrics = Self::flatten_metrics(batches);
+        if metrics.is_empty() {
+            return Ok(());
         }
-        self.write_record_batches_internal("metrics", record_batches)
+        self.write_metrics_layout_batches(&self.ducklake, metrics)
             .await
     }
 
@@ -365,21 +380,13 @@ impl DuckLakeWriter {
 
     pub async fn write_metric_record_batches(
         &self,
-        record_batches: Vec<RecordBatch>,
+        _record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
-        if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_ducklake
-                .as_ref()
-                .unwrap()
-                .resolve_or_create("")
-                .await?;
-            let dk = self.effective_ducklake(&scope);
-            return self
-                .write_record_batches_internal_with_ducklake(&dk, "metrics", record_batches)
-                .await;
-        }
-        self.write_record_batches_internal("metrics", record_batches)
-            .await
+        // Fat Arrow → `metrics` path removed (§11.3). Callers must use Metric batches
+        // via `write_metric_batches` (layout ingest). Keeping the method so external
+        // signatures stay stable until call sites are deleted.
+        Err(anyhow::anyhow!(
+            "write_metric_record_batches is retired; use write_metric_batches (metrics layout ingest)"
+        ))
     }
 }

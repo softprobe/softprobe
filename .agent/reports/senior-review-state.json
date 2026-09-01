@@ -1,7 +1,0 @@
-{
-  "status": "approved_with_fixes",
-  "needs_rereview": false,
-  "conversation_id": "615825ed-06b5-495e-beb4-9279e91140b0",
-  "verdict": "APPROVE_WITH_FIXES",
-  "summary": "Verified Grafana queries vs CSV: polluted by re-seed overlaps (not PromQL bugs). Fixed wipe-on-up, no re-seed when already up; sine payments + documented expected shapes. Clean seed: rate≈0.0167 flat."
-}

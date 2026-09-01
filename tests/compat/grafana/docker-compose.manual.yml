@@ -8,6 +8,23 @@
 #   open http://127.0.0.1:3000  (admin / admin)
 
 services:
+  postgres:
+    image: ${GRAFANA_PG_IMAGE:-postgres:19beta3}
+    container_name: thelake-grafana-postgres
+    environment:
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ducklake
+      POSTGRES_DB: ducklake
+    ports:
+      - "${GRAFANA_PG_HOST_PORT:-5434}:5432"
+    volumes:
+      - ${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   auth-mock:
     image: wiremock/wiremock@sha256:d13997cd7b52583528a766019cfe7d4e91c4d224a67bdaa6f60efbb532f32176
     container_name: thelake-grafana-auth-mock

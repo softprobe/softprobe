@@ -15,7 +15,8 @@ targets; these scripts are thin helpers invoked by Make.
 | `demo_session_queries.sh` | `demo-session` |
 | `drop_all_tables.sh` | `drop-tables` |
 | `generate_telemetry.py` | `generate-telemetry` |
-| `telemetrygen_hosted.sh` | `telemetrygen` |
+| `grafana-manual-up.sh` / `grafana-manual-down.sh` | `grafana-up` / `grafana-down` |
+| `bench-prom-baseline.sh` / `bench-prom-down.sh` | `bench-prom-baseline` / `bench-prom-down` |
 
 ## Public Make surface
 
