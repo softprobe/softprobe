@@ -17,6 +17,11 @@ pub fn parse_logs_volume_query(query: &str) -> Result<Option<LogsVolumeQuery>, C
     if query.is_empty() {
         return Ok(None);
     }
+    // Grafana logs volume histograms use `sum by (…) (count_over_time(…))`. Bare
+    // `count_over_time` on query_range stays phase-2 unsupported (501).
+    if !query.starts_with("sum by") {
+        return Ok(None);
+    }
     let (group_by, rest) = parse_optional_sum_by(query)?;
     let Some(inner) = rest.strip_prefix("count_over_time(") else {
         return Ok(None);
@@ -216,6 +221,9 @@ mod tests {
     #[test]
     fn rejects_non_volume_queries() {
         assert!(parse_logs_volume_query(r#"{job="api"}"#)
+            .expect("parse")
+            .is_none());
+        assert!(parse_logs_volume_query(r#"count_over_time({service_name="checkout"}[1m])"#)
             .expect("parse")
             .is_none());
     }

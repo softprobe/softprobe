@@ -41,23 +41,43 @@ LIVE_INGEST_QUERIES = (
 )
 
 
-def _walk_exprs(node: Any, dashboard: str, panel: str, out: list[dict[str, str]]) -> None:
-    if isinstance(node, dict):
-        title = str(node.get("title") or panel)
-        expr = node.get("expr")
-        if isinstance(expr, str) and expr.strip():
-            out.append(
-                {
-                    "dashboard": dashboard,
-                    "panel": title,
-                    "expr": expr.strip(),
-                }
-            )
-        for child in node.values():
-            _walk_exprs(child, dashboard, title, out)
-    elif isinstance(node, list):
-        for child in node:
-            _walk_exprs(child, dashboard, panel, out)
+def _datasource_type(ds: Any) -> str | None:
+    if isinstance(ds, dict):
+        t = ds.get("type")
+        return str(t) if t else None
+    return None
+
+
+def _extract_panel_prom_queries(
+    panels: Any, dashboard: str, out: list[dict[str, str]]
+) -> None:
+    if not isinstance(panels, list):
+        return
+    for panel in panels:
+        if not isinstance(panel, dict):
+            continue
+        title = str(panel.get("title") or dashboard)
+        nested = panel.get("panels")
+        if nested:
+            _extract_panel_prom_queries(nested, dashboard, out)
+        panel_ds_type = _datasource_type(panel.get("datasource"))
+        if panel_ds_type and panel_ds_type != "prometheus":
+            continue
+        for target in panel.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            target_ds_type = _datasource_type(target.get("datasource")) or panel_ds_type
+            if target_ds_type and target_ds_type != "prometheus":
+                continue
+            expr = target.get("expr")
+            if isinstance(expr, str) and expr.strip():
+                out.append(
+                    {
+                        "dashboard": dashboard,
+                        "panel": title,
+                        "expr": expr.strip(),
+                    }
+                )
 
 
 def extract_dashboard_queries(dash_dir: Path = DASH_DIR) -> list[dict[str, str]]:
@@ -65,7 +85,7 @@ def extract_dashboard_queries(dash_dir: Path = DASH_DIR) -> list[dict[str, str]]
     for path in sorted(dash_dir.rglob("*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
         title = str(doc.get("title") or path.stem)
-        _walk_exprs(doc.get("panels") or [], title, title, queries)
+        _extract_panel_prom_queries(doc.get("panels") or [], title, queries)
     # Keep first occurrence of each (dashboard, panel, expr) triple.
     seen: set[tuple[str, str, str]] = set()
     unique: list[dict[str, str]] = []

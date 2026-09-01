@@ -1,4 +1,5 @@
 HELP.md
+.agent/
 **/target/
 .git
 !.mvn/wrapper/maven-wrapper.jar

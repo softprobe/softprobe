@@ -110,9 +110,7 @@ impl QueryLimits {
                 "end must be >= start",
             ));
         }
-        let span = i128::from(end_ms).saturating_sub(i128::from(start_ms));
-        let steps = span / i128::from(step_ms) + 1;
-        let total = steps.saturating_mul(series_count as i128);
+        let total = Self::range_eval_point_count(start_ms, end_ms, step_ms, series_count);
         let max = i128::from(self.max_range_eval_points as u64);
         if total > max {
             return Err(CompatError::new(
@@ -124,6 +122,58 @@ impl QueryLimits {
             ));
         }
         Ok(())
+    }
+
+    /// Steps × series for a `query_range` grid (same formula as [`validate_range_eval_points`]).
+    pub fn range_eval_point_count(
+        start_ms: i64,
+        end_ms: i64,
+        step_ms: i64,
+        series_count: usize,
+    ) -> i128 {
+        if step_ms <= 0 || end_ms < start_ms {
+            return 0;
+        }
+        let span = i128::from(end_ms).saturating_sub(i128::from(start_ms));
+        let steps = span / i128::from(step_ms) + 1;
+        steps.saturating_mul(series_count.max(1) as i128)
+    }
+
+    /// Bump Grafana `step` when `steps × series` would exceed [`max_range_eval_points`].
+    ///
+    /// Prometheus-compatible: widen resolution instead of failing panels that request
+    /// ~1100 points per series but match hundreds of series (Grafana SLO / AC-S3).
+    pub fn coerce_range_step_ms(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        step_ms: i64,
+        series_count: usize,
+    ) -> i64 {
+        if step_ms <= 0 || end_ms < start_ms {
+            return step_ms;
+        }
+        let series = series_count.max(1);
+        let span = i128::from(end_ms).saturating_sub(i128::from(start_ms));
+        if span <= 0 {
+            return step_ms;
+        }
+        let max_total = i128::from(self.max_range_eval_points as u64);
+        let max_steps_per_series = max_total / i128::from(series as u64);
+        if max_steps_per_series <= 0 {
+            return step_ms.max(span.min(i128::from(i64::MAX)) as i64);
+        }
+        if Self::range_eval_point_count(start_ms, end_ms, step_ms, series) <= max_total {
+            return step_ms;
+        }
+        let min_step = if max_steps_per_series <= 1 {
+            span
+        } else {
+            (span + (max_steps_per_series - 2)) / (max_steps_per_series - 1)
+        };
+        let min_step_i64 = i64::try_from(min_step.max(1).min(i128::from(i64::MAX)))
+            .unwrap_or(i64::MAX);
+        min_step_i64.max(step_ms)
     }
 }
 
@@ -314,5 +364,29 @@ mod tests {
         limits
             .validate_range_eval_points(0, 3_600_000, 15_000, 10)
             .expect("1h @ 15s with modest series is within budget");
+    }
+
+    #[test]
+    fn coerce_range_step_widens_for_many_series() {
+        let limits = QueryLimits::default();
+        // 3h @ 15s × 168 series → 121128 points; must coerce step, not reject.
+        let start = 0i64;
+        let end = 3 * 3_600_000;
+        let step = 15_000;
+        let coerced = limits.coerce_range_step_ms(start, end, step, 168);
+        assert!(
+            coerced > step,
+            "expected wider step, got {coerced}ms for 168 series"
+        );
+        limits
+            .validate_range_eval_points(start, end, coerced, 168)
+            .expect("coerced step must fit max_range_eval_points budget");
+    }
+
+    #[test]
+    fn coerce_range_step_leaves_fine_grids_when_within_budget() {
+        let limits = QueryLimits::default();
+        let step = 15_000;
+        assert_eq!(limits.coerce_range_step_ms(0, 3_600_000, step, 10), step);
     }
 }

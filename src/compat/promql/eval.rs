@@ -81,32 +81,27 @@ pub async fn eval_range(
             "end must be >= start",
         ));
     }
-    ctx.limits
-        .validate_range_eval_points(start_ms, end_ms, step_ms, 1)?;
 
     let range_ms = (end_ms - start_ms).abs();
     let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
-    ctx.limits
-        .validate_range_eval_points(start_ms, end_ms, step_ms, prefetch.total_series())?;
 
     // §9.1 step 5: collapse table already holds sum-by-job series at 1h grain.
     if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
         let series = prefetch.flat_series();
         return Ok(EvalResult::Matrix(matrix_from_grain_series(
-            ctx,
             &series,
             start_ms,
             end_ms,
             step_ms,
             ONE_HOUR_LOOKBACK_MS,
             0,
-        )?));
+        )));
     }
 
     let lookback = range_lookback_ms(step_ms);
     // One pass over the AST and prefetched samples. Instant-eval-per-step cloned
     // every Grafana point (240–1100×) and blew the 100ms dashboard SLO.
-    match eval_over_range(&prefetch, ctx, expr, start_ms, end_ms, step_ms, lookback)? {
+    match eval_over_range(&prefetch, expr, start_ms, end_ms, step_ms, lookback)? {
         RangeVal::Scalar(value) => Ok(EvalResult::Matrix(scalar_to_matrix(
             value, start_ms, end_ms, step_ms,
         ))),
@@ -121,7 +116,7 @@ enum RangeVal {
 
 fn scalar_to_matrix(value: f64, start_ms: i64, end_ms: i64, step_ms: i64) -> MatrixResult {
     let mut samples = Vec::new();
-    let _ = for_each_step(start_ms, end_ms, step_ms, None, |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         samples.push(Sample {
             timestamp_ms: t,
             value,
@@ -135,38 +130,20 @@ fn scalar_to_matrix(value: f64, start_ms: i64, end_ms: i64, step_ms: i64) -> Mat
     }
 }
 
-fn for_each_step(
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    ctx: Option<&TenantContext>,
-    mut f: impl FnMut(i64),
-) -> Result<(), CompatError> {
+fn for_each_step(start_ms: i64, end_ms: i64, step_ms: i64, mut f: impl FnMut(i64)) {
     let mut t = start_ms;
-    let mut steps = 0i64;
     while t <= end_ms {
-        if let Some(ctx) = ctx {
-            if steps > 0 && steps % 64 == 0 && ctx.remaining().is_zero() {
-                return Err(CompatError::new(
-                    CompatErrorCode::LimitExceeded,
-                    "query deadline exceeded",
-                ));
-            }
-        }
         f(t);
-        steps += 1;
         let next = t.saturating_add(step_ms);
         if next <= t {
             break;
         }
         t = next;
     }
-    Ok(())
 }
 
 fn eval_over_range(
     prefetch: &PrefetchBackend,
-    ctx: &TenantContext,
     expr: &Expr,
     start_ms: i64,
     end_ms: i64,
@@ -174,25 +151,11 @@ fn eval_over_range(
     lookback_ms: i64,
 ) -> Result<RangeVal, CompatError> {
     match expr {
-        Expr::Paren(p) => eval_over_range(
-            prefetch,
-            ctx,
-            &p.expr,
-            start_ms,
-            end_ms,
-            step_ms,
-            lookback_ms,
-        ),
+        Expr::Paren(p) => {
+            eval_over_range(prefetch, &p.expr, start_ms, end_ms, step_ms, lookback_ms)
+        }
         Expr::Unary(u) => {
-            let inner = eval_over_range(
-                prefetch,
-                ctx,
-                &u.expr,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-            )?;
+            let inner = eval_over_range(prefetch, &u.expr, start_ms, end_ms, step_ms, lookback_ms)?;
             negate_range(inner)
         }
         Expr::NumberLiteral(n) => Ok(RangeVal::Scalar(n.val)),
@@ -202,31 +165,20 @@ fn eval_over_range(
             let off = offset_shift_ms(&vs.offset);
             let series = prefetch.series_for(&matchers)?;
             Ok(RangeVal::Matrix(matrix_from_grain_series(
-                ctx,
                 series,
                 start_ms,
                 end_ms,
                 step_ms,
                 lookback_ms,
                 off,
-            )?))
+            )))
         }
         Expr::MatrixSelector(_) => Err(CompatError::unsupported(
             "promql: range query over matrix result",
         )),
-        Expr::Call(c) => {
-            eval_call_over_range(prefetch, ctx, c, start_ms, end_ms, step_ms, lookback_ms)
-        }
+        Expr::Call(c) => eval_call_over_range(prefetch, c, start_ms, end_ms, step_ms, lookback_ms),
         Expr::Aggregate(a) => {
-            let inner = eval_over_range(
-                prefetch,
-                ctx,
-                &a.expr,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-            )?;
+            let inner = eval_over_range(prefetch, &a.expr, start_ms, end_ms, step_ms, lookback_ms)?;
             let matrix = range_as_matrix(inner, start_ms, end_ms, step_ms);
             let op = a.op.id();
             if op == T_TOPK || op == T_BOTTOMK {
@@ -234,7 +186,7 @@ fn eval_over_range(
                     CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
                 })?;
                 let k_val =
-                    eval_over_range(prefetch, ctx, param, start_ms, end_ms, step_ms, lookback_ms)?;
+                    eval_over_range(prefetch, param, start_ms, end_ms, step_ms, lookback_ms)?;
                 let k = match k_val {
                     RangeVal::Scalar(v) => expect_scalar_k(EvalResult::Scalar {
                         timestamp_ms: start_ms,
@@ -252,7 +204,6 @@ fn eval_over_range(
                     op == T_BOTTOMK,
                     &a.modifier,
                     matrix,
-                    ctx,
                     start_ms,
                     end_ms,
                     step_ms,
@@ -262,38 +213,13 @@ fn eval_over_range(
             }
         }
         Expr::Binary(b) => {
-            let lhs = eval_over_range(
-                prefetch,
-                ctx,
-                &b.lhs,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-            )?;
-            let rhs = eval_over_range(
-                prefetch,
-                ctx,
-                &b.rhs,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-            )?;
+            let lhs = eval_over_range(prefetch, &b.lhs, start_ms, end_ms, step_ms, lookback_ms)?;
+            let rhs = eval_over_range(prefetch, &b.rhs, start_ms, end_ms, step_ms, lookback_ms)?;
             let id = b.op.id();
             if id == T_LAND || id == T_LOR || id == T_LUNLESS {
-                eval_set_op_over_range(id, lhs, rhs, ctx, start_ms, end_ms, step_ms)
+                eval_set_op_over_range(id, lhs, rhs, start_ms, end_ms, step_ms)
             } else {
-                eval_binary_over_range(
-                    id,
-                    b.return_bool(),
-                    lhs,
-                    rhs,
-                    ctx,
-                    start_ms,
-                    end_ms,
-                    step_ms,
-                )
+                eval_binary_over_range(id, b.return_bool(), lhs, rhs, start_ms, end_ms, step_ms)
             }
         }
         Expr::Subquery(_) => Err(CompatError::unsupported("promql: subquery")),
@@ -325,7 +251,6 @@ fn negate_range(value: RangeVal) -> Result<RangeVal, CompatError> {
 
 fn eval_call_over_range(
     prefetch: &PrefetchBackend,
-    ctx: &TenantContext,
     call: &promql_parser::parser::Call,
     start_ms: i64,
     end_ms: i64,
@@ -337,7 +262,7 @@ fn eval_call_over_range(
         let arg = call.args.args.first().ok_or_else(|| {
             CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
         })?;
-        return eval_range_fn_over_range(prefetch, ctx, &name, arg, start_ms, end_ms, step_ms);
+        return eval_range_fn_over_range(prefetch, &name, arg, start_ms, end_ms, step_ms);
     }
     if super::funcs::is_math_fn(&name) {
         let arg = call.args.args.first().ok_or_else(|| {
@@ -346,7 +271,6 @@ fn eval_call_over_range(
         let to_nearest = if name == "round" && call.args.args.len() == 2 {
             match eval_over_range(
                 prefetch,
-                ctx,
                 &call.args.args[1],
                 start_ms,
                 end_ms,
@@ -364,7 +288,7 @@ fn eval_call_over_range(
         } else {
             None
         };
-        let inner = eval_over_range(prefetch, ctx, arg, start_ms, end_ms, step_ms, lookback_ms)?;
+        let inner = eval_over_range(prefetch, arg, start_ms, end_ms, step_ms, lookback_ms)?;
         return apply_math_fn_range(&name, inner, to_nearest, start_ms, end_ms, step_ms);
     }
     Err(CompatError::unsupported(format!("promql: function {name}")))
@@ -372,7 +296,6 @@ fn eval_call_over_range(
 
 fn eval_range_fn_over_range(
     prefetch: &PrefetchBackend,
-    ctx: &TenantContext,
     name: &str,
     arg: &Expr,
     start_ms: i64,
@@ -402,7 +325,7 @@ fn eval_range_fn_over_range(
         let mut samples = Vec::new();
         let mut lo = 0usize;
         let mut hi = 0usize;
-        for_each_step(start_ms, end_ms, step_ms, Some(ctx), |t| {
+        for_each_step(start_ms, end_ms, step_ms, |t| {
             let range_end_ms = t - off;
             let range_start_ms = range_end_ms - range_ms.max(1);
             while lo < s.samples.len() && s.samples[lo].timestamp_ms < range_start_ms {
@@ -421,7 +344,7 @@ fn eval_range_fn_over_range(
                     value: v,
                 });
             }
-        })?;
+        });
         if !samples.is_empty() {
             out.push(MetricSeries { labels, samples });
         }
@@ -536,13 +459,11 @@ fn aggregate_matrix(
     Ok(MatrixResult { series })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn aggregate_topk_matrix(
     k: usize,
     bottom: bool,
     modifier: &Option<LabelModifier>,
     inner: MatrixResult,
-    ctx: &TenantContext,
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
@@ -551,7 +472,7 @@ fn aggregate_topk_matrix(
         return Ok(MatrixResult { series: vec![] });
     }
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-    for_each_step(start_ms, end_ms, step_ms, Some(ctx), |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         let vector = VectorResult {
             samples: instant_values_at(&inner.series, t),
         };
@@ -563,7 +484,7 @@ fn aggregate_topk_matrix(
                 });
             }
         }
-    })?;
+    });
     Ok(MatrixResult {
         series: by_labels
             .into_iter()
@@ -590,13 +511,11 @@ fn instant_values_at(series: &[MetricSeries], t: i64) -> Vec<InstantSample> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn eval_binary_over_range(
     op: u16,
     return_bool: bool,
     lhs: RangeVal,
     rhs: RangeVal,
-    ctx: &TenantContext,
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
@@ -624,7 +543,7 @@ fn eval_binary_over_range(
         )?)),
         (RangeVal::Matrix(lv), RangeVal::Matrix(rv)) => {
             let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-            for_each_step(start_ms, end_ms, step_ms, Some(ctx), |t| {
+            for_each_step(start_ms, end_ms, step_ms, |t| {
                 let l = VectorResult {
                     samples: instant_values_at(&lv.series, t),
                 };
@@ -639,7 +558,7 @@ fn eval_binary_over_range(
                         });
                     }
                 }
-            })?;
+            });
             Ok(RangeVal::Matrix(MatrixResult {
                 series: by_labels
                     .into_iter()
@@ -691,7 +610,6 @@ fn eval_set_op_over_range(
     op: u16,
     lhs: RangeVal,
     rhs: RangeVal,
-    ctx: &TenantContext,
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
@@ -715,7 +633,7 @@ fn eval_set_op_over_range(
         }
     };
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-    for_each_step(start_ms, end_ms, step_ms, Some(ctx), |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         let l = EvalResult::Vector(VectorResult {
             samples: instant_values_at(&lv.series, t),
         });
@@ -730,7 +648,7 @@ fn eval_set_op_over_range(
                 });
             }
         }
-    })?;
+    });
     Ok(RangeVal::Matrix(MatrixResult {
         series: by_labels
             .into_iter()
@@ -759,10 +677,6 @@ struct PrefetchBackend {
 }
 
 impl PrefetchBackend {
-    fn total_series(&self) -> usize {
-        self.entries.iter().map(|(_, series)| series.len()).sum()
-    }
-
     fn flat_series(&self) -> Vec<MetricSeries> {
         let mut out = Vec::new();
         for (_, series) in &self.entries {
@@ -1114,21 +1028,19 @@ fn range_lookback_ms(step_ms: i64) -> i64 {
 }
 
 /// Resample grain/collapse series onto the query_range step grid.
-#[allow(clippy::too_many_arguments)]
 fn matrix_from_grain_series(
-    ctx: &TenantContext,
     series: &[MetricSeries],
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
     lookback_ms: i64,
     offset_ms: i64,
-) -> Result<MatrixResult, CompatError> {
+) -> MatrixResult {
     let mut out = Vec::with_capacity(series.len());
     for s in series {
         let mut samples = Vec::new();
         let mut hi = 0usize;
-        for_each_step(start_ms, end_ms, step_ms, Some(ctx), |t| {
+        for_each_step(start_ms, end_ms, step_ms, |t| {
             let data_t = t - offset_ms;
             let win_start = data_t - lookback_ms;
             while hi < s.samples.len() && s.samples[hi].timestamp_ms <= data_t {
@@ -1144,7 +1056,7 @@ fn matrix_from_grain_series(
                     value: cand.value,
                 });
             }
-        })?;
+        });
         if !samples.is_empty() {
             out.push(MetricSeries {
                 labels: s.labels.clone(),
@@ -1152,7 +1064,7 @@ fn matrix_from_grain_series(
             });
         }
     }
-    Ok(MatrixResult { series: out })
+    MatrixResult { series: out }
 }
 
 /// Prometheus `offset` shifts the data timestamp: `metric offset 5m` reads data from 5m earlier.
