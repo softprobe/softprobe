@@ -398,7 +398,10 @@ mod tests {
         let fitted = limits
             .fit_range_step_ms(start, end, step, 168)
             .expect("fit");
-        assert!(fitted > step, "expected wider step, got {fitted}ms for 168 series");
+        assert!(
+            fitted > step,
+            "expected wider step, got {fitted}ms for 168 series"
+        );
         limits
             .validate_range_eval_points(start, end, fitted, 168)
             .expect("fitted step must fit max_range_eval_points budget");
@@ -409,7 +412,9 @@ mod tests {
         let limits = QueryLimits::default();
         let step = 15_000;
         assert_eq!(
-            limits.fit_range_step_ms(0, 3_600_000, step, 10).expect("fit"),
+            limits
+                .fit_range_step_ms(0, 3_600_000, step, 10)
+                .expect("fit"),
             step
         );
     }

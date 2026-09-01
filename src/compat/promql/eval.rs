@@ -86,14 +86,10 @@ pub async fn eval_range(
         .validate_range_eval_points(start_ms, end_ms, step_ms, 1)?;
 
     let range_ms = (end_ms - start_ms).abs();
-    let prefetch =
-        PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
-    let step_ms = ctx.limits.fit_range_step_ms(
-        start_ms,
-        end_ms,
-        step_ms,
-        prefetch.total_series(),
-    )?;
+    let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
+    let step_ms =
+        ctx.limits
+            .fit_range_step_ms(start_ms, end_ms, step_ms, prefetch.total_series())?;
 
     // §9.1 step 5: collapse table already holds sum-by-job series at 1h grain.
     if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {

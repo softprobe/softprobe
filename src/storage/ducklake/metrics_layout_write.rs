@@ -130,6 +130,7 @@ fn push_classic_prom_gauges(
             timestamp: m.timestamp,
             value,
             record_date,
+            classic_dual_write: true,
         });
     };
 
@@ -181,6 +182,8 @@ struct SampleRow {
     timestamp: DateTime<Utc>,
     value: f64,
     record_date: NaiveDate,
+    /// Classic `_bucket`/`_sum`/`_count` dual-write from native histograms.
+    classic_dual_write: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +301,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 timestamp: m.timestamp,
                 value: m.value,
                 record_date,
+                classic_dual_write: false,
             });
         }
     }
@@ -306,8 +310,13 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
     // (job, instance, le) series_ids — without coalescing, one scrape writes
     // hundreds of raw points into the same series and Grafana `sum by (le)`
     // blows scan_cap / 100ms on 30m–3h. Keep last value per series per 15s
-    // (Grafana floor), Greptime-style pre-aggregate at ingest.
-    coalesce_samples_to_step(&mut out.samples, 15_000);
+    // (Grafana floor), Greptime-style pre-aggregate at ingest. Regular gauge
+    // samples must stay at native scrape cadence for PromQL *_over_time parity.
+    let (mut regular, mut dual): (Vec<SampleRow>, Vec<SampleRow>) =
+        out.samples.into_iter().partition(|s| s.classic_dual_write);
+    coalesce_samples_to_step(&mut dual, 15_000);
+    regular.extend(dual);
+    out.samples = regular;
 
     out
 }
@@ -1118,24 +1127,28 @@ mod tests {
                 timestamp: ts0,
                 value: 1.0,
                 record_date: day,
+                classic_dual_write: true,
             },
             SampleRow {
                 series_id: 1,
                 timestamp: ts1,
                 value: 2.0,
                 record_date: day,
+                classic_dual_write: true,
             },
             SampleRow {
                 series_id: 1,
                 timestamp: ts2,
                 value: 3.0,
                 record_date: day,
+                classic_dual_write: true,
             },
             SampleRow {
                 series_id: 2,
                 timestamp: ts0,
                 value: 9.0,
                 record_date: day,
+                classic_dual_write: true,
             },
         ];
         coalesce_samples_to_step(&mut samples, 15_000);
