@@ -32,7 +32,7 @@ providers:
 
   - name: Softprobe Compose
     orgId: 1
-    folder: Softprobe Compose
+    folder: Softprobe
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30

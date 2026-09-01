@@ -49,12 +49,12 @@ for sub in ("smoke", "promql", "astronomy", "compose"):
     if not root.is_dir():
         continue
     for path in sorted(root.glob("*.json")):
-    document = json.loads(path.read_text())
-    dashboard = document.get("dashboard", document)
-    uid = dashboard.get("uid")
-    if not uid:
-        raise SystemExit(f"dashboard fixture has no uid: {path}")
-    print(uid)
+        document = json.loads(path.read_text())
+        dashboard = document.get("dashboard", document)
+        uid = dashboard.get("uid")
+        if not uid:
+            raise SystemExit(f"dashboard fixture has no uid: {path}")
+        print(uid)
 PY
   )
 fi
