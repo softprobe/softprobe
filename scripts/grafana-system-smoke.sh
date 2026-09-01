@@ -44,7 +44,11 @@ import pathlib
 import sys
 
 directory = pathlib.Path(sys.argv[1])
-for path in sorted(directory.rglob("*.json")):
+for sub in ("smoke", "promql", "astronomy", "compose"):
+    root = directory / sub
+    if not root.is_dir():
+        continue
+    for path in sorted(root.glob("*.json")):
     document = json.loads(path.read_text())
     dashboard = document.get("dashboard", document)
     uid = dashboard.get("uid")

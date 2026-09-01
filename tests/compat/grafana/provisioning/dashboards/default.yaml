@@ -29,3 +29,13 @@ providers:
     allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards/smoke
+
+  - name: Softprobe Compose
+    orgId: 1
+    folder: Softprobe Compose
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/compose
