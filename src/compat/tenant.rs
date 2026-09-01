@@ -171,8 +171,8 @@ impl QueryLimits {
         } else {
             (span + (max_steps_per_series - 2)) / (max_steps_per_series - 1)
         };
-        let min_step_i64 = i64::try_from(min_step.max(1).min(i128::from(i64::MAX)))
-            .unwrap_or(i64::MAX);
+        let min_step_i64 =
+            i64::try_from(min_step.max(1).min(i128::from(i64::MAX))).unwrap_or(i64::MAX);
         min_step_i64.max(step_ms)
     }
 }

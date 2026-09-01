@@ -223,9 +223,11 @@ mod tests {
         assert!(parse_logs_volume_query(r#"{job="api"}"#)
             .expect("parse")
             .is_none());
-        assert!(parse_logs_volume_query(r#"count_over_time({service_name="checkout"}[1m])"#)
-            .expect("parse")
-            .is_none());
+        assert!(
+            parse_logs_volume_query(r#"count_over_time({service_name="checkout"}[1m])"#)
+                .expect("parse")
+                .is_none()
+        );
     }
 
     #[test]

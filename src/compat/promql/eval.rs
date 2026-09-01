@@ -1159,22 +1159,25 @@ async fn eval_call(
         let keep_name = name == "last_over_time";
         let mut samples = Vec::new();
         for s in matrix.series {
+            let lo = s
+                .samples
+                .partition_point(|sample| sample.timestamp_ms < range_start_ms);
+            let hi = s
+                .samples
+                .partition_point(|sample| sample.timestamp_ms <= range_end_ms);
+            let window = &s.samples[lo..hi];
             if let Some(v) = match name.as_str() {
-                "rate" => extrapolated_rate(&s.samples, range_start_ms, range_end_ms, true, true),
-                "irate" => counter_irate(&s.samples),
-                "increase" => {
-                    extrapolated_rate(&s.samples, range_start_ms, range_end_ms, true, false)
-                }
-                "delta" => {
-                    extrapolated_rate(&s.samples, range_start_ms, range_end_ms, false, false)
-                }
-                "idelta" => gauge_idelta(&s.samples),
-                "sum_over_time" => over_time_sum(&s.samples),
-                "avg_over_time" => over_time_avg(&s.samples),
-                "min_over_time" => over_time_min(&s.samples),
-                "max_over_time" => over_time_max(&s.samples),
-                "count_over_time" => Some(s.samples.len() as f64),
-                "last_over_time" => s.samples.last().map(|x| x.value).filter(|v| !v.is_nan()),
+                "rate" => extrapolated_rate(window, range_start_ms, range_end_ms, true, true),
+                "irate" => counter_irate(window),
+                "increase" => extrapolated_rate(window, range_start_ms, range_end_ms, true, false),
+                "delta" => extrapolated_rate(window, range_start_ms, range_end_ms, false, false),
+                "idelta" => gauge_idelta(window),
+                "sum_over_time" => over_time_sum(window),
+                "avg_over_time" => over_time_avg(window),
+                "min_over_time" => over_time_min(window),
+                "max_over_time" => over_time_max(window),
+                "count_over_time" => Some(window.len() as f64),
+                "last_over_time" => window.last().map(|x| x.value).filter(|v| !v.is_nan()),
                 _ => None,
             } {
                 let mut labels = s.labels;
