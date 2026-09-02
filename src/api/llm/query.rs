@@ -1038,8 +1038,8 @@ pub fn compile_scores_for_session_sql(
     let member_filter = format!(
         "session_id = {session} AND timestamp >= {from_ts} AND timestamp <= {to_ts}",
         session = sql_string_literal(session_id),
-        from_ts = timestamp_literal(&from),
-        to_ts = timestamp_literal(&to),
+        from_ts = timestamp_ns_literal(&from),
+        to_ts = timestamp_ns_literal(&to),
     );
     Ok(format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
