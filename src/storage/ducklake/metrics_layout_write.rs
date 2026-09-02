@@ -3,7 +3,9 @@
 //! Decode/canonicalize → `series_id` → INSERT series + postings + samples|hist
 //! in a single BEGIN…COMMIT. Does not write 5m/1h/collapse rollups.
 
-use crate::compat::projection::prometheus::{project_prometheus_labels, sanitize_label_name};
+use crate::compat::projection::prometheus::{
+    classic_prom_dual_write_allowed, project_prometheus_labels, sanitize_label_name,
+};
 use crate::models::Metric;
 use crate::storage::ducklake::util::escape_sql_literal;
 use crate::storage::schema::metrics_layout::{
@@ -61,21 +63,7 @@ fn format_le_label(bound: f64) -> String {
 /// Dual-write classic Prom `_bucket` / `_sum` / `_count` gauges so Grafana
 /// `rate(..._bucket[5m])` hits skinny `metric_samples` (≤100ms) instead of
 /// expanding native hist arrays on every query. Native hist rows still land in
-/// `metric_hist_samples` (AC-H1).
-///
-/// Only Astronomy Shop / GOLD board families are dual-written. Dual-writing every
-/// OTEL hist (GC, runtime, …) exploded series/postings volume, pegged the writer
-/// at multi-GB RSS, and returned HTTP 503 to the collector.
-fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
-    base_name.starts_with("k6_")
-        || base_name.starts_with("demo_")
-        || base_name.starts_with("http_")
-        || base_name.starts_with("rpc_")
-        || base_name.starts_with("traces_span_metrics_")
-        // Unit/integration fixture names (`layout_latency`) keep dual-write coverage.
-        || base_name.starts_with("layout_")
-}
-
+/// `metric_hist_samples` (AC-H1). Non-whitelisted families expand at query time.
 fn push_classic_prom_gauges(
     base_name: &str,
     base_labels: &BTreeMap<String, String>,
@@ -89,14 +77,10 @@ fn push_classic_prom_gauges(
         return;
     }
     let mut emit = |suffix: &str, extra: Option<(&str, String)>, value: f64| {
-        // Keep classic series skinny — copying full OTEL label soup onto every
-        // `_bucket`×`le` series made Grafana `sum by (le)` scan 400+ series.
-        let mut labels = BTreeMap::new();
-        for key in ["job", "instance"] {
-            if let Some(v) = base_labels.get(key) {
-                labels.insert(key.to_string(), v.clone());
-            }
-        }
+        // Keep projected Prom identity (capped, sanitized). Dropping route/method
+        // onto a shared (job, instance) series_id undercounted labeled queries
+        // and let 15s coalescing pick one series at random.
+        let mut labels = base_labels.clone();
         let prom_name = format!("{base_name}{suffix}");
         labels.insert("__name__".to_string(), prom_name.clone());
         if let Some((k, v)) = extra {
@@ -198,6 +182,8 @@ struct HistSampleRow {
     sum: Option<f64>,
     bucket_counts: Option<Vec<u64>>,
     explicit_bounds: Option<Vec<f64>>,
+    quantiles_json: Option<String>,
+    exemplars_json: Option<String>,
     record_date: NaiveDate,
 }
 
@@ -288,6 +274,11 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 sum: m.sum,
                 bucket_counts: m.bucket_counts.clone(),
                 explicit_bounds: m.explicit_bounds.clone(),
+                quantiles_json: m
+                    .quantiles
+                    .as_ref()
+                    .and_then(|q| serde_json::to_string(q).ok()),
+                exemplars_json: m.exemplars_json.clone(),
                 record_date,
             });
             // Classic Prom series for fast Grafana path (see push_classic_prom_gauges).
@@ -312,12 +303,10 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
         }
     }
 
-    // Dual-write collapses high-card OTEL hists (k6 URL×method×…) onto slim
-    // (job, instance, le) series_ids — without coalescing, one scrape writes
-    // hundreds of raw points into the same series and Grafana `sum by (le)`
-    // blows scan_cap / 100ms on 30m–3h. Keep last value per series per 15s
-    // (Grafana floor), Greptime-style pre-aggregate at ingest. Regular gauge
-    // samples must stay at native scrape cadence for PromQL *_over_time parity.
+    // Dual-write can still emit many scrape points on one (name, labels, le)
+    // series. Keep last value per series per 15s (Grafana floor) so GOLD
+    // `sum by (le)` stays inside scan_cap / 100ms. Regular gauges stay at
+    // native scrape cadence for PromQL *_over_time parity.
     let (mut dual, mut regular): (Vec<SampleRow>, Vec<SampleRow>) =
         out.samples.into_iter().partition(|s| s.classic_dual_write);
     coalesce_samples_to_step(&mut dual, 15_000);
@@ -496,18 +485,28 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
                 .unwrap_or_else(|| "NULL".to_string());
             let sum = r.sum.map(sql_f64).unwrap_or_else(|| "NULL".to_string());
             format!(
-                "({id}::UBIGINT, {ts}, {count}, {sum}, {buckets}, {bounds}, {rd})",
+                "({id}::UBIGINT, {ts}, {count}, {sum}, {buckets}, {bounds}, {quantiles}, {exemplars}, {rd})",
                 id = r.series_id,
                 ts = sql_ts(r.timestamp),
                 buckets = sql_u64_array(r.bucket_counts.as_deref()),
                 bounds = sql_f64_array(r.explicit_bounds.as_deref()),
+                quantiles = r
+                    .quantiles_json
+                    .as_deref()
+                    .map(sql_str)
+                    .unwrap_or_else(|| "NULL".into()),
+                exemplars = r
+                    .exemplars_json
+                    .as_deref()
+                    .map(sql_str)
+                    .unwrap_or_else(|| "NULL".into()),
                 rd = sql_date(r.record_date),
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "INSERT INTO {table} (series_id, timestamp, count, sum, bucket_counts, explicit_bounds, record_date)\n\
+        "INSERT INTO {table} (series_id, timestamp, count, sum, bucket_counts, explicit_bounds, quantiles, exemplars_json, record_date)\n\
          VALUES\n{values};"
     )
 }
@@ -638,6 +637,7 @@ mod tests {
         METRICS_LAYOUT_CORE_TABLES,
     };
     use chrono::TimeZone;
+    use std::collections::HashSet;
     use tempfile::TempDir;
 
     #[test]
@@ -1054,5 +1054,51 @@ mod tests {
         assert_eq!(samples[1].value, 3.0);
         assert_eq!(samples[2].series_id, 2);
         assert_eq!(samples[2].value, 9.0);
+    }
+
+    #[test]
+    fn classic_dual_write_keeps_identifying_labels() {
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let mut a = hist("http.server.duration", ts);
+        a.attributes.insert("http.route".into(), "/a".into());
+        let mut b = hist("http.server.duration", ts);
+        b.attributes.insert("http.route".into(), "/b".into());
+        let prepared = prepare_ingest(&[a, b], DEFAULT_MAX_LABELS_PER_SERIES);
+        let bucket_ids: HashSet<u64> = prepared
+            .series
+            .iter()
+            .filter(|s| s.metric_name.ends_with("_bucket"))
+            .map(|s| s.series_id)
+            .collect();
+        assert!(
+            bucket_ids.len() >= 6,
+            "two routes must not share classic series_id, got {}",
+            bucket_ids.len()
+        );
+        assert!(
+            prepared
+                .series
+                .iter()
+                .any(|s| s.labels_json.contains("/a") && s.metric_name.ends_with("_bucket")),
+            "classic series must keep route labels"
+        );
+    }
+
+    #[test]
+    fn non_whitelisted_histogram_is_not_dual_written() {
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let prepared = prepare_ingest(
+            &[hist("db.client.operation.duration", ts)],
+            DEFAULT_MAX_LABELS_PER_SERIES,
+        );
+        assert_eq!(prepared.hist_samples.len(), 1);
+        assert!(
+            prepared
+                .series
+                .iter()
+                .all(|s| !s.metric_name.ends_with("_bucket")),
+            "non-GOLD hists expand at query time"
+        );
+        assert!(prepared.samples.is_empty());
     }
 }

@@ -193,8 +193,6 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
         .expect("SQL read summary count/sum");
     assert_eq!(qcount, Some(100));
     assert_eq!(qsum, Some(500.0));
-    // Quantile expansion stays out of scope for metric_hist_samples (§6.4).
-
     // AC-H1 Prom path: classic `_count` / `_bucket` query_range over hist table.
     // Fixture timestamp is 2022-01-01T00:00:00Z (1_640_995_200s).
     // Short (30m) and mid (3h) windows must both return series — mid used to divert
@@ -362,6 +360,38 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         .expect("query summary");
     assert_eq!(qcount, Some(100));
     assert_eq!(qsum, Some(500.0));
+
+    let exemplars: Option<String> = conn
+        .query_row(
+            "SELECT h.exemplars_json \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'http.server.duration'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query histogram exemplars");
+    assert!(
+        exemplars.as_deref().unwrap_or("").contains("1.5"),
+        "histogram exemplars must persist, got {exemplars:?}"
+    );
+
+    let quantiles: Option<String> = conn
+        .query_row(
+            "SELECT h.quantiles \
+             FROM softprobe.metric_hist_samples h \
+             JOIN softprobe.metric_series s \
+               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+             WHERE s.metric_name = 'rpc.latency'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query summary quantiles");
+    assert!(
+        quantiles.as_deref().unwrap_or("").contains("0.99"),
+        "summary quantiles must persist, got {quantiles:?}"
+    );
 }
 
 #[tokio::test]

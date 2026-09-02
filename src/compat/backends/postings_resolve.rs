@@ -126,16 +126,26 @@ pub fn equality_postings(matchers: &[LabelMatcher]) -> Vec<EqualityPosting> {
     out
 }
 
-/// Posting `__name__` candidates: exact Prom name + dotted OTel form. Classic
-/// `_bucket`/`_sum`/`_count` names are dual-written as their own series, so a
-/// suffix selector must not also resolve the native histogram base series.
+/// Posting `__name__` candidates: exact Prom name + dotted OTel form. Dual-written
+/// `_bucket`/`_sum`/`_count` series keep their suffix names. Other histograms
+/// expand from the native base series, so suffix selectors also resolve the base.
 pub fn posting_name_values(prom_name: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for cand in [
+    let mut candidates = vec![
         prom_name.to_string(),
         prom_name.replace('_', "."),
         prom_name.replace('.', "_"),
-    ] {
+    ];
+    if crate::compat::projection::prometheus::classic_suffix_uses_native_hist(prom_name) {
+        if let Some(base) =
+            crate::compat::projection::prometheus::classic_prom_suffix_base(prom_name)
+        {
+            candidates.push(base.to_string());
+            candidates.push(base.replace('_', "."));
+            candidates.push(base.replace('.', "_"));
+        }
+    }
+    for cand in candidates {
         let s = sanitize_label_name(&cand);
         if !out.contains(&s) {
             out.push(s);
@@ -1888,6 +1898,80 @@ mod tests {
             9,
             "AC-H1: _bucket must resolve classic gauges via postings, got {bucket_ids:?}"
         );
+    }
+
+    /// Non-whitelisted histograms are native-only; `_bucket` must still resolve.
+    #[test]
+    fn native_hist_bucket_selector_resolves_base_series() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        write_metrics_layout_txn(
+            &conn,
+            &catalog,
+            &[hist("db.client.operation.duration", "i-1", ts)],
+            DEFAULT_MAX_LABELS_PER_SERIES,
+        )
+        .expect("hist ingest");
+
+        let dual_n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {catalog}.metric_series \
+                     WHERE metric_name LIKE 'db_client_operation_duration_%'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            dual_n, 0,
+            "non-GOLD hists must not dual-write suffix series"
+        );
+
+        let start = ts.timestamp_millis() - 15 * 60 * 1000;
+        let end = ts.timestamp_millis() + 15 * 60 * 1000;
+        let days = RecordDateRange::from_ms(Some(start), Some(end));
+        let eq = equality_postings(&[LabelMatcher {
+            name: "__name__".into(),
+            op: MatcherOp::Eq,
+            value: "db_client_operation_duration_bucket".into(),
+        }]);
+        let resolve_sql = resolve_series_ids_sql(&catalog, days, &eq, 10_000);
+        let mut stmt = conn.prepare(&resolve_sql).expect("prepare resolve");
+        let ids: Vec<u64> = stmt
+            .query_map([], |r| r.get::<_, u64>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "suffix selector must resolve the native hist series, got {ids:?}"
+        );
+
+        let samples_sql = samples_scan_sql_for_window(
+            &catalog,
+            &ids,
+            Some(start),
+            Some(end),
+            Some(15_000),
+            "NULL::VARCHAR AS lbl__empty",
+            true,
+            true,
+            true,
+            100,
+        );
+        assert!(
+            samples_sql.contains("metric_hist_samples"),
+            "native _bucket must scan hist tables, sql={samples_sql}"
+        );
+        let mut sstmt = conn.prepare(&samples_sql).expect("prepare samples");
+        let n = sstmt
+            .query_map([], |_| Ok(()))
+            .expect("samples query")
+            .count();
+        assert_eq!(n, 1, "native hist row must be readable for _bucket expand");
     }
 
     /// T-D3 / AC-D3: Prom backend is DuckLakeMetricsBackend; no sidecar writers in src.

@@ -15,8 +15,19 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
+
+/// Query result containing columns and rows
+#[derive(Clone)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub row_count: usize,
+}
+
+type InflightWaiters = Vec<oneshot::Sender<Result<QueryResult>>>;
+type InflightMap = HashMap<u64, InflightWaiters>;
 
 pub struct DuckDBQueryEngine {
     _shared_connection: Arc<Mutex<Connection>>,
@@ -24,7 +35,7 @@ pub struct DuckDBQueryEngine {
     next_worker: AtomicUsize,
     config: Config,
     /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
-    inflight: AsyncMutex<HashMap<u64, Vec<oneshot::Sender<Result<QueryResult>>>>>,
+    inflight: Arc<Mutex<InflightMap>>,
 }
 
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
@@ -297,18 +308,60 @@ struct DuckDBCore {
     cache: CacheSettings,
 }
 
-/// Query result containing columns and rows
-#[derive(Clone)]
-pub struct QueryResult {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Value>>,
-    pub row_count: usize,
-}
-
 fn sql_coalesce_key(sql: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sql.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Drops the in-flight key if the leader is cancelled (compat backends wrap
+/// `execute_query` in `tokio::time::timeout`). Without this, waiters hang until restart.
+struct InflightLease {
+    inflight: Arc<Mutex<InflightMap>>,
+    key: u64,
+    armed: bool,
+}
+
+impl InflightLease {
+    fn lock_map(inflight: &Mutex<InflightMap>) -> std::sync::MutexGuard<'_, InflightMap> {
+        inflight.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn take_waiters(&mut self) -> InflightWaiters {
+        self.armed = false;
+        Self::lock_map(&self.inflight)
+            .remove(&self.key)
+            .unwrap_or_default()
+    }
+
+    fn complete(mut self, result: &Result<QueryResult>) {
+        let waiters = self.take_waiters();
+        match result {
+            Ok(rows) => {
+                for waiter in waiters {
+                    let _ = waiter.send(Ok(rows.clone()));
+                }
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                for waiter in waiters {
+                    let _ = waiter.send(Err(anyhow!(msg.clone())));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for InflightLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let waiters = self.take_waiters();
+        for waiter in waiters {
+            let _ = waiter.send(Err(anyhow!("DuckDB in-flight leader cancelled")));
+        }
+    }
 }
 
 impl DuckDBQueryEngine {
@@ -496,7 +549,7 @@ impl DuckDBQueryEngine {
             workers,
             next_worker: AtomicUsize::new(0),
             config: config.clone(),
-            inflight: AsyncMutex::new(HashMap::new()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -522,36 +575,30 @@ impl DuckDBQueryEngine {
     /// Used by Grafana SQL API endpoint
     pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {
         let key = sql_coalesce_key(query);
-        {
-            let mut pending = self.inflight.lock().await;
+        // Guard must drop before any `.await` — `std::sync::MutexGuard` is `!Send`.
+        let waiter = {
+            let mut pending = InflightLease::lock_map(&self.inflight);
             if let Some(waiters) = pending.get_mut(&key) {
                 let (tx, rx) = oneshot::channel();
                 waiters.push(tx);
-                drop(pending);
-                return rx
-                    .await
-                    .map_err(|_| anyhow!("DuckDB in-flight coalesced waiter dropped"))?;
+                Some(rx)
+            } else {
+                pending.insert(key, Vec::new());
+                None
             }
-            pending.insert(key, Vec::new());
-        }
-        let result = self.dispatch_query(query).await;
-        let waiters = {
-            let mut pending = self.inflight.lock().await;
-            pending.remove(&key).unwrap_or_default()
         };
-        match &result {
-            Ok(rows) => {
-                for waiter in waiters {
-                    let _ = waiter.send(Ok(rows.clone()));
-                }
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                for waiter in waiters {
-                    let _ = waiter.send(Err(anyhow!(msg.clone())));
-                }
-            }
+        if let Some(rx) = waiter {
+            return rx
+                .await
+                .map_err(|_| anyhow!("DuckDB in-flight coalesced waiter dropped"))?;
         }
+        let lease = InflightLease {
+            inflight: Arc::clone(&self.inflight),
+            key,
+            armed: true,
+        };
+        let result = self.dispatch_query(query).await;
+        lease.complete(&result);
         result
     }
 
@@ -1080,6 +1127,9 @@ fn duck_value_to_json(value: DuckValue) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
 
     #[test]
     fn replace_standalone_ident_rewrites_tm_cq_span() {
@@ -1296,5 +1346,46 @@ mod tests {
         let c = sql_coalesce_key("SELECT 2");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[tokio::test]
+    async fn cancelled_leader_releases_inflight_waiters() {
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let key = 7u64;
+        {
+            let mut pending = InflightLease::lock_map(&inflight);
+            pending.insert(key, Vec::new());
+        }
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = InflightLease::lock_map(&inflight);
+            pending.get_mut(&key).expect("leader").push(tx);
+        }
+        drop(InflightLease {
+            inflight: inflight.clone(),
+            key,
+            armed: true,
+        });
+        let notified = rx.await.expect("waiter notified");
+        assert!(
+            notified
+                .err()
+                .map(|e| e.to_string().contains("cancelled"))
+                .unwrap_or(false),
+            "waiter must see leader cancellation"
+        );
+        assert!(
+            InflightLease::lock_map(&inflight).get(&key).is_none(),
+            "cancelled leader must drop the inflight key"
+        );
+        // A later identical query can become the new leader.
+        InflightLease::lock_map(&inflight).insert(key, Vec::new());
+        let mut lease = InflightLease {
+            inflight: inflight.clone(),
+            key,
+            armed: true,
+        };
+        assert!(lease.take_waiters().is_empty());
+        assert!(InflightLease::lock_map(&inflight).get(&key).is_none());
     }
 }

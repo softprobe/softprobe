@@ -7,6 +7,7 @@
 //! | 3 | 1h rollup from 5m (gauge) | `downsample_1h_from_5m_rollup_matches_oracle` |
 //! | 4 | 1h from raw fallback | `downsample_1h_from_raw_when_5m_empty` |
 //! | 4b | Incremental 1h waits for full 5m hour | `incremental_1h_from_5m_waits_for_complete_hour` |
+//! | 4c | 5m skips near-cutoff partial buckets | `downsample_5m_skips_near_cutoff_partial_bucket` |
 //! | 5 | Watermark incremental (AC-M2) | `ladder_tests::downsample_keeps_raw_and_second_pass_is_noop` |
 //! | 6 | Raw preserved (AC-S2) | `ladder_tests::downsample_keeps_raw_and_second_pass_is_noop` |
 //! | 7 | Hist 5m bucket_counts merge | `hist_downsample_5m_merges_bucket_counts` |
@@ -25,7 +26,7 @@ use crate::compat::backends::postings_resolve::{
     equality_postings, resolve_series_ids_sql, samples_scan_sql_for_window, RecordDateRange,
 };
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use duckdb::Connection;
 use tempfile::TempDir;
 
@@ -110,6 +111,53 @@ fn downsample_5m_aggregates_match_raw_oracle() {
     assert!((row.2 - 1.0).abs() < 1e-9, "min");
     assert!((row.3 - 5.0).abs() < 1e-9, "max");
     assert!((row.4 - 5.0).abs() < 1e-9, "last");
+}
+
+/// Samples still inside the lag window must not freeze a partial 5m bucket.
+#[test]
+fn downsample_5m_skips_near_cutoff_partial_bucket() {
+    let temp = TempDir::new().unwrap();
+    let (conn, catalog) = attach_ducklake(&temp);
+    ensure_metrics_layout_family_tables(&conn, &catalog).expect("layout");
+
+    let now = Utc::now();
+    let closed = now - Duration::minutes(12);
+    let recent = now - Duration::minutes(1);
+    let day = now.date_naive();
+    conn.execute_batch(&format!(
+        "INSERT INTO {catalog}.metric_series VALUES \
+           (1, 'layout_gauge', 'gauge', '', '', NULL, NULL, \
+            json_object('job', 'api')::JSON::VARIANT, DATE '{day}');\n\
+         INSERT INTO {catalog}.metric_samples VALUES \
+           (1, TIMESTAMPTZ '{}', 1.0, DATE '{day}'),\
+           (1, TIMESTAMPTZ '{}', 99.0, DATE '{day}');",
+        closed.format("%Y-%m-%d %H:%M:%S%.3f+00"),
+        recent.format("%Y-%m-%d %H:%M:%S%.3f+00"),
+    ))
+    .expect("seed near-cutoff");
+
+    conn.execute_batch(&commit_sql(&downsample_5m_sql(&catalog)))
+        .expect("5m downsample");
+
+    let n: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM {catalog}.metric_samples_5m"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "only the closed bucket should materialize, got {n}");
+    let last: f64 = conn
+        .query_row(
+            &format!("SELECT last FROM {catalog}.metric_samples_5m WHERE series_id = 1"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        (last - 1.0).abs() < 1e-9,
+        "partial in-window sample 99 must not enter the rollup, last={last}"
+    );
 }
 
 /// Checklist #2: downsample never mixes series_id buckets.
@@ -311,7 +359,8 @@ fn hist_downsample_5m_merges_bucket_counts() {
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
            (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
-         INSERT INTO {catalog}.metric_hist_samples VALUES \
+         INSERT INTO {catalog}.metric_hist_samples \
+           (series_id, timestamp, count, sum, bucket_counts, explicit_bounds, record_date) VALUES \
            (10, TIMESTAMPTZ '2023-11-14 10:01:00+00', 2::UBIGINT, 0.2, \
             [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[], DATE '{EVAL_DAY}'),\
            (10, TIMESTAMPTZ '2023-11-14 10:03:00+00', 3::UBIGINT, 0.3, \

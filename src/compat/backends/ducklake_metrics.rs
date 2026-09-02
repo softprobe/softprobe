@@ -282,13 +282,13 @@ impl DuckLakeMetricsBackend {
         base.max(grid)
     }
 
-    /// Classic hist/summary Prom name (`_bucket` / `_sum` / `_count`).
-    ///
-    /// Ingest dual-writes these as skinny gauges in `metric_samples`, so the Prom
-    /// path must **not** force `metric_hist_samples` array expand (that path is
-    /// ~3× over the 100ms Grafana SLO). Native hist rows remain for SQL/fidelity.
-    fn is_classic_hist_selector(_matchers: &[LabelMatcher]) -> bool {
-        false
+    /// Classic hist/summary Prom name that is **not** dual-written as a gauge.
+    fn is_classic_hist_selector(matchers: &[LabelMatcher]) -> bool {
+        matchers.iter().any(|m| {
+            m.name == "__name__"
+                && m.op == MatcherOp::Eq
+                && crate::compat::projection::prometheus::classic_suffix_uses_native_hist(&m.value)
+        })
     }
 
     fn hist_needs_bucket_arrays(matchers: &[LabelMatcher]) -> bool {
@@ -841,12 +841,9 @@ impl DuckLakeMetricsBackend {
     /// can expand classic `_bucket` / `_sum` / `_count` series.
     /// When to UNION native `metric_hist_samples` (array expand) onto the scan.
     ///
-    /// Classic Prom `_bucket` / `_sum` / `_count` names are dual-written as skinny
-    /// gauges in `metric_samples`. Expanding native hist rows for those names
-    /// reintroduces high-card OTEL label soup, skips Grafana step-bucketing, and
-    /// blows `scan_cap` (k6 `sum by (le) (rate(..._bucket[5m]))` on 30m–3h).
-    /// Greptime-style: serve the pre-projected gauge series; keep hist arrays for
-    /// SQL/fidelity when the selector is not a classic Prom suffix.
+    /// Dual-written GOLD `_bucket` / `_sum` / `_count` gauges stay on skinny
+    /// `metric_samples`. Other suffix selectors expand native hist rows so
+    /// queries like `db_client_operation_duration_bucket` are not empty.
     fn wants_histogram_fidelity(matchers: &[LabelMatcher]) -> bool {
         let mut saw_name_eq = false;
         for m in matchers {
@@ -854,6 +851,9 @@ impl DuckLakeMetricsBackend {
                 continue;
             }
             saw_name_eq = true;
+            if crate::compat::projection::prometheus::classic_suffix_uses_native_hist(&m.value) {
+                return true;
+            }
             if m.value.ends_with("_bucket")
                 || m.value.ends_with("_sum")
                 || m.value.ends_with("_count")
@@ -2249,6 +2249,14 @@ mod tests {
             }
         ]));
         assert!(DuckLakeMetricsBackend::wants_histogram_fidelity(&[]));
+        assert!(
+            DuckLakeMetricsBackend::wants_histogram_fidelity(&[LabelMatcher {
+                name: "__name__".into(),
+                op: MatcherOp::Eq,
+                value: "db_client_operation_duration_bucket".into(),
+            }]),
+            "non-dual-write _bucket must expand native hist"
+        );
     }
 
     #[test]
@@ -2284,10 +2292,15 @@ mod tests {
             "classic suffix selectors must not also resolve the native histogram base series"
         );
         assert_eq!(posting_name_values("k6_vus"), vec!["k6_vus".to_string()]);
-        assert_eq!(
-            posting_name_values("queue_count"),
-            vec!["queue_count".to_string()],
-            "gauges named *_count/_sum/_bucket must keep their exact name"
+        assert!(
+            posting_name_values("queue_count").contains(&"queue_count".to_string()),
+            "gauges named *_count keep their exact name, got {:?}",
+            posting_name_values("queue_count")
+        );
+        assert!(
+            posting_name_values("db_client_operation_duration_bucket")
+                .contains(&"db_client_operation_duration".to_string()),
+            "non-dual-write _bucket must resolve the native hist base series"
         );
     }
 

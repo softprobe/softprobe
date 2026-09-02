@@ -63,6 +63,8 @@ count UBIGINT, \
 sum DOUBLE, \
 bucket_counts UBIGINT[], \
 explicit_bounds DOUBLE[], \
+quantiles VARCHAR, \
+exemplars_json VARCHAR, \
 record_date DATE",
         sorted_by: "series_id, timestamp",
     },
@@ -218,6 +220,9 @@ pub fn ensure_metrics_layout_table(
     table: &MetricsLayoutTable,
 ) -> Result<()> {
     if metrics_layout_table_ready(conn, catalog_alias, table.name)? {
+        if table.name == "metric_hist_samples" {
+            ensure_hist_fidelity_columns(conn, catalog_alias)?;
+        }
         return Ok(());
     }
     let sql = ensure_metrics_layout_table_sql(catalog_alias, table);
@@ -228,6 +233,50 @@ pub fn ensure_metrics_layout_table(
             table.name
         )
     })?;
+    if table.name == "metric_hist_samples" {
+        ensure_hist_fidelity_columns(conn, catalog_alias)?;
+    }
+    Ok(())
+}
+
+fn describe_layout_columns(
+    conn: &Connection,
+    qualified_table: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let sql = format!("DESCRIBE {qualified_table};");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let name: String = row.get(0)?;
+            let dtype: String = row.get(1)?;
+            Ok((name, dtype))
+        })
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
+    let mut found = std::collections::HashMap::new();
+    for row in rows {
+        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
+        found.insert(name.to_ascii_lowercase(), dtype);
+    }
+    Ok(found)
+}
+
+fn ensure_hist_fidelity_columns(conn: &Connection, catalog_alias: &str) -> Result<()> {
+    let qualified = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples");
+    let found = describe_layout_columns(conn, &qualified)?;
+    let ddls = [("quantiles", "VARCHAR"), ("exemplars_json", "VARCHAR")]
+        .into_iter()
+        .filter(|(name, _)| !found.contains_key(*name))
+        .map(|(name, sql_type)| {
+            format!("ALTER TABLE {qualified} ADD COLUMN IF NOT EXISTS {name} {sql_type};")
+        })
+        .collect::<Vec<_>>();
+    if ddls.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(&ddls.join("\n"))
+        .map_err(|e| anyhow!("failed to add hist fidelity columns on {qualified}: {e}"))?;
     Ok(())
 }
 
@@ -308,8 +357,8 @@ NULL::UBIGINT AS count, \
 NULL::DOUBLE AS sum, \
 NULL::UBIGINT[] AS bucket_counts, \
 NULL::DOUBLE[] AS explicit_bounds, \
-NULL AS quantiles, \
-NULL::VARCHAR AS aggregation_temporality, \
+NULL::VARCHAR AS quantiles, \
+s.aggregation_temporality, \
 NULL::VARCHAR AS exemplars_json, \
 sm.record_date \
 FROM {samples} sm \
@@ -329,9 +378,9 @@ h.count, \
 h.sum, \
 h.bucket_counts, \
 h.explicit_bounds, \
-NULL AS quantiles, \
-NULL::VARCHAR AS aggregation_temporality, \
-NULL::VARCHAR AS exemplars_json, \
+h.quantiles, \
+s.aggregation_temporality, \
+h.exemplars_json, \
 h.record_date \
 FROM {hist} h \
 JOIN {series} s \
@@ -478,6 +527,9 @@ mod tests {
         assert!(sql.contains("softprobe.metric_series"));
         assert!(sql.contains("softprobe.metric_hist_samples"));
         assert!(sql.contains("s.labels AS attributes"));
+        assert!(sql.contains("h.quantiles"));
+        assert!(sql.contains("h.exemplars_json"));
+        assert!(sql.contains("s.aggregation_temporality"));
         assert!(sql.contains("UNION ALL"));
         assert!(!sql.contains("softprobe.metrics ") && !sql.contains("FROM softprobe.metrics"));
         let rel = union_metrics_layout_relation_sql("softprobe", "tm_all_metric");
