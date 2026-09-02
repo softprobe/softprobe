@@ -97,6 +97,22 @@ pub fn project_prometheus_metric_type(otel_type: &str) -> &'static str {
     }
 }
 
+/// Project a metric type without claiming Prometheus counter semantics for an
+/// OTel Sum that is delta or non-monotonic. Missing Sum metadata is deliberately
+/// treated as unknown rather than silently becoming a counter.
+pub fn project_prometheus_metric_type_with_semantics(
+    otel_type: &str,
+    aggregation_temporality: Option<&str>,
+    is_monotonic: Option<bool>,
+) -> &'static str {
+    if otel_type.eq_ignore_ascii_case("sum")
+        && (aggregation_temporality != Some("CUMULATIVE") || is_monotonic != Some(true))
+    {
+        return "unknown";
+    }
+    project_prometheus_metric_type(otel_type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +179,21 @@ mod tests {
         assert_eq!(project_prometheus_metric_type("histogram"), "histogram");
         assert_eq!(project_prometheus_metric_type("summary"), "summary");
         assert_eq!(project_prometheus_metric_type("other"), "unknown");
+    }
+
+    #[test]
+    fn only_cumulative_monotonic_sums_are_counters() {
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(true)),
+            "counter"
+        );
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("DELTA"), Some(true)),
+            "unknown"
+        );
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(false)),
+            "unknown"
+        );
     }
 }

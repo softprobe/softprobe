@@ -374,6 +374,21 @@ mod tests {
     }
 
     #[test]
+    fn client_24h_window_is_accepted_when_lookback_would_exceed_cap() {
+        let limits = QueryLimits {
+            max_query_range_seconds: 86_400,
+            ..QueryLimits::default()
+        };
+        limits
+            .validate_time_range_ms(Some(0), Some(86_400_000))
+            .expect("exact 24h client window must pass");
+        let err = limits
+            .validate_time_range_ms(Some(-5 * 60 * 1000), Some(86_400_000))
+            .expect_err("24h + 5m lookback must not use the public range cap");
+        assert_eq!(err.code, CompatErrorCode::LimitExceeded);
+    }
+
+    #[test]
     fn validate_range_eval_points_rejects_excessive_grid() {
         let limits = QueryLimits::default();
         let err = limits

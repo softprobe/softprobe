@@ -65,7 +65,7 @@ softprobe_ducklake_build_combo_init() {
         FROM duckdb_tables()
         WHERE database_name = '${catalog//\'/\'\'}'
           AND schema_name = '${schema//\'/\'\'}'
-          AND table_name IN ('traces', 'logs', 'metrics')
+          AND table_name IN ('traces', 'logs', 'metric_samples')
         ORDER BY table_name;
       " 2>/dev/null
     )" || true

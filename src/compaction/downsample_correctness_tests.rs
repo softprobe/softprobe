@@ -60,7 +60,7 @@ fn commit_sql(body: &str) -> String {
 fn seed_series(conn: &Connection, catalog: &str, series_id: u64, metric_name: &str, job: &str) {
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
-           ({series_id}, '{metric_name}', 'gauge', '', '', \
+           ({series_id}, '{metric_name}', 'gauge', '', '', NULL, NULL, \
             json_object('job', '{job}')::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
            ('__name__', '{metric_name}', {series_id}, DATE '{EVAL_DAY}'),\
@@ -310,7 +310,7 @@ fn hist_downsample_5m_merges_bucket_counts() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
-           (10, 'layout_latency', 'histogram', 's', '', '{{}}'::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
+           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
          INSERT INTO {catalog}.metric_hist_samples VALUES \
            (10, TIMESTAMPTZ '2023-11-14 10:01:00+00', 2::UBIGINT, 0.2, \
             [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[], DATE '{EVAL_DAY}'),\
@@ -360,7 +360,7 @@ fn hist_downsample_1h_from_5m_rollup() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
-           (10, 'layout_latency', 'histogram', 's', '', '{{}}'::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
+           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{EVAL_DAY}');\n\
          INSERT INTO {catalog}.metric_hist_samples_5m VALUES \
            (10, TIMESTAMPTZ '2023-11-14 10:00:00+00', DATE '{EVAL_DAY}', 5::UBIGINT, 0.5, \
             [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[], TIMESTAMPTZ '2023-11-14 10:04:00+00'),\

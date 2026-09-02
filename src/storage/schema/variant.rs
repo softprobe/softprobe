@@ -26,7 +26,7 @@ pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
             "links",
         ],
         "logs" => &["attributes", "resource_attributes"],
-        "metrics" => &["attributes", "resource_attributes"],
+        "metric_samples" => &["attributes", "resource_attributes"],
         _ => &[],
     }
 }

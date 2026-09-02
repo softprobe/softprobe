@@ -65,7 +65,7 @@ impl AppState {
                 let msg = err.to_string();
                 if msg.contains("Table with name traces does not exist")
                     || msg.contains("Table with name logs does not exist")
-                    || msg.contains("Table with name metrics does not exist")
+                    || msg.contains("Table with name metric_samples does not exist")
                     || msg.contains("Table with name scores does not exist")
                     || msg.contains("Table with name score_configs does not exist")
                 {

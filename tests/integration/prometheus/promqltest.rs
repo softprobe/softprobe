@@ -407,7 +407,7 @@ async fn otlp_no_recorded_value_omitted_from_instant_query() {
 async fn two_tenant_prometheus_isolation() {
     // File-backed sqlite catalogs share one process-default DuckLake scope when there is no
     // postgres registry. Use two AppStates (separate TempDirs) to prove Prom discovery is
-    // bound to the tenant engine/lake — not a global metrics table.
+    // bound to the tenant engine/lake — not a global metric_samples table.
     let (router_a, _temp_a) = build_tenant_router().await;
     let (router_b, _temp_b) = build_tenant_router().await;
     let ts_nano = 1_700_000_000_000_000_000u64;

@@ -17,12 +17,13 @@ use crate::compat::backends::prom_labels::{
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::prometheus::{
-    project_prometheus_labels, project_prometheus_metric_type, sanitize_label_name,
+    project_prometheus_labels, project_prometheus_metric_type_with_semantics, sanitize_label_name,
 };
 use crate::compat::tenant::TenantContext;
 use crate::promotion::telemetry_manifest_from_row;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
+use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 use crate::storage::schema::variant::variant_varchar;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -33,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-/// Metrics backend that scans the tenant DuckLake `metrics` table.
+/// Metrics backend backed by the skinny metric layout and its compatibility relation.
 pub struct DuckLakeMetricsBackend {
     query: Arc<QueryEngine>,
 }
@@ -202,10 +203,9 @@ impl DuckLakeMetricsBackend {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => {
                 let msg = err.to_string();
-                // Fresh tenants may not have created metrics tables yet — treat as empty
+                // Fresh tenants may not have created the metric layout yet — treat as empty
                 // result set (approved empty-tenant contract), not a query failure.
-                if msg.contains("Table with name metrics does not exist")
-                    || msg.contains("Table with name tm_all_metric does not exist")
+                if msg.contains("Table with name tm_all_metric does not exist")
                     || msg.contains("Table with name tm_cq_metric does not exist")
                     || msg.contains("Table with name metric_samples does not exist")
                     || msg.contains("Table with name metric_samples_5m does not exist")
@@ -297,6 +297,7 @@ impl DuckLakeMetricsBackend {
             .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq && m.value.ends_with("_bucket"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn scan_rows(
         &self,
         ctx: &TenantContext,
@@ -305,9 +306,12 @@ impl DuckLakeMetricsBackend {
         step_ms: Option<i64>,
         include_fidelity: bool,
         matchers: &[LabelMatcher],
+        client_range: Option<(Option<i64>, Option<i64>)>,
     ) -> Result<Vec<RawMetricRow>, CompatError> {
         Self::check_deadline(ctx)?;
-        ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
+        let (validation_start, validation_end) = client_range.unwrap_or((start_ms, end_ms));
+        ctx.limits
+            .validate_time_range_ms(validation_start, validation_end)?;
         let series_ids = self
             .resolve_series_ids(ctx, start_ms, end_ms, matchers)
             .await?;
@@ -335,7 +339,7 @@ impl DuckLakeMetricsBackend {
             (sql.contains("metric_samples") || sql.contains("metric_hist_samples"))
                 && sql.contains("series_id IN")
                 && !sql.contains("FROM union_metrics")
-                && !sql.contains("FROM metrics "),
+                && !sql.contains("FROM union_metrics"),
             "Prom sample scan must use skinny layout tables: {sql}"
         );
         debug_assert!(
@@ -683,7 +687,7 @@ impl DuckLakeMetricsBackend {
             .join(", ")
     }
 
-    /// Legacy fat-view label projection (kept for matcher_predicates unit tests).
+    /// Compatibility-relation label projection (kept for matcher_predicates unit tests).
     #[cfg(test)]
     fn label_select_sql(bindings: &[LabelBinding]) -> String {
         if bindings.is_empty() {
@@ -861,7 +865,7 @@ impl DuckLakeMetricsBackend {
         !saw_name_eq
     }
 
-    /// Legacy SQL matcher pushdown (unit-tested; Prom path uses postings resolve).
+    /// Compatibility SQL matcher pushdown (unit-tested; Prom path uses postings resolve).
     #[cfg(test)]
     fn matcher_predicates(
         matchers: &[LabelMatcher],
@@ -1148,6 +1152,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 request.step_ms,
                 Self::wants_histogram_fidelity(&request.matchers),
                 &request.matchers,
+                Some((request.client_start_ms, request.client_end_ms)),
             )
             .await?;
         self.expand_series(ctx, &rows, &request.matchers)
@@ -1178,6 +1183,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
+                None,
             )
             .await?;
         let mut names = BTreeSet::new();
@@ -1226,6 +1232,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
+                None,
             )
             .await?;
         let mut values = BTreeSet::new();
@@ -1263,6 +1270,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 None,
                 Self::wants_histogram_fidelity(&flat),
                 &flat,
+                None,
             )
             .await?;
         let mut seen = BTreeSet::new();
@@ -1325,16 +1333,8 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             Some(n) => n.max(1),
             None => ctx.limits.max_series.max(1),
         };
-        let sql = format!(
-            "SELECT metric_name, \
-             any_value(description) AS description, \
-             any_value(unit) AS unit, \
-             any_value(metric_type) AS metric_type \
-             FROM union_metrics \
-             WHERE 1=1{time} \
-             GROUP BY metric_name \
-             ORDER BY metric_name"
-        );
+        let catalog = self.layout_catalog();
+        let sql = metadata_scan_sql(&catalog, &time);
         let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
         let want = metric
@@ -1361,8 +1361,10 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
                 metric_name,
                 help: cell_str(row, 1).unwrap_or_default(),
                 unit: cell_str(row, 2).unwrap_or_default(),
-                metric_type: project_prometheus_metric_type(
+                metric_type: project_prometheus_metric_type_with_semantics(
                     &cell_str(row, 3).unwrap_or_else(|| "unknown".into()),
+                    cell_str(row, 4).as_deref(),
+                    cell_bool(row, 5),
                 )
                 .to_string(),
             });
@@ -1852,6 +1854,27 @@ fn format_le(bound: f64) -> String {
     }
 }
 
+fn metadata_scan_sql(catalog: &str, time: &str) -> String {
+    let series = qualified_metrics_layout_table(catalog, "metric_series");
+    let samples = qualified_metrics_layout_table(catalog, "metric_samples");
+    let hist = qualified_metrics_layout_table(catalog, "metric_hist_samples");
+    let sample_time = time.replace("timestamp", "sm.timestamp");
+    let hist_time = time.replace("timestamp", "hs.timestamp");
+    format!(
+        "SELECT metric_name, \
+         any_value(description) AS description, \
+         any_value(unit) AS unit, \
+         any_value(metric_type) AS metric_type, \
+         any_value(aggregation_temporality) AS aggregation_temporality, \
+         any_value(is_monotonic) AS is_monotonic \
+         FROM {series} \
+         WHERE EXISTS (SELECT 1 FROM {samples} sm WHERE sm.series_id = {series}.series_id{sample_time}) \
+            OR EXISTS (SELECT 1 FROM {hist} hs WHERE hs.series_id = {series}.series_id{hist_time}) \
+         GROUP BY metric_name \
+         ORDER BY metric_name"
+    )
+}
+
 fn scan_cap_exceeded(cap: usize) -> CompatError {
     CompatError::new(
         CompatErrorCode::LimitExceeded,
@@ -1996,6 +2019,18 @@ fn cell_u64(row: &[Value], idx: usize) -> Option<u64> {
     match row.get(idx)? {
         Value::Number(n) => n.as_u64().or_else(|| n.as_f64().map(|f| f as u64)),
         Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn cell_bool(row: &[Value], idx: usize) -> Option<bool> {
+    match row.get(idx)? {
+        Value::Bool(v) => Some(*v),
+        Value::String(s) => match s.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2241,12 +2276,37 @@ mod tests {
             !sql.contains("regexp_replace"),
             "row-wise regexp on metric_name prevents file prune, got {sql}"
         );
-        assert_eq!(
-            posting_name_values("http_server_duration_sum"),
-            vec!["http_server_duration_sum".to_string()]
+        assert!(posting_name_values("http_server_duration_sum")
+            .contains(&"http_server_duration_sum".to_string()));
+        assert!(
+            !posting_name_values("http_server_duration_sum")
+                .contains(&"http_server_duration".to_string()),
+            "classic suffix selectors must not also resolve the native histogram base series"
         );
         assert_eq!(posting_name_values("k6_vus"), vec!["k6_vus".to_string()]);
-        assert!(posting_name_values("queue_count").contains(&"queue_count".to_string()));
+        assert_eq!(
+            posting_name_values("queue_count"),
+            vec!["queue_count".to_string()],
+            "gauges named *_count/_sum/_bucket must keep their exact name"
+        );
+    }
+
+    #[test]
+    fn metadata_sql_uses_catalog_qualified_skinny_tables() {
+        let sql = metadata_scan_sql("softprobe", "");
+        assert!(
+            sql.contains("FROM softprobe.metric_series"),
+            "metadata must qualify metric_series, got {sql}"
+        );
+        assert!(sql.contains("FROM softprobe.metric_samples"));
+        assert!(sql.contains("FROM softprobe.metric_hist_samples"));
+        assert!(
+            !sql.contains("FROM metric_series "),
+            "unqualified metric_series is swallowed as empty by execute_soft, got {sql}"
+        );
+        assert!(sql.contains("aggregation_temporality"));
+        assert!(sql.contains("is_monotonic"));
+        assert!(!sql.contains("FROM union_metrics"));
     }
 
     #[test]

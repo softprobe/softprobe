@@ -42,7 +42,7 @@ fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0)
 }
 
-/// AC-S2 / AC-M2: downsample is additive + watermark-incremental.
+/// AC-S2 / AC-M2: downsample is additive + key-scoped incremental.
 #[test]
 fn downsample_keeps_raw_and_second_pass_is_noop() {
     let temp = TempDir::new().unwrap();
@@ -63,8 +63,9 @@ fn downsample_keeps_raw_and_second_pass_is_noop() {
 
     conn.execute_batch(&format!(
         "BEGIN TRANSACTION;\n\
-         INSERT INTO {catalog}.metric_series VALUES \
-           (1, 'layout_http', 'gauge', '', '', '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+         INSERT INTO {catalog}.metric_series \
+           (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
+           (1, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
            ('job', 'api', 1, DATE '{day}');\n\
          INSERT INTO {catalog}.metric_samples VALUES \
@@ -201,8 +202,9 @@ fn twcs_merge_keeps_files_single_record_date() {
         for i in 0..5 {
             let sid = series_base + i;
             conn.execute_batch(&format!(
-                "INSERT INTO {catalog}.metric_series VALUES \
-                   ({sid}, 'layout_http', 'gauge', '', '', '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+                "INSERT INTO {catalog}.metric_series \
+                   (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
+                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
                  INSERT INTO {catalog}.metric_samples VALUES \
                    ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
             ))
@@ -447,8 +449,9 @@ fn downsample_1h_visible_on_second_connection_after_commit() {
     writer
         .execute_batch(&format!(
             "BEGIN TRANSACTION;\n\
-             INSERT INTO {catalog}.metric_series VALUES \
-               (42, 'layout_tall', 'gauge', '', '', '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+             INSERT INTO {catalog}.metric_series \
+               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
+               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
                (42, TIMESTAMPTZ '{ts_1h}', 7.0, DATE '{day}');\n\
              COMMIT;"

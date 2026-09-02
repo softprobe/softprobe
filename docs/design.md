@@ -135,10 +135,13 @@ Rows are inserted ordered by `record_date`, `app_id`, `session_id`, and
 Core columns include `session_id`, timestamps, severity, body, attributes,
 resource attributes, trace/span correlation, and `record_date`.
 
-### `metrics`
+### Metric samples and rollups
 
+Raw samples live in `metric_samples` and are partitioned by `record_date`.
 Core columns include metric name, description, unit, type, timestamp, value,
-attributes, resource attributes, and `record_date`.
+attributes, resource attributes, and the OTLP fidelity fields. Asynchronous
+workers populate the explicitly date-partitioned 5m/1h/1d scalar and histogram
+rollup tables plus the separate series postings index.
 
 Phase 0 also stores nullable classic histogram / summary fidelity columns on
 the same row shape (gauge/sum leave them `NULL`):
@@ -154,11 +157,6 @@ When OTLP omits histogram `sum` (valid for negative observations), the fidelity
 `0.0` in that case for backward SQL compatibility — adapters reconstructing
 Prometheus `_sum` must read the fidelity `sum` column, not `value`.
 
-Existing DuckLake `metrics` tables are widened on write with
-`ALTER TABLE … ADD COLUMN IF NOT EXISTS` (`ensure_metrics_fidelity_columns`).
-If a fidelity name already exists with an incompatible type (e.g. a leftover
-promotion column), widen fails loud rather than writing into the wrong type.
-Column names and SQL types are owned by `src/metrics_fidelity.rs`.
 Exponential / native histograms are not stored; those datapoints are skipped
 with a stable `unsupported_feature` log.
 
@@ -185,7 +183,7 @@ SQLite supports promotion in its configured local single-scope DuckLake
 catalog.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs` /
-  `metrics`. Future ingest extracts declared sources into those columns;
+  `metric_samples`. Future ingest extracts declared sources into those columns;
   historical rows stay `NULL`.
 - **Business tables:** versioned `<table>_vN` tables plus `<table>_current`
   views with evidence anchors. Apply provisions schema today; automatic OTLP
@@ -203,12 +201,14 @@ ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
 Public query names remain:
 
-- `union_spans`, `union_logs`, `union_metrics`
-- `committed_spans`, `committed_logs`, `committed_metrics`
+- `union_spans`, `union_logs`
+- `committed_spans`, `committed_logs`
 
 Because ingest is flush-through, union and committed names resolve to the same
 DuckLake tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
 compatibility spellings only; there are no corresponding runtime tiers.
+Metric queries target `metric_samples` and the explicitly named rollup tables
+directly.
 
 Query surfaces include:
 
@@ -229,7 +229,7 @@ logs, and scores. Merge calls retry through serialization conflicts (8
 attempts × 2 waves). After each scope pass, Softprobe logs when Parquet
 file counts remain high (≥200).
 
-For `traces`, `logs`, and `metrics`, it can:
+For `traces`, `logs`, `metric_samples`, and configured metric rollup tables, it can:
 
 - set the configured target file size;
 - call `ducklake_merge_adjacent_files`;

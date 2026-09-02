@@ -684,7 +684,7 @@ fn telemetry_table_names(tables: &[TelemetryTable]) -> Vec<String> {
         .map(|table| match table {
             TelemetryTable::Traces => "traces",
             TelemetryTable::Logs => "logs",
-            TelemetryTable::Metrics => "metrics",
+            TelemetryTable::Metrics => "metric_samples",
         })
         .map(str::to_string)
         .collect()

@@ -21,7 +21,7 @@ PY
 )"
   echo "==> applying metrics Prom hot-label promotion"
   local resp http
-  # Layout metrics tables may not accept the legacy fat-table promotion; don't hang forever.
+  # Layout metric tables may not accept this promotion; don't hang forever.
   http="$(curl -sS --max-time 60 -o /tmp/thelake-prom-hot-labels-apply.json -w '%{http_code}' \
     -X POST "${base_url%/}/v1/promotions/apply" \
     -H "Authorization: Bearer ${token}" \

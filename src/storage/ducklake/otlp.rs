@@ -278,7 +278,7 @@ impl DuckLakeWriter {
         ensure_promoted_columns_not_reserved(TelemetryTable::Metrics, &columns)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Self::apply_metric_promotions(&mut metrics, &columns)?;
-        // Layout ingest (§8): series + postings + samples|hist in one txn. Stop fat `metrics`.
+        // Layout ingest (§8): series + postings + samples|hist in one txn.
         let dk = self.effective_ducklake(scope);
         self.write_metrics_layout_batches(&dk, metrics).await
     }
@@ -382,7 +382,7 @@ impl DuckLakeWriter {
         &self,
         _record_batches: Vec<RecordBatch>,
     ) -> Result<()> {
-        // Fat Arrow → `metrics` path removed (§11.3). Callers must use Metric batches
+        // Arrow-to-layout conversion is removed (§11.3). Callers must use Metric batches
         // via `write_metric_batches` (layout ingest). Keeping the method so external
         // signatures stay stable until call sites are deleted.
         Err(anyhow::anyhow!(

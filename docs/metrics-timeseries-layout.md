@@ -6,7 +6,7 @@
 
 Related: [`goals.md`](goals.md), [`design.md`](design.md), [`decision_log.md`](decision_log.md), [`compat/phase1-prometheus.md`](compat/phase1-prometheus.md), [`compat/capability.v0.yaml`](compat/capability.v0.yaml), [`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md).
 
-This document replaces the assumption that OTLP metrics can live as one fat `metrics` event table and still serve Grafana. Traces and logs are **out of scope** (keep current tables).
+This document defines the canonical skinny OTLP metrics layout used by Grafana. Traces and logs are **out of scope** (keep current tables).
 
 **How to toll:** §2.1 maps each goal to AC ids. An implementing agent may say “ready for verification” only when:
 
@@ -24,7 +24,7 @@ writes `docs/perf/results/<stamp>-metrics-layout.json` that validates against §
 
 ## 1. Problem
 
-The current `metrics` table is an evidence-event log:
+The prior metrics implementation was an evidence-event log:
 
 - one row per sample with `description`, `unit`, two VARIANT maps, and histogram columns
 - no DuckLake `PARTITIONED BY` / `SET SORTED BY` (sort/partition catalogs empty)
@@ -75,7 +75,7 @@ On a **release** `softprobe-runtime` (`cargo build --release` / `make build-rele
 | **Q-collapse-long** | `sum by (job) (rate(X[5m]))` | **30d** | ≤ **5s** | Collapse table, not full width |
 | **Q-collapse-90d** | same | **90d** | ≤ **5s** | Collapse / 1h only |
 | **Q-discover** | `GET /api/v1/label/__name__/values` | n/a | ≤ **500ms** | Catalog/postings, not `GROUP BY` samples |
-| **Q-hist-short** | Classic histogram `{__name__="…_bucket"}` (or `_count`/`_sum`) | 30m | ≤ **2s** | `metric_hist_samples` + postings, not fat `metrics` |
+| **Q-hist-short** | Classic histogram `{__name__="…_bucket"}` (or `_count`/`_sum`) | 30m | ≤ **2s** | `metric_hist_samples` + postings |
 | **Q-hist-mid** | Same classic hist selector | **3h** (beyond old 2h planner cliff) | ≤ **3s**, **≥ 1 series / non-empty** when F-hist spans the window | Must use `metric_hist_samples`, **not** `metric_samples_1h` |
 | **Q-hist-long** | Same | **24h** (and **30d** in harness when F-hist backdated) | ≤ **5s**, non-empty when data exists | Same grain rule as Q-hist-mid |
 | **Q-gold** | All 15 GOLD overview PromQL exprs (see §10.1 F-gold) | 30m | each p95 ≤ **5s**, 0 timeouts | Concurrent ingest; machine AC, not screenshots |
@@ -145,7 +145,7 @@ Do **not** hive-partition by `metric_name` (hundreds of tiny files per OTLP batc
 
 - Raw sample rows are `(series_id, timestamp, value)` only. Histogram payloads live only on `metric_hist_samples`.
 - Labels, `description`, `unit`, and VARIANT maps live on `metric_series`, **once per series per day**, not on every sample.
-- **Both** must hold: `metric_samples` has **no** VARIANT columns, **and** its Parquet bytes are **< 20%** of an equivalent fat-row dump of the same fixture (AC-S1 has no OR escape).
+- **Both** must hold: `metric_samples` has **no** VARIANT columns, **and** its Parquet bytes are **< 20%** of the equivalent wide-row benchmark fixture (AC-S1 has no OR escape).
 
 ### G8 — Keep data; speed comes from layout
 
@@ -206,7 +206,7 @@ Gated queries: AC-G1…AC-G5 map to T-Q1, T-Q2, T-Q3, T-Q6, T-Q5 (see §10.2).
 
 ## 4. Lessons from GreptimeDB (learn, do not fork)
 
-Studied under Softprobe’s problems: fat mixed-name Parquet, discovery timeouts, flush-through snapshot bloat, no postings, day-floored expiry, 1-day Prom ceiling. Sources: Greptime RFCs (`docs/rfcs/2023-11-03-inverted-index.md`, `2023-07-10-metric-engine.md`, `2023-02-01-table-compaction.md`, `2025-08-16-async-index-build.md`, `2022-12-20-promql-in-rust`), mito2 TWCS (`src/mito2/src/compaction/twcs.rs`, `region/options.rs`), inverted-index Puffin applier (`src/mito2/src/sst/index/inverted_index/`), metric-engine multiplexing, OTLP metrics encoder (`src/servers/src/otlp/metrics.rs`).
+Studied under Softprobe’s problems: wide mixed-name Parquet, discovery timeouts, flush-through snapshot bloat, no postings, day-floored expiry, 1-day Prom ceiling. Sources: Greptime RFCs (`docs/rfcs/2023-11-03-inverted-index.md`, `2023-07-10-metric-engine.md`, `2023-02-01-table-compaction.md`, `2025-08-16-async-index-build.md`, `2022-12-20-promql-in-rust`), mito2 TWCS (`src/mito2/src/compaction/twcs.rs`, `region/options.rs`), inverted-index Puffin applier (`src/mito2/src/sst/index/inverted_index/`), metric-engine multiplexing, OTLP metrics encoder (`src/servers/src/otlp/metrics.rs`).
 
 ### 4.1 Comparison
 
@@ -252,7 +252,7 @@ Same user-visible contract (OTLP in, Prom out). Different durability mid-layer. 
 | DuckLake-only (G1) | One store, SQL evidence | No mito memtable/SST/II; layout+maintenance only |
 | No app WAL / no staged tier | ADR flush-through | Collector batching mandatory; open-day small files until TWCS |
 | OTLP-only Softprobe write | Product write API | No Softprobe `remote_write`; G9 still OTLP on Greptime for fairness |
-| `union_metrics` / `committed_metrics` names | goals.md SQL | View may JOIN; **Prom path must never** scan fat/view (AC-Q7). No interactive SQL latency AC in this work — SQL is compatibility, not G2 |
+| `union_metrics` / `committed_metrics` names | goals.md SQL | Compatibility relations may JOIN; **Prom path must never** scan them (AC-Q7). No interactive SQL latency AC in this work — SQL is compatibility, not G2 |
 | Snapshot per successful metrics commit | DuckLake txn model | Bound age/count (G5); measure catalog conflict / compaction-skip under AC-Q0 |
 | Softprobe PromQL evaluator | Existing compat stack | Resolve→SQL→eval; collapse only for documented AST shapes |
 | Day-partitioned `metric_postings` | DuckLake-native, churn-bounded | Not SST row-group prune; budget resolve cost (AC-Q3/Q4/Q6, G9) |
@@ -273,7 +273,7 @@ Same user-visible contract (OTLP in, Prom out). Different durability mid-layer. 
 |-----------------|--------------------------------------|
 | Layout+TWCS steady, closed days merged | ~2–10× slower (must still pass R=10) |
 | Open day, merge lag / small-file storm | often ~10–50× — must still meet G2 absolute with ingest on, or hit MEASURE escape hatch |
-| Pre-layout fat `metrics` (today) | timeouts / not comparable |
+| Pre-layout wide metric layout (historical benchmark) | timeouts / not comparable |
 
 If G2 cannot be met after MEASURE items (1)–(3), **stop** and reopen product: relax flush-through XOR relax G1 XOR lower G2 — do not ship a hidden TSDB.
 
@@ -432,7 +432,8 @@ Softprobe’s analog of Greptime **Flow** continuous aggregation: built in maint
 ### 6.7 SQL compatibility
 
 ```sql
--- Public name unchanged; rewritten to tm_all_metric as today.
+-- Public name unchanged; the query rewriter substitutes the skinny-layout
+-- relation for the compatibility name.
 CREATE VIEW union_metrics AS
 SELECT s.metric_name, s.description, s.unit, s.metric_type,
        sm.timestamp, sm.value, s.labels AS attributes, …
@@ -441,9 +442,11 @@ JOIN metric_series s
   ON sm.series_id = s.series_id AND sm.record_date = s.record_date;
 ```
 
-Exact view column list must satisfy existing SQL/telemetry tests that read `union_metrics` / `metrics` for gauges (AC-D4). Histogram fidelity comes from `metric_hist_samples`.
+Exact view column list must satisfy existing SQL/telemetry tests that read
+`union_metrics` / `committed_metrics` for gauges (AC-D4). Histogram fidelity
+comes from `metric_hist_samples`.
 
-Stop writing the legacy fat `metrics` table. Optional one-time **rewrite** of existing fat rows into the new tables is allowed; deleting those facts to pass a benchmark is not.
+Write only the canonical metric family. This release starts with a clean catalog; no rewrite, migration, or backfill path is required.
 
 ---
 
@@ -470,14 +473,18 @@ Implementation must not call a blind global `ducklake_merge_adjacent_files` that
 ### 7.2 Pass order
 
 1. `SET SORTED BY` / `SET PARTITIONED BY` if missing (idempotent).
-2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Loop bounded waves until closed-day file bars (AC-F8) **and** until today’s live files are ≤20 (AC-F4). Open-day uses a 256-file CALL when over 256 live files; do not stop after one 32-file wave. Do **not** only merge legacy `metrics`.
+2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Loop bounded waves until closed-day file bars (AC-F8) **and** until today’s live files are ≤20 (AC-F4). Open-day uses a 256-file CALL when over 256 live files; do not stop after one 32-file wave.
 3. Build/append `metric_samples_5m` from raw older than **2h** (closed hours only).
 4. Build/append `metric_samples_1h` from 5m (or raw) older than **24h**.
 5. Build/append `metric_collapse_job_1h` from 1h (or raw) grouped by `(metric_name, job, hour)`.
 6. `ducklake_expire_snapshots` with **second-granularity** `older_than` (G5).
 7. `ducklake_cleanup_old_files` with **second-granularity** `older_than` when configured + drop orphan variant stats for files no longer live.
 
-Downsample jobs must be **incremental** (watermark per table, or `INSERT … WHERE window_ts > last_built`). Rebuilding 30d every 5 minutes fails G2 (ingest starvation) and G6.
+Downsample jobs must be **incremental**: closed buckets are inserted only when
+their `(series_id, record_date, window_ts)` key is absent from the destination
+(and collapse uses its equivalent metric/job key). This avoids a global
+watermark suppressing a newly observed series or partition. Rebuilding 30d
+every 5 minutes fails G2 (ingest starvation) and G6.
 
 ### 7.3 Foreground vs background (learned from Greptime runtimes)
 
@@ -545,7 +552,7 @@ Greptime evaluates PromQL as DataFusion plans with series-local batches. Softpro
 | `max_series` | 10000 | keep; fail loud |
 | `query_timeout_seconds` | 30 | keep for Grafana; SLOs are tighter |
 | `classic_histogram` | preserved | still preserved; gated by AC-H\* |
-| scan_cap on fat `union_metrics` | 100k rows | Prom path **must not** use that scan; if it does, AC-Q\* fail |
+| scan_cap on compatibility relations | 100k rows | Prom path **must not** use that scan; if it does, AC-Q\* fail |
 
 Update [`compat/capability.v0.yaml`](compat/capability.v0.yaml) and `QueryLimits` tests. **Do not** reject solely because `end - start` exceeds 90d or 180d.
 
@@ -610,7 +617,7 @@ Each row: **pass** is the only success; **fail** is anything listed plus timeout
 
 | ID | Pass | Fail | Test |
 |----|------|------|------|
-| **AC-D1** | After ingest, `metric_series`, `metric_postings`, `metric_samples`, `metric_hist_samples` exist in the **tenant** DuckLake schema (`ducklake_table`). Prom reads those tables. | Fat-only `metrics` writes continue as the Prom source | `T-D1` |
+| **AC-D1** | After ingest, `metric_series`, `metric_postings`, `metric_samples`, `metric_hist_samples` exist in the **tenant** DuckLake schema (`ducklake_table`). Prom reads those tables. | Canonical skinny tables are missing or Prom reads a different source | `T-D1` |
 | **AC-D2** | Each of those tables has **non-empty** `ducklake_partition_info` and `ducklake_sort_info` | Either catalog empty (today’s bug) | `T-D2` |
 | **AC-D3** | No new metrics durable write path besides DuckLake. Unit: Prom backend is `DuckLakeMetricsBackend`. Grep `src/` for `remote_write` / `victoria` / `prometheus::TSDB` / `greptime` writer must not add a writer | Sidecar TSDB | `T-D3` |
 | **AC-D4** | `SELECT` via `union_metrics` **and** `committed_metrics` on F-sql returns the same metric_name / timestamp / value facts as before the split (existing SQL tests green) | Either name missing or wrong join; gauges only in new tables but SQL broken | `T-D4` |
@@ -626,7 +633,7 @@ Each row: **pass** is the only success; **fail** is anything listed plus timeout
 | **AC-Q4** | F-wide `{__name__="layout_wide"}` 30m with default `max_series=10000`: HTTP error, body contains `limit_exceeded` (and `max_series`), duration **< 5s** | HTTP 200 with thousands of series, or ≥30s hang | `T-Q4` |
 | **AC-Q5** | F-collapse `sum by (job) (rate(layout_http[5m]))` 30d step=1h: p95 ≤ **5s**, result series count **= J** (50 full / 10 floor); EXPLAIN references `metric_collapse_job_1h` | Timeout, un-collapsed width, or raw/5m grain | `T-Q5` |
 | **AC-Q6** | `/api/v1/label/__name__/values` p95 ≤ **500ms** (20 repeats) while F-wide is loaded; EXPLAIN/SQL contains `metric_postings` and `label_name = '__name__'` | p95 > 500ms, 30s timeout, or `GROUP BY` `metric_samples` without postings | `T-Q6` |
-| **AC-Q7** | EXPLAIN (or query log) for T-Q3: SQL references `metric_postings` and `metric_samples` with `series_id IN` / id join; **no** `FROM metrics` fat table | Fat `union_metrics` scan | `T-Q7` |
+| **AC-Q7** | EXPLAIN (or query log) for T-Q3: SQL references `metric_postings` and `metric_samples` with `series_id IN` / id join; no compatibility-relation scan | Compatibility-relation scan | `T-Q7` |
 | **AC-Q8** | For **each** GOLD expr below, `query_range` 30m against F-gold: HTTP 200, p95 ≤ **5s**, 0 timeouts (5 repeats). Sender on. | Any expr timeout or p95 > 5s | `T-Q8` |
 | **AC-Q9** | While a forced downsample/merge pass runs, T-Q1 still p95 ≤ **5s** (maintenance must not starve interactive queries) | Timeouts during maintenance | `T-Q9` |
 
@@ -653,7 +660,7 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 | ID | Pass | Fail | Test |
 |----|------|------|------|
 | **AC-H1** | F-hist: rows land in `metric_hist_samples` only (0 `metric_samples` for `layout_latency`). Prom `layout_latency_count` or `_bucket` `query_range` 30m p95 ≤ **2s**, HTTP 200 | Fat-table hist, timeout, or empty | `T-H1` |
-| **AC-H2** | EXPLAIN for T-H1 references `metric_hist_samples` and `metric_postings`, not fat `metrics` | Fat scan | `T-H2` |
+| **AC-H2** | EXPLAIN for T-H1 references `metric_hist_samples` and `metric_postings` | Wide scan | `T-H2` |
 | **AC-H3** | F-hist (or unit DuckLake seed spanning ≥3h): Prom `layout_latency_count` `query_range` with `end−start = 3h` returns HTTP 200, **≥ 1 series**, **≥ 1 point**; samples SQL / EXPLAIN references `metric_hist_samples` and **must not** reference `metric_samples_1h` | Empty series, 1h-grain SQL, or timeout | `T-H3` |
 | **AC-H4** | Same as AC-H3 for `end−start = 24h` (and harness **30d** when F-hist is backdated): non-empty when data exists; grain = `metric_hist_samples` | Empty with data present, or `metric_samples_1h` grain | `T-H4` |
 | **AC-H5** | Summary-style selector (`…_sum` / `…_count` on a summary metric type) uses the same hist grain rule as AC-H3 (always `metric_hist_samples` for classic suffixes) | Routed to numeric 1h/5m grain | `T-H5` |
@@ -707,7 +714,7 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 
 | ID | Pass | Fail | Test |
 |----|------|------|------|
-| **AC-S1** | F-wide: `metric_samples` has **no** VARIANT in `ducklake_column` **and** `skinny_bytes / fat_bytes < 0.20`. Fat dump = same N points written through the **legacy fat `metrics` column list** on a throwaway DuckLake path; JSON records both byte sizes | VARIANT on samples, ratio ≥ 0.20, or fat methodology missing from JSON | `T-S1` |
+| **AC-S1** | F-wide: `metric_samples` has **no** VARIANT in `ducklake_column` **and** `skinny_bytes / wide_bytes < 0.20`. Wide dump = same N points written through the benchmark wide column list on a throwaway DuckLake path; JSON records both byte sizes | VARIANT on samples, ratio ≥ 0.20, or benchmark methodology missing from JSON | `T-S1` |
 | **AC-S2** | After downsample, `count(*) FROM metric_samples` is **≥** pre-downsample count (raw not deleted). Downsample tables are extra rows | Raw deleted to “make 30d fast” | `T-S2` |
 | **AC-S3** | `grafana-manual-up.sh` builds **release** (`cargo build --release` / `build-release`), not `target/debug` | Debug binary for demo SLOs | `T-S3` |
 
@@ -715,8 +722,8 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 
 | ID | Pass | Fail | Test |
 |----|------|------|------|
-| **AC-M1** | Compaction/maintenance table list includes exactly the metrics family: `metric_samples`, `metric_postings`, `metric_series`, `metric_hist_samples`, `metric_samples_5m`, `metric_samples_1h`, `metric_collapse_job_1h` (first family still metrics, not traces) | Still only legacy `"metrics"`; missing downsample/collapse names | `T-M1` |
-| **AC-M2** | Second maintenance pass with no new closed windows inserts **0** new rows into `metric_samples_5m` / `metric_samples_1h` / `metric_collapse_job_1h` (watermark incremental) | Full 30d rebuild every pass | `T-M2` |
+| **AC-M1** | Compaction/maintenance table list includes exactly the metrics family: `metric_samples`, `metric_postings`, `metric_series`, `metric_hist_samples`, `metric_samples_5m`, `metric_samples_1h`, `metric_collapse_job_1h` (first family still metrics, not traces) | Missing downsample/collapse names | `T-M1` |
+| **AC-M2** | Second maintenance pass with no new closed windows inserts **0** new rows into `metric_samples_5m` / `metric_samples_1h` / `metric_collapse_job_1h` (key-scoped incremental) | Full 30d rebuild every pass | `T-M2` |
 
 #### Softprobe vs Greptime (G9)
 
@@ -858,7 +865,7 @@ Do not start with Grafana. Each step has tests from §10. Start at this section.
 
 1. **DDL helpers** — `SET PARTITIONED BY (record_date)` + `SET SORTED BY` on create; T-D2.
 2. **Snapshot + cleanup seconds** — default A=3600; T-N1, T-N2, T-N5.
-3. **Tables + one-txn ingest** — series, postings, samples, hist; stop fat writes; T-D1, T-S1, T-C2, T-H1 ingest half, T-M1.
+3. **Tables + one-txn ingest** — series, postings, samples, hist; T-D1, T-S1, T-C2, T-H1 ingest half, T-M1.
 4. **Prom resolve via postings** — T-Q3, T-Q4, T-Q6, T-Q7, T-C1, T-C4.
 5. **Grain planner + unlimited range** — T-W1, T-Q1, T-Q2, T-W5, T-W6.
 6. **Hist Prom path** — T-H1, T-H2.
@@ -875,10 +882,10 @@ Keep work in commit-sized units. Softprobe-absolute green without G9 is **not** 
 
 | Risk | Mitigation |
 |------|------------|
-| DuckLake `SET PARTITIONED BY` does not rewrite old files | Tests use new ingest; optional rewrite job copies fat → new tables (keep facts) |
+| DuckLake `SET PARTITIONED BY` does not rewrite old files | Clean-catalog cutover means no rewrite job is needed |
 | Posting intersect in SQL is slow at 100k | Sorted postings + equality; T-Q3/Q4 + G9 resolve |
 | DuckLake merge crosses days despite intent | Partition-scoped merge; **AC-F6** |
-| Downsample maintenance fights ingest | Incremental watermarks (**AC-M2**); closed hours only; T-Q9 |
+| Downsample maintenance fights ingest | Key-scoped destination guards (**AC-M2**); closed hours only; T-Q9 |
 | Collapse only covers `job` | GOLD 30m uses raw/5m (AC-Q8); 30d/90d `sum by (job)` uses collapse (AC-Q5/W3) |
 | Open-day small-file storm vs G2+ingest-on | §4.4 MEASURE escape hatch; do not silently add WAL |
 | G9 unfair write path | **AC-G6** OTLP-both-sides |
@@ -901,7 +908,7 @@ Ready evidence: [`docs/perf/results/20260818T045403Z-metrics-layout.json`](perf/
 | **G3 ratio > R** | ~~G3 (≈16× debug)~~ → **PASS ≈2.06× release** | Greptime SST inverted index (tag→row-group bitmaps + FST in Puffin) makes wide equality resolve cheap (`docs/rfcs/2023-11-03-inverted-index.md`). Softprobe **rejects** Puffin; §4.4 MEASURE = **in-process day-scoped posting cache**. | **Done:** `PostingSetCache` keyed by `(engine, tenant, record_date, label_name, label_value)` + in-process INTERSECT in `resolve_series_ids` (`postings_resolve.rs` / `ducklake_metrics.rs`). TTL 30s; day key prevents cross-day stale. Re-measure without `LAYOUT_G3_SCOPED` on next full gate. |
 | **F-files / TWCS bars** | F1, F2, F4, F5 | mito2 TWCS: `trigger_file_num`, window-local merge (`src/mito2/src/compaction/twcs.rs`). Softprobe already maps day=`time_window`. | Automate F-files fixture + maintenance pass in harness; assert live-file / size bars. |
 | **F-snap / N3–N4** | N3, N4 | Greptime does not solve DuckLake snapshot-per-commit; Softprobe-specific seconds expiry. | Run F-snap (A=60, 120s) in harness. |
-| **Ladder honesty** | S2, M2, Q9 | Flow incremental sequences; Softprobe watermarks. | Automate second-pass 0-insert + maintenance-under-load Q1. |
+| **Ladder honesty** | S2, M2, Q9 | Flow incremental sequences; Softprobe key-scoped destination guards. | Automate second-pass 0-insert + maintenance-under-load Q1. |
 | **Demo binary** | S3 | — | `grafana-manual-up.sh` → `--release`. |
 
 **Still KEEP:** G1 DuckLake-only, no app WAL, OTLP-only Softprobe write, no Greptime embed. G9 still OTLP on Greptime (`/v1/otlp/v1/metrics`), not remote_write-only.

@@ -211,56 +211,6 @@ impl OtlpLogsTable {
     }
 }
 
-/// OTLP metrics table
-pub struct OtlpMetricsTable;
-
-impl OtlpMetricsTable {
-    pub fn table_name() -> &'static str {
-        "metrics"
-    }
-
-    pub fn schema() -> Schema {
-        Self::schema_with_promoted_columns(&[])
-    }
-
-    pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
-        let quantile_element = DataType::Struct(Fields::from(vec![
-            req("quantile", DataType::Float64),
-            req("value", DataType::Float64),
-        ]));
-        let mut fields = vec![
-            req("metric_name", utf8()),
-            req("description", utf8()),
-            req("unit", utf8()),
-            req("metric_type", utf8()),
-            req("timestamp", ts_utc()),
-            req("value", DataType::Float64),
-            opt_hot_variant("metrics", "attributes"),
-            opt_hot_variant("metrics", "resource_attributes"),
-            // Classic histogram / summary fidelity (nullable for gauge/sum).
-            opt("count", DataType::UInt64),
-            opt("sum", DataType::Float64),
-            opt(
-                "bucket_counts",
-                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-            ),
-            opt(
-                "explicit_bounds",
-                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
-            ),
-            opt(
-                "quantiles",
-                DataType::List(Arc::new(Field::new("item", quantile_element, true))),
-            ),
-            opt("aggregation_temporality", utf8()),
-            opt("exemplars_json", utf8()),
-            req("record_date", DataType::Date32),
-        ];
-        fields.extend(promoted_fields(columns));
-        Schema::new(fields)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,19 +246,6 @@ mod tests {
             DataType::Utf8
         ));
 
-        let metrics = OtlpMetricsTable::schema();
-        assert!(matches!(
-            metrics.field_with_name("attributes").unwrap().data_type(),
-            DataType::Utf8
-        ));
-        assert!(matches!(
-            metrics
-                .field_with_name("resource_attributes")
-                .unwrap()
-                .data_type(),
-            DataType::Utf8
-        ));
-
         // Scores metadata stays MAP (out of hot-column scope).
         let scores = ScoreTable::schema();
         assert!(matches!(
@@ -324,7 +261,6 @@ mod tests {
         for (table, schema) in [
             ("traces", TraceTable::schema()),
             ("logs", OtlpLogsTable::schema()),
-            ("metrics", OtlpMetricsTable::schema()),
         ] {
             for col in hot_variant_columns(table) {
                 let field = schema
@@ -335,16 +271,6 @@ mod tests {
                     "{table}.{col} must stage as Utf8 JSON for VARIANT cast"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn metrics_schema_includes_fidelity_inventory_names() {
-        let schema = OtlpMetricsTable::schema();
-        for name in crate::metrics_fidelity::metrics_fidelity_column_names() {
-            schema
-                .field_with_name(name)
-                .unwrap_or_else(|_| panic!("metrics schema missing fidelity column {name}"));
         }
     }
 

@@ -29,7 +29,7 @@ This guide shows how to visualize your OTLP telemetry data in Grafana using the 
 │              Iceberg Tables (S3/R2/MinIO)                   │
 │  - traces table                                             │
 │  - logs table                                               │
-│  - metrics table                                            │
+│  - metric_samples table                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -146,16 +146,14 @@ SET s3_region='auto';
 
 ---
 
-## Configuration via HTTP API (Recommended for Real-Time Queries)
+## Configuration via HTTP API (Historical)
 
 ### Why Use HTTP API?
 
-The HTTP API datasource provides access to **union views** that combine:
-- **Buffer** (in-memory): Most recent data, not yet flushed
-- **Staged** (local parquet): Flushed but not yet committed to Iceberg
-- **Committed** (Iceberg): Durably committed to object store
-
-This enables **sub-second read freshness** for real-time monitoring and alerting, which direct DuckDB file access cannot provide.
+This section describes the former pre-DuckLake query path and is retained only
+as historical context. It is not the current runtime architecture. Current
+queries use the canonical DuckLake tables and the runtime query API described
+in [the current design](../design.md).
 
 ### Architecture with HTTP API
 
@@ -170,17 +168,15 @@ This enables **sub-second read freshness** for real-time monitoring and alerting
 ┌─────────────────────────────────────────────────────────────┐
 │              OTLP Backend Service                            │
 │  - /v1/query/sql endpoint                                   │
-│  - DuckDB with union views (buffer ∪ staged ∪ committed)  │
+│  - Executes runtime SQL queries                          │
 │  - Real-time query execution                                │
 └─────────────────────┬───────────────────────────────────────┘
                       │
-                      │ Union Views
+                      │ Runtime SQL
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              Data Sources                                    │
-│  - Buffer (in-memory)                                       │
-│  - Staged (local parquet)                                   │
-│  - Committed (Iceberg S3/R2)                                │
+│  - Canonical DuckLake tables                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -289,7 +285,7 @@ This enables **sub-second read freshness** for real-time monitoring and alerting
 
 ### Benefits of HTTP API Approach
 
-✅ **Real-time data access** - Queries include buffered data not yet committed  
+✅ **Real-time data access** - Queries use the runtime query service
 ✅ **Unified query interface** - Single endpoint for all data sources  
 ✅ **Sub-second freshness** - No waiting for Iceberg commits  
 ✅ **Service integration** - Queries go through the same path as other APIs  
@@ -299,9 +295,9 @@ This enables **sub-second read freshness** for real-time monitoring and alerting
 
 | Use Case | Recommended Approach |
 |----------|---------------------|
-| **Real-time monitoring/alerts** | HTTP API (union views) |
+| **Real-time monitoring/alerts** | HTTP API |
 | **Historical analysis** | Direct DuckDB (Iceberg only) |
-| **Ad-hoc exploration** | HTTP API (union views) |
+| **Ad-hoc exploration** | HTTP API |
 | **Batch reporting** | Direct DuckDB (Iceberg only) |
 
 ---

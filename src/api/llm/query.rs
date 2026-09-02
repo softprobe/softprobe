@@ -1026,10 +1026,11 @@ pub fn compile_scores_for_trace_sql(trace_id: &str, span_ids: &[String]) -> Stri
             .join(", ");
         conditions.push(format!("span_id IN ({values})"));
     }
+    let predicate = conditions.join(" OR ");
     format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = conditions.join(" OR ")
+        predicate = predicate
     )
 }
 
@@ -1043,10 +1044,11 @@ pub fn compile_scores_for_session_sql(session_id: &str, trace_ids: &[String]) ->
             .join(", ");
         conditions.push(format!("trace_id IN ({values})"));
     }
+    let predicate = conditions.join(" OR ");
     format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = conditions.join(" OR ")
+        predicate = predicate
     )
 }
 

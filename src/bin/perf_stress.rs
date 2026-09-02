@@ -1102,7 +1102,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "metric_latency_timeseries_10m",
             format!(
                 "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
-                 FROM union_metrics \
+                 FROM metric_samples \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '10 minutes') \
                    AND metric_name = 'stress.metric.latency' \
@@ -1114,7 +1114,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "metric_latency_max_5m",
             format!(
                 "SELECT MAX(value) AS max_latency_ms \
-                 FROM union_metrics \
+                 FROM metric_samples \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND metric_name = 'stress.metric.latency'"
@@ -1134,7 +1134,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "metric_latency_timeseries_24h",
             format!(
                 "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
-                 FROM union_metrics \
+                 FROM metric_samples \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
                    AND metric_name = 'stress.metric.latency' \

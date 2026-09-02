@@ -5,16 +5,12 @@ mod auth_support;
 #[path = "util/config.rs"]
 mod config;
 
-use arrow::array::{Array, Float64Array, ListArray, UInt64Array};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use softprobe_runtime::compat::capability::{parse_capability_yaml, EMBEDDED_CAPABILITY_V0};
 use softprobe_runtime::compat::errors::CompatErrorCode;
 use softprobe_runtime::compat::stubs::declared_compat_probe_paths;
-use softprobe_runtime::models::{Metric, SummaryQuantile};
-use softprobe_runtime::storage::schema::tables::OtlpMetricsTable;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -55,98 +51,6 @@ fn every_declared_compat_route_has_isolation_probe() {
         assert!(!method.is_empty());
         assert!(path.starts_with('/'));
     }
-}
-
-#[test]
-fn histogram_metric_arrow_round_trip_preserves_buckets() {
-    let mut attrs = HashMap::new();
-    attrs.insert("http.route".into(), "/api".into());
-    let mut resource = HashMap::new();
-    resource.insert("service.name".into(), "api".into());
-
-    let metric = Metric {
-        metric_name: "http.server.duration".into(),
-        description: "latency".into(),
-        unit: "ms".into(),
-        metric_type: "histogram".into(),
-        timestamp: chrono::Utc::now(),
-        value: 42.0,
-        attributes: attrs,
-        resource_attributes: resource,
-        count: Some(7),
-        sum: Some(42.0),
-        bucket_counts: Some(vec![1, 2, 4]),
-        explicit_bounds: Some(vec![5.0, 10.0]),
-        quantiles: None,
-        aggregation_temporality: Some("CUMULATIVE".into()),
-        exemplars_json: Some(r#"[{"value":1.0}]"#.into()),
-    };
-
-    let schema = OtlpMetricsTable::schema();
-    let batch = Metric::to_record_batch(&[metric], &schema).expect("batch");
-    assert_eq!(batch.num_rows(), 1);
-
-    let count_idx = schema.index_of("count").unwrap();
-    let counts = batch
-        .column(count_idx)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap();
-    assert_eq!(counts.value(0), 7);
-
-    let buckets_idx = schema.index_of("bucket_counts").unwrap();
-    let buckets = batch
-        .column(buckets_idx)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap();
-    let values = buckets.value(0);
-    let values = values.as_any().downcast_ref::<UInt64Array>().unwrap();
-    assert_eq!(values.values(), &[1, 2, 4]);
-
-    let bounds_idx = schema.index_of("explicit_bounds").unwrap();
-    let bounds = batch
-        .column(bounds_idx)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap();
-    let bvals = bounds.value(0);
-    let bvals = bvals.as_any().downcast_ref::<Float64Array>().unwrap();
-    assert_eq!(bvals.values(), &[5.0, 10.0]);
-}
-
-#[test]
-fn summary_metric_arrow_round_trip_preserves_quantiles() {
-    let metric = Metric {
-        metric_name: "rpc.latency".into(),
-        description: "".into(),
-        unit: "ms".into(),
-        metric_type: "summary".into(),
-        timestamp: chrono::Utc::now(),
-        value: 100.0,
-        quantiles: Some(vec![
-            SummaryQuantile {
-                quantile: 0.5,
-                value: 10.0,
-            },
-            SummaryQuantile {
-                quantile: 0.99,
-                value: 50.0,
-            },
-        ]),
-        count: Some(20),
-        sum: Some(100.0),
-        ..Default::default()
-    };
-    let schema = OtlpMetricsTable::schema();
-    let batch = Metric::to_record_batch(&[metric], &schema).expect("batch");
-    let q_idx = schema.index_of("quantiles").unwrap();
-    let list = batch
-        .column(q_idx)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap();
-    assert_eq!(list.value(0).len(), 2);
 }
 
 #[tokio::test]

@@ -768,7 +768,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_iceberg_writer_bulk_metric_roundtrip() {
+async fn test_iceberg_writer_bulk_metric_samples_roundtrip() {
     use softprobe_runtime::models::Metric;
 
     let config = load_test_config();
@@ -843,13 +843,13 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
 
     let total_metrics = num_metric_names * data_points_per_metric;
 
-    // Act: write through WAL + local cache
+    // Act: write metric samples directly through the canonical DuckLake writer.
     println!(
-        "🧪 Writing {} metric names ({} total data points) via WAL + local cache...",
+        "🧪 Writing {} metric names ({} total data points)...",
         num_metric_names, total_metrics
     );
     let write_timer = Timer::start(&format!(
-        "Multi-Metric WAL Write ({} metric names)",
+        "Multi-Metric Write ({} metric names)",
         num_metric_names
     ));
     pipeline
@@ -875,10 +875,11 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     .with_rows(total_metrics);
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-metric add time");
-    println!("✅ Flush completed (DuckLake flush-through)");
+    println!("✅ Metric samples flushed to DuckLake");
     println!("✅ Querying back each metric name via union_metrics...");
 
-    // Query each metric name individually to verify row group isolation (WAL path)
+    // Query each metric name individually through the compatibility relation
+    // over skinny samples + series (histograms are not in metric_samples.value).
     let mut total_query_duration = std::time::Duration::ZERO;
 
     for (metric_idx, metric_name) in metric_names.iter().enumerate() {
@@ -934,41 +935,9 @@ async fn test_iceberg_writer_bulk_metric_roundtrip() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     println!(
-        "\n✅ WAL-backed union-read validated for {} metric names",
+        "\n✅ union_metrics compatibility reads validated for {} metric names",
         num_metric_names
     );
-
-    println!("🔄 Forcing flush to staged local cache...");
-    pipeline.force_flush_metrics().await.expect("force flush");
-
-    println!("⚙️  Running optimizer to commit staged metrics to Iceberg...");
-
-    for (metric_idx, metric_name) in metric_names.iter().enumerate() {
-        let escaped = metric_name.replace('\'', "''");
-        let sql = format!(
-            "SELECT COUNT(*) AS count, SUM(value) AS total FROM union_metrics WHERE metric_name = '{}'",
-            escaped
-        );
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-        let values_sum = result.rows[0][1].as_f64().unwrap_or(0.0);
-
-        assert_eq!(
-            found, data_points_per_metric,
-            "Expected union view to return {} data points for metric {} after optimizer, found {}",
-            data_points_per_metric, metric_name, found
-        );
-
-        let expected_sum = expected_sums[metric_idx];
-        assert!(
-            (values_sum - expected_sum).abs() < 0.01,
-            "Expected sum {:.2}, got {:.2}",
-            expected_sum,
-            values_sum
-        );
-    }
-
-    println!("\n✅ WAL, local cache, and optimizer paths validated for metrics");
 }
 
 #[tokio::test]

@@ -908,7 +908,7 @@ impl DuckDBCore {
 
     /// Replace internal telemetry aliases with real DuckLake table refs.
     ///
-    /// Metrics aliases rewrite to the layout JOIN (§6.7 / AC-D4), not fat `metrics`.
+    /// Metrics aliases rewrite to the layout JOIN (§6.7 / AC-D4).
     fn ducklake_inline_sql(&self, sql: &str) -> String {
         let traces = self.ducklake_qualified_table("traces");
         let logs = self.ducklake_qualified_table("logs");
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_union_metrics_inlines_layout_join_not_fat_table() {
+    fn rewrite_union_metrics_inlines_layout_join() {
         let prep =
             rewrite_reserved_telemetry_view_names("SELECT metric_name, value FROM union_metrics");
         assert!(
@@ -1107,7 +1107,7 @@ mod tests {
         assert!(
             !out.contains("FROM softprobe.metrics")
                 && !out.contains("FROM softprobe.softprobe.metrics"),
-            "must not scan fat metrics table: {out}"
+            "must not scan the obsolete wide metric relation: {out}"
         );
         let committed =
             rewrite_reserved_telemetry_view_names("SELECT value FROM committed_metrics");

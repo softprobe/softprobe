@@ -62,7 +62,7 @@ DuckLake still depends on Iceberg-shaped modules:
 
 ```text
 src/storage/ducklake/mod.rs
-  → storage::iceberg::tables::{TraceTable, OtlpLogsTable, OtlpMetricsTable}
+  → storage::iceberg::tables::{TraceTable, OtlpLogsTable, MetricSamplesTable}
   → storage::iceberg::arrow::{spans,logs,metrics}_to_record_batch
   → iceberg::spec::Schema (return type of spans_schema / logs_schema / metrics_schema)
 ```
@@ -90,7 +90,7 @@ File: `src/query/duckdb.rs`
 Legacy surfaces still present:
 
 - Constant `CATALOG_ALIAS = "iceberg_catalog"`
-- Public SQL aliases `iceberg_spans` / `iceberg_logs` / `iceberg_metrics` (rewritten to `tm_icb_*`)
+- Public SQL aliases `iceberg_spans` / `iceberg_logs` (rewritten to `tm_icb_*`)
 - `IcebergSource` enum: `Pinned`, `Catalog`, `ScanUri`, `Stub`
 - `resolve_iceberg_source`, `create_iceberg_view`, `iceberg_pinned_metadata`, `iceberg_scan(...)` SQL
 - Session init still `INSTALL iceberg` “for backward-compatible fallback”

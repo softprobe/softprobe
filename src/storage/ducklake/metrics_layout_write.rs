@@ -1,7 +1,7 @@
 //! One-transaction metrics layout ingest (§8 of metrics-timeseries-layout).
 //!
 //! Decode/canonicalize → `series_id` → INSERT series + postings + samples|hist
-//! in a single BEGIN…COMMIT. Does not write 5m/1h/collapse or legacy fat `metrics`.
+//! in a single BEGIN…COMMIT. Does not write 5m/1h/collapse rollups.
 
 use crate::compat::projection::prometheus::{project_prometheus_labels, sanitize_label_name};
 use crate::models::Metric;
@@ -110,6 +110,8 @@ fn push_classic_prom_gauges(
                 metric_type: "gauge".into(),
                 unit: m.unit.clone(),
                 description: m.description.clone(),
+                aggregation_temporality: None,
+                is_monotonic: None,
                 labels_json: serde_json::to_string(&labels).unwrap_or_else(|_| "{}".into()),
                 record_date,
             });
@@ -164,6 +166,8 @@ struct SeriesRow {
     metric_type: String,
     unit: String,
     description: String,
+    aggregation_temporality: Option<String>,
+    is_monotonic: Option<bool>,
     labels_json: String,
     record_date: NaiveDate,
 }
@@ -226,7 +230,7 @@ fn labels_to_json(
     for (k, v) in labels {
         as_map.insert(k.clone(), v.clone());
     }
-    // Rehydrate nested `sp.json:` values the same way fat VARIANT encoding does.
+    // Rehydrate nested `sp.json:` values using the shared VARIANT encoding.
     encode_attributes_json(&as_map)
 }
 
@@ -257,6 +261,8 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 metric_type: m.metric_type.clone(),
                 unit: m.unit.clone(),
                 description: m.description.clone(),
+                aggregation_temporality: m.aggregation_temporality.clone(),
+                is_monotonic: m.is_monotonic,
                 labels_json: labels_to_json(&labels, &m.resource_attributes, &m.attributes),
                 record_date,
             });
@@ -402,12 +408,21 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {labels}::JSON::VARIANT, {rd})",
+                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {temporality}, {monotonic}, {labels}::JSON::VARIANT, {rd})",
                 id = r.series_id,
                 name = sql_str(&r.metric_name),
                 mtype = sql_str(&r.metric_type),
                 unit = sql_str(&r.unit),
                 desc = sql_str(&r.description),
+                temporality = r
+                    .aggregation_temporality
+                    .as_deref()
+                    .map(sql_str)
+                    .unwrap_or_else(|| "NULL".into()),
+                monotonic = r
+                    .is_monotonic
+                    .map(|v| if v { "TRUE" } else { "FALSE" })
+                    .unwrap_or("NULL"),
                 labels = sql_str(&r.labels_json),
                 rd = sql_date(r.record_date),
             )
@@ -415,8 +430,8 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "INSERT INTO {table} (series_id, metric_name, metric_type, unit, description, labels, record_date)\n\
-         SELECT * FROM (VALUES\n{values}\n) AS v(series_id, metric_name, metric_type, unit, description, labels, record_date)\n\
+        "INSERT INTO {table} (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
+         SELECT * FROM (VALUES\n{values}\n) AS v(series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
          WHERE NOT EXISTS (\n\
            SELECT 1 FROM {table} e\n\
            WHERE e.record_date = v.record_date AND e.series_id = v.series_id\n\
@@ -593,99 +608,6 @@ mod layout_catalog_prefix_tests {
     }
 }
 
-/// Sum on-disk parquet bytes under `data_path` for one DuckLake table folder.
-///
-/// Matches path segments `/<table_name>/` or `/<table_name>.` so `metrics` does
-/// not accidentally include `metric_samples` / `metric_series` / …
-#[cfg(test)]
-pub fn sum_parquet_bytes_for_table(data_path: &std::path::Path, table_name: &str) -> u64 {
-    let needle_slash = format!("/{table_name}/");
-    let needle_dot = format!("/{table_name}.");
-    fn walk(dir: &std::path::Path, needle_slash: &str, needle_dot: &str, acc: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, needle_slash, needle_dot, acc);
-                continue;
-            }
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !(name.ends_with(".parquet") || name.ends_with(".parq")) {
-                continue;
-            }
-            let path_str = path.to_string_lossy().replace('\\', "/");
-            if path_str.contains(needle_slash) || path_str.contains(needle_dot) {
-                if let Ok(meta) = entry.metadata() {
-                    *acc += meta.len();
-                }
-            }
-        }
-    }
-    let mut total = 0u64;
-    walk(data_path, &needle_slash, &needle_dot, &mut total);
-    total
-}
-
-/// Write the same points through the legacy fat `metrics` column list (throwaway AC-S1 path).
-#[cfg(test)]
-pub fn write_legacy_fat_metrics_throwaway(
-    conn: &Connection,
-    catalog_alias: &str,
-    metrics: &[Metric],
-) -> Result<()> {
-    use crate::storage::schema::tables::OtlpMetricsTable;
-    use crate::storage::schema::{arrow, variant};
-
-    if metrics.is_empty() {
-        return Ok(());
-    }
-    let table = qualified_metrics_layout_table(catalog_alias, "metrics");
-    let schema = OtlpMetricsTable::schema();
-    let batch = arrow::metrics_to_record_batch(metrics, &schema)?;
-    let base = std::env::temp_dir().join("splake-ducklake-fat-throwaway");
-    std::fs::create_dir_all(&base)?;
-    let temp_path = base.join(format!(
-        "fat-{}.parquet",
-        Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    ));
-    {
-        let file = std::fs::File::create(&temp_path)?;
-        let mut writer = parquet::arrow::ArrowWriter::try_new(
-            file,
-            batch.schema(),
-            Some(parquet::file::properties::WriterProperties::builder().build()),
-        )?;
-        writer.write(&batch)?;
-        writer.close()?;
-    }
-    let escaped = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-    let select = variant::parquet_select_with_variant_casts("metrics");
-    let ddl = format!(
-        "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{escaped}') LIMIT 0;"
-    );
-    let insert = format!("INSERT INTO {table} BY NAME {select} FROM read_parquet('{escaped}');");
-    conn.execute_batch("BEGIN TRANSACTION;")?;
-    let result = (|| -> Result<()> {
-        conn.execute_batch(&ddl)?;
-        conn.execute_batch(&insert)?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            let _ = std::fs::remove_file(&temp_path);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK;");
-            let _ = std::fs::remove_file(&temp_path);
-            Err(e)
-        }
-    }
-}
-
 /// Count VARIANT-typed columns on a live DuckLake table (AC-S1).
 #[cfg(test)]
 pub fn count_variant_columns(conn: &Connection, catalog: &str, table_name: &str) -> Result<i64> {
@@ -724,7 +646,7 @@ mod tests {
         assert_eq!(INSERT_CHUNK, 65536);
     }
 
-    fn attach_ducklake(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
+    fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
         let meta = temp.path().join("metadata.sqlite");
         let data = temp.path().join("data");
         std::fs::create_dir_all(&data).expect("data dir");
@@ -740,7 +662,7 @@ mod tests {
             data.to_string_lossy().replace('\'', "''"),
         ))
         .expect("attach");
-        (conn, catalog.to_string(), data)
+        (conn, catalog.to_string())
     }
 
     fn gauge(name: &str, instance: &str, ts: DateTime<Utc>, value: f64) -> Metric {
@@ -793,7 +715,7 @@ mod tests {
     #[test]
     fn ingest_creates_layout_tables_and_rows() {
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
         write_metrics_layout_txn(
             &conn,
@@ -836,7 +758,7 @@ mod tests {
     fn wide_ingest_series_count_equals_n() {
         const N: i64 = 500; // test-scale cardinality for AC-C2
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
         let metrics: Vec<Metric> = (0..N)
             .map(|i| gauge("wide_metric", &format!("pod-{i}"), ts, i as f64))
@@ -878,7 +800,7 @@ mod tests {
     #[test]
     fn histogram_lands_only_in_hist_samples() {
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
         write_metrics_layout_txn(
             &conn,
@@ -937,56 +859,6 @@ mod tests {
         assert_eq!(hist_old, 1, "AC-H1: EVAL_END-day hist must persist");
     }
 
-    /// T-S1 / AC-S1: no VARIANT on samples + skinny/fat byte ratio < 0.20.
-    #[test]
-    fn skinny_samples_smaller_than_fat_and_no_variant() {
-        const N: usize = 600; // scaled fixture; ratio must be measured, not hardcoded
-        let temp = TempDir::new().expect("temp");
-        let (conn, catalog, data) = attach_ducklake(&temp);
-        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
-        let metrics: Vec<Metric> = (0..N)
-            .map(|i| {
-                // Fat path stores two VARIANT maps + description/unit/name per row —
-                // keep labels wide enough that fat rows stay expensive vs skinny samples.
-                let mut m = gauge("s1_metric", &format!("inst-{i}"), ts, i as f64);
-                for k in 0..16 {
-                    m.attributes.insert(
-                        format!("label_{k}"),
-                        format!("value-{i}-{k}-{}", "pad".repeat(8)),
-                    );
-                }
-                m.resource_attributes
-                    .insert("service.version".into(), format!("v1.2.3-build-{i}"));
-                m.description = format!(
-                    "description for series {i} with padding text {}",
-                    "x".repeat(64)
-                );
-                m
-            })
-            .collect();
-
-        write_metrics_layout_txn(&conn, &catalog, &metrics, DEFAULT_MAX_LABELS_PER_SERIES)
-            .expect("skinny ingest");
-        write_legacy_fat_metrics_throwaway(&conn, &catalog, &metrics).expect("fat throwaway");
-
-        let variant_n = count_variant_columns(&conn, &catalog, "metric_samples").unwrap();
-        assert_eq!(variant_n, 0, "AC-S1: metric_samples must have no VARIANT");
-
-        let skinny_bytes = sum_parquet_bytes_for_table(&data, "metric_samples");
-        let fat_bytes = sum_parquet_bytes_for_table(&data, "metrics");
-
-        assert!(
-            skinny_bytes > 0 && fat_bytes > 0,
-            "AC-S1: need real parquet sizes skinny={skinny_bytes} fat={fat_bytes} under {}",
-            data.display()
-        );
-        let ratio = skinny_bytes as f64 / fat_bytes as f64;
-        assert!(
-            ratio < 0.20,
-            "AC-S1: skinny/fat ratio {ratio:.4} (skinny={skinny_bytes}, fat={fat_bytes}) must be < 0.20"
-        );
-    }
-
     /// T-M1 / AC-M1: maintenance list is exactly the metrics family.
     #[test]
     fn maintenance_tables_include_metric_family() {
@@ -1017,7 +889,7 @@ mod tests {
         use crate::storage::schema::union_metrics_from_layout_sql;
 
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 30, 0).unwrap();
         let mut m = gauge("app.gauge", "web-1", ts, 42.5);
         m.attributes
@@ -1058,7 +930,7 @@ mod tests {
     #[test]
     fn layout_ingest_preserves_nan_gauge_values() {
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
         write_metrics_layout_txn(
             &conn,
@@ -1095,7 +967,7 @@ mod tests {
     #[test]
     fn ensure_core_still_applies_partition_sort() {
         let temp = TempDir::new().expect("temp");
-        let (conn, catalog, _) = attach_ducklake(&temp);
+        let (conn, catalog) = attach_ducklake(&temp);
         ensure_metrics_layout_core_tables(&conn, &catalog).unwrap();
         write_metrics_layout_txn(
             &conn,

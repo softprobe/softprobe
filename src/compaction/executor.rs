@@ -202,7 +202,7 @@ impl MaintenanceExecutor {
                     );
                 }
 
-                // Metrics-layout demos have no fat traces/logs/scores tables.
+                // Metrics-layout demos have no traces/logs/scores tables.
                 // Only compact when the table exists so we do not ERROR/spam every
                 // minute and contend with PromQL (Grafana 100ms SLO).
                 for table in ["traces", "logs", "scores"] {

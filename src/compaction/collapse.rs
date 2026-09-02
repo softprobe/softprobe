@@ -1,6 +1,7 @@
 //! `metric_collapse_job_1h` builder + PromQL collapse planner (§6.6 / §7.2 / §9.1).
 //!
-//! Collapse key is **`job` only**. Long-window `sum by (job) (rate|irate|increase(…))`
+//! Collapse key is `(metric_name, job, record_date, window_ts)`. Long-window
+//! `sum by (job) (rate|irate|increase(…))`
 //! reads this table (AC-Q5 / AC-W3).
 
 use crate::compat::backends::grain::RAW_RANGE_MS;
@@ -17,7 +18,6 @@ pub fn collapse_job_1h_sql(catalog_alias: &str) -> String {
     let samples_1h = qualified_metrics_layout_table(catalog_alias, "metric_samples_1h");
     let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
     let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    let wm = format!("(SELECT coalesce(max(window_ts), TIMESTAMPTZ '-infinity') FROM {dest})");
     format!(
         "INSERT INTO {dest} (metric_name, job, window_ts, record_date, count, sum, min, max, last)\n\
          SELECT\n\
@@ -36,18 +36,23 @@ pub fn collapse_job_1h_sql(catalog_alias: &str) -> String {
          JOIN {postings} p\n\
            ON p.series_id = h.series_id AND p.record_date = h.record_date\n\
           AND p.label_name = 'job'\n\
-         WHERE h.window_ts > {wm}\n\
+         WHERE NOT EXISTS (\n\
+           SELECT 1 FROM {dest} existing\n\
+           WHERE existing.metric_name = s.metric_name\n\
+             AND existing.job = p.label_value\n\
+             AND existing.record_date = h.record_date\n\
+             AND existing.window_ts = h.window_ts\n\
+         )\n\
          GROUP BY s.metric_name, p.label_value, h.window_ts, h.record_date;"
     )
 }
 
-/// Fallback collapse from raw when 1h is empty (still incremental by watermark).
+/// Fallback collapse from raw when 1h is empty (still key-scoped incremental).
 pub fn collapse_job_1h_from_raw_sql(catalog_alias: &str) -> String {
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
     let samples = qualified_metrics_layout_table(catalog_alias, "metric_samples");
     let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
     let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    let wm = format!("(SELECT coalesce(max(window_ts), TIMESTAMPTZ '-infinity') FROM {dest})");
     format!(
         "INSERT INTO {dest} (metric_name, job, window_ts, record_date, count, sum, min, max, last)\n\
          SELECT\n\
@@ -67,8 +72,15 @@ pub fn collapse_job_1h_from_raw_sql(catalog_alias: &str) -> String {
            ON p.series_id = sm.series_id AND p.record_date = sm.record_date\n\
           AND p.label_name = 'job'\n\
          WHERE sm.timestamp < now() - INTERVAL '24 hours'\n\
-           AND time_bucket(INTERVAL '1 hour', sm.timestamp) > {wm}\n\
-         GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timestamp);"
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.metric_name = s.metric_name\n\
+               AND existing.job = p.label_value\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '1 hour', sm.timestamp)\n\
+           )\n\
+         GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timestamp),\n\
+           CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE);"
     )
 }
 
@@ -149,7 +161,6 @@ pub fn sql_is_collapse_prom_path(sql: &str) -> bool {
     sql.contains("metric_collapse_job_1h")
         && sql.contains("metric_name")
         && !sql.contains("to_timestamp(")
-        && !sql.contains("FROM metrics ")
         && !sql.contains("FROM union_metrics")
         && !sql.contains("metric_samples sm")
 }
@@ -224,7 +235,7 @@ mod tests {
         assert!(sql.contains("INSERT INTO softprobe.metric_collapse_job_1h"));
         assert!(sql.contains("metric_samples_1h"));
         assert!(sql.contains("label_name = 'job'"));
-        assert!(sql.contains("max(window_ts)"));
+        assert!(sql.contains("NOT EXISTS"));
         assert!(!sql.to_lowercase().contains("delete"));
     }
 

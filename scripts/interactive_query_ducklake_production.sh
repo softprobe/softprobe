@@ -18,7 +18,7 @@
 #   DUCKLAKE_CATALOG_ALIAS    ATTACH alias (default: softprobe)
 #   DUCKLAKE_METADATA_SCHEMA  Postgres schema for DuckLake tables (default: ducklake_schema)
 #   DUCKLAKE_SKIP_GCS_SECRET   If 1, do not create the GCS HMAC secret (only useful when not using gs://)
-#   DUCKLAKE_SHORTHAND_VIEWS     If 1 (default), CREATE VIEW traces/logs/metrics -> catalog.* (fails if tables missing)
+#   DUCKLAKE_SHORTHAND_VIEWS     If 1 (default), CREATE VIEW traces/logs/metric_samples -> catalog.* (fails if tables missing)
 #
 # This script optionally sources repo-root ../../.env if present (same pattern as telemetrygen_hosted.sh).
 #
@@ -164,7 +164,7 @@ EOSQL
 
   if [[ "$DUCKLAKE_SHORTHAND_VIEWS" == "1" ]]; then
     cat <<EOSQL
-.print 'Convenience views: traces, logs, metrics'
+.print 'Convenience views: traces, logs, metric_samples'
 EOSQL
   else
     cat <<EOSQL
@@ -184,7 +184,7 @@ EOSQL
   if [[ "$DUCKLAKE_SHORTHAND_VIEWS" == "1" ]]; then
     printf "CREATE OR REPLACE VIEW traces AS SELECT * FROM %s.traces;\n" "$TABLE_PREFIX"
     printf "CREATE OR REPLACE VIEW logs AS SELECT * FROM %s.logs;\n" "$TABLE_PREFIX"
-    printf "CREATE OR REPLACE VIEW metrics AS SELECT * FROM %s.metrics;\n" "$TABLE_PREFIX"
+    printf "CREATE OR REPLACE VIEW metric_samples AS SELECT * FROM %s.metric_samples;\n" "$TABLE_PREFIX"
   fi
 
 } >"$INIT_SQL"

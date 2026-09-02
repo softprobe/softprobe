@@ -2,7 +2,8 @@
 //!
 //! - `metric_samples_5m` from raw older than 5m (closed 5m buckets)
 //! - `metric_samples_1h` from 5m (fallback raw) older than 1h
-//! - Watermark = `max(window_ts)` already in the destination (AC-M2)
+//! - Existing destination keys are checked per `(series_id, record_date,
+//!   window_ts)`, so one series/day cannot suppress another (AC-M2)
 //! - Raw rows are never deleted (AC-S2)
 
 use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
@@ -16,16 +17,10 @@ pub const DOWNSAMPLE_1H_LAG: &str = "INTERVAL '1 hour'";
 /// Max closed days processed per maintenance pass (AC-Q9 / G2).
 pub const HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS: usize = 4;
 
-/// Watermark expression: latest `window_ts` already materialised in `dest`.
-pub fn watermark_expr(dest_table: &str) -> String {
-    format!("(SELECT coalesce(max(window_ts), TIMESTAMPTZ '-infinity') FROM {dest_table})")
-}
-
 /// INSERT … SELECT building `metric_samples_5m` from raw (incremental).
 pub fn downsample_5m_sql(catalog_alias: &str) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_samples");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_samples_5m");
-    let wm = watermark_expr(&dest);
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, min, max, last, last_ts)\n\
          SELECT\n\
@@ -38,11 +33,16 @@ pub fn downsample_5m_sql(catalog_alias: &str) -> String {
            max(value) AS max,\n\
            arg_max(value, timestamp) AS last,\n\
            max(timestamp) AS last_ts\n\
-         FROM {src}\n\
-         WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
-         GROUP BY series_id, time_bucket(INTERVAL '5 minutes', timestamp);"
+         FROM {src} raw\n\
+         WHERE raw.timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
+           AND time_bucket(INTERVAL '5 minutes', raw.timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.series_id = raw.series_id\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '5 minutes', raw.timestamp) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '5 minutes', raw.timestamp)\n\
+           )\n\
+         GROUP BY raw.series_id, time_bucket(INTERVAL '5 minutes', raw.timestamp);"
     )
 }
 
@@ -50,7 +50,6 @@ pub fn downsample_5m_sql(catalog_alias: &str) -> String {
 pub fn downsample_1h_from_5m_sql(catalog_alias: &str) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_samples_5m");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_samples_1h");
-    let wm = watermark_expr(&dest);
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, min, max, last, last_ts)\n\
          SELECT\n\
@@ -63,12 +62,17 @@ pub fn downsample_1h_from_5m_sql(catalog_alias: &str) -> String {
            max(max) AS max,\n\
            arg_max(last, last_ts) AS last,\n\
            max(last_ts) AS last_ts\n\
-         FROM {src}\n\
-         WHERE window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
-           AND time_bucket(INTERVAL '1 hour', window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
-           AND time_bucket(INTERVAL '1 hour', window_ts) > {wm}\n\
-         GROUP BY series_id, time_bucket(INTERVAL '1 hour', window_ts)\n\
-         HAVING max(window_ts) >= time_bucket(INTERVAL '1 hour', window_ts) + INTERVAL '55 minutes';"
+         FROM {src} raw\n\
+         WHERE raw.window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND time_bucket(INTERVAL '1 hour', raw.window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.series_id = raw.series_id\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', raw.window_ts) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '1 hour', raw.window_ts)\n\
+           )\n\
+         GROUP BY raw.series_id, time_bucket(INTERVAL '1 hour', raw.window_ts)\n\
+         HAVING max(raw.window_ts) >= time_bucket(INTERVAL '1 hour', raw.window_ts) + INTERVAL '55 minutes';"
     )
 }
 
@@ -76,7 +80,6 @@ pub fn downsample_1h_from_5m_sql(catalog_alias: &str) -> String {
 pub fn downsample_1h_from_raw_sql(catalog_alias: &str) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_samples");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_samples_1h");
-    let wm = watermark_expr(&dest);
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, min, max, last, last_ts)\n\
          SELECT\n\
@@ -89,11 +92,16 @@ pub fn downsample_1h_from_raw_sql(catalog_alias: &str) -> String {
            max(value) AS max,\n\
            arg_max(value, timestamp) AS last,\n\
            max(timestamp) AS last_ts\n\
-         FROM {src}\n\
-         WHERE timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
-           AND time_bucket(INTERVAL '1 hour', timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
-           AND time_bucket(INTERVAL '1 hour', timestamp) > {wm}\n\
-         GROUP BY series_id, time_bucket(INTERVAL '1 hour', timestamp);"
+         FROM {src} raw\n\
+         WHERE raw.timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND time_bucket(INTERVAL '1 hour', raw.timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.series_id = raw.series_id\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', raw.timestamp) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '1 hour', raw.timestamp)\n\
+           )\n\
+         GROUP BY raw.series_id, time_bucket(INTERVAL '1 hour', raw.timestamp);"
     )
 }
 
@@ -111,17 +119,21 @@ pub fn hist_downsample_5m_sql(catalog_alias: &str) -> String {
     hist_downsample_5m_for_day_sql(catalog_alias, None)
 }
 
-/// Days with raw hist rows still above the 5m watermark (bounded per pass).
+/// Days with raw hist rows whose 5m buckets are not materialized (bounded per pass).
 pub fn hist_downsample_5m_pending_days_sql(catalog_alias: &str, limit: usize) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_5m");
-    let wm = watermark_expr(&dest);
     format!(
-        "SELECT DISTINCT CAST(record_date AS VARCHAR) AS record_date FROM {src}\n\
-         WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
-           AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
-         ORDER BY record_date\n\
+        "SELECT DISTINCT CAST(raw.record_date AS VARCHAR) AS record_date FROM {src} raw\n\
+         WHERE raw.timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
+           AND time_bucket(INTERVAL '5 minutes', raw.timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.series_id = raw.series_id\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '5 minutes', raw.timestamp) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '5 minutes', raw.timestamp)\n\
+           )\n\
+         ORDER BY raw.record_date\n\
          LIMIT {limit};"
     )
 }
@@ -133,17 +145,21 @@ pub fn hist_downsample_5m_for_day_sql(
 ) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_5m");
-    let wm = watermark_expr(&dest);
     let day_filter = record_date
-        .map(|d| format!("AND record_date = DATE '{}'", d.format("%Y-%m-%d")))
+        .map(|d| format!("AND raw.record_date = DATE '{}'", d.format("%Y-%m-%d")))
         .unwrap_or_default();
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, bucket_counts, explicit_bounds, last_ts)\n\
          WITH src AS (\n\
-           SELECT * FROM {src}\n\
-           WHERE timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
-             AND time_bucket(INTERVAL '5 minutes', timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
-             AND time_bucket(INTERVAL '5 minutes', timestamp) > {wm}\n\
+           SELECT raw.* FROM {src} raw\n\
+           WHERE raw.timestamp < now() - {DOWNSAMPLE_5M_LAG}\n\
+             AND time_bucket(INTERVAL '5 minutes', raw.timestamp) <= now() - {DOWNSAMPLE_5M_LAG}\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {dest} existing\n\
+               WHERE existing.series_id = raw.series_id\n\
+                 AND existing.record_date = CAST(time_bucket(INTERVAL '5 minutes', raw.timestamp) AS DATE)\n\
+                 AND existing.window_ts = time_bucket(INTERVAL '5 minutes', raw.timestamp)\n\
+             )\n\
              {day_filter}\n\
          ),\n\
          scalars AS (\n\
@@ -187,12 +203,16 @@ pub fn hist_downsample_1h_from_5m_sql(catalog_alias: &str) -> String {
 pub fn hist_downsample_1h_from_5m_pending_days_sql(catalog_alias: &str, limit: usize) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_5m");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_1h");
-    let wm = watermark_expr(&dest);
     format!(
-        "SELECT DISTINCT CAST(record_date AS VARCHAR) AS record_date FROM {src}\n\
-         WHERE window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
-           AND time_bucket(INTERVAL '1 hour', window_ts) > {wm}\n\
-         ORDER BY record_date\n\
+        "SELECT DISTINCT CAST(raw.record_date AS VARCHAR) AS record_date FROM {src} raw\n\
+         WHERE raw.window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {dest} existing\n\
+             WHERE existing.series_id = raw.series_id\n\
+               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', raw.window_ts) AS DATE)\n\
+               AND existing.window_ts = time_bucket(INTERVAL '1 hour', raw.window_ts)\n\
+           )\n\
+         ORDER BY raw.record_date\n\
          LIMIT {limit};"
     )
 }
@@ -203,17 +223,21 @@ pub fn hist_downsample_1h_from_5m_for_day_sql(
 ) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_5m");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_1h");
-    let wm = watermark_expr(&dest);
     let day_filter = record_date
-        .map(|d| format!("AND record_date = DATE '{}'", d.format("%Y-%m-%d")))
+        .map(|d| format!("AND raw.record_date = DATE '{}'", d.format("%Y-%m-%d")))
         .unwrap_or_default();
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, bucket_counts, explicit_bounds, last_ts)\n\
          WITH src AS (\n\
-           SELECT * FROM {src}\n\
-           WHERE window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
-             AND time_bucket(INTERVAL '1 hour', window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
-             AND time_bucket(INTERVAL '1 hour', window_ts) > {wm}\n\
+           SELECT raw.* FROM {src} raw\n\
+           WHERE raw.window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND time_bucket(INTERVAL '1 hour', raw.window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {dest} existing\n\
+               WHERE existing.series_id = raw.series_id\n\
+                 AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', raw.window_ts) AS DATE)\n\
+                 AND existing.window_ts = time_bucket(INTERVAL '1 hour', raw.window_ts)\n\
+             )\n\
              {day_filter}\n\
          ),\n\
          scalars AS (\n\
@@ -261,17 +285,21 @@ pub fn hist_downsample_1h_from_raw_for_day_sql(
 ) -> String {
     let src = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples");
     let dest = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples_1h");
-    let wm = watermark_expr(&dest);
     let day_filter = record_date
-        .map(|d| format!("AND record_date = DATE '{}'", d.format("%Y-%m-%d")))
+        .map(|d| format!("AND raw.record_date = DATE '{}'", d.format("%Y-%m-%d")))
         .unwrap_or_default();
     format!(
         "INSERT INTO {dest} (series_id, window_ts, record_date, count, sum, bucket_counts, explicit_bounds, last_ts)\n\
          WITH src AS (\n\
-           SELECT * FROM {src}\n\
-           WHERE timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
-             AND time_bucket(INTERVAL '1 hour', timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
-             AND time_bucket(INTERVAL '1 hour', timestamp) > {wm}\n\
+           SELECT raw.* FROM {src} raw\n\
+           WHERE raw.timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND time_bucket(INTERVAL '1 hour', raw.timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {dest} existing\n\
+               WHERE existing.series_id = raw.series_id\n\
+                 AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', raw.timestamp) AS DATE)\n\
+                 AND existing.window_ts = time_bucket(INTERVAL '1 hour', raw.timestamp)\n\
+             )\n\
              {day_filter}\n\
          ),\n\
          scalars AS (\n\
@@ -312,26 +340,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn downsample_5m_sql_is_incremental_and_additive() {
+    fn downsample_5m_sql_is_key_scoped_and_additive() {
         let sql = downsample_5m_sql("softprobe");
         assert!(sql.starts_with("INSERT INTO softprobe.metric_samples_5m"));
         assert!(sql.contains("FROM softprobe.metric_samples"));
         assert!(sql.contains("INTERVAL '5 minutes'"));
-        assert!(sql.contains("max(window_ts)"));
+        assert!(sql.contains("NOT EXISTS"));
         assert!(!sql.to_lowercase().contains("delete"));
         assert!(!sql.to_lowercase().contains("truncate"));
     }
 
     #[test]
-    fn downsample_1h_sql_uses_1h_lag_and_watermark() {
+    fn downsample_1h_sql_uses_1h_lag_and_key_guard() {
         let from_5m = downsample_1h_from_5m_sql("softprobe");
         assert!(from_5m.contains("metric_samples_5m"));
         assert!(from_5m.contains("INTERVAL '1 hour'"));
         assert!(from_5m.contains("INSERT INTO softprobe.metric_samples_1h"));
-        assert!(from_5m.contains("max(window_ts)"));
+        assert!(from_5m.contains("NOT EXISTS"));
+        assert!(from_5m.contains("max(raw.window_ts)"));
         assert!(
-            from_5m
-                .contains("time_bucket(INTERVAL '1 hour', window_ts) <= now() - INTERVAL '1 hour'"),
+            from_5m.contains(
+                "time_bucket(INTERVAL '1 hour', raw.window_ts) <= now() - INTERVAL '1 hour'"
+            ),
             "1h from 5m must wait for closed hours"
         );
         assert!(
@@ -340,23 +370,24 @@ mod tests {
         );
 
         let from_raw = downsample_1h_from_raw_sql("softprobe");
-        assert!(from_raw.contains("FROM softprobe.metric_samples\n"));
+        assert!(from_raw.contains("FROM softprobe.metric_samples raw"));
         assert!(from_raw.contains("INTERVAL '1 hour'"));
+        assert!(from_raw.contains("NOT EXISTS"));
         assert!(
-            from_raw
-                .contains("time_bucket(INTERVAL '1 hour', timestamp) <= now() - INTERVAL '1 hour'"),
+            from_raw.contains(
+                "time_bucket(INTERVAL '1 hour', raw.timestamp) <= now() - INTERVAL '1 hour'"
+            ),
             "1h from raw must wait for closed hours"
         );
     }
 
-    /// AC-M2 shape: watermark predicate prevents full rebuild.
+    /// AC-M2 shape: the destination guard is scoped to the series/day/window key.
     #[test]
-    fn watermark_expr_anchors_incremental_pass() {
-        let wm = watermark_expr("softprobe.metric_samples_5m");
-        assert!(wm.contains("max(window_ts)"));
-        assert!(wm.contains("softprobe.metric_samples_5m"));
+    fn downsample_guard_is_key_scoped() {
         let sql = downsample_5m_sql("softprobe");
-        assert!(sql.contains(&wm) || sql.contains("max(window_ts)"));
+        assert!(sql.contains("existing.series_id = raw.series_id"));
+        assert!(sql.contains("existing.record_date"));
+        assert!(sql.contains("existing.window_ts"));
     }
 
     #[test]
@@ -365,7 +396,7 @@ mod tests {
         assert!(sql.contains("INSERT INTO softprobe.metric_hist_samples_5m"));
         assert!(sql.contains("FROM softprobe.metric_hist_samples"));
         assert!(sql.contains("unnest(s.bucket_counts)"));
-        assert!(sql.contains("max(window_ts)"));
+        assert!(sql.contains("NOT EXISTS"));
         assert!(!sql.to_lowercase().contains("delete"));
     }
 
@@ -373,7 +404,7 @@ mod tests {
     fn hist_downsample_5m_for_day_scopes_record_date() {
         let day = chrono::NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
         let sql = hist_downsample_5m_for_day_sql("softprobe", Some(day));
-        assert!(sql.contains("record_date = DATE '2026-08-14'"));
+        assert!(sql.contains("raw.record_date = DATE '2026-08-14'"));
         assert!(sql.contains("INSERT INTO softprobe.metric_hist_samples_5m"));
     }
 
@@ -390,6 +421,6 @@ mod tests {
         assert!(from_5m.contains("metric_hist_samples_5m"));
         assert!(from_5m.contains("INTERVAL '1 hour'"));
         let from_raw = hist_downsample_1h_from_raw_sql("softprobe");
-        assert!(from_raw.contains("metric_hist_samples\n"));
+        assert!(from_raw.contains("metric_hist_samples raw"));
     }
 }

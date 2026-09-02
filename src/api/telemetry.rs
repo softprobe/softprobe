@@ -345,6 +345,9 @@ pub fn compile_details_sql(
             limit,
         ),
         metrics: detail_sql(
+            // Metrics are stored in skinny tables.  Keep the detail endpoint on
+            // the compatibility relation so it sees the same joined columns as
+            // the pre-cutover telemetry API without maintaining a second join.
             "union_metrics",
             &format!(
                 "metric_name, description, unit, metric_type, timestamp, value, {}, {}",

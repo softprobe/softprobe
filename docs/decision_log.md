@@ -96,7 +96,7 @@ AC-\* id in [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
 
 ### Context
 
-The fat `metrics` event table cannot serve Grafana under Astronomy Shop ingest:
+The original wide event representation cannot serve Grafana under Astronomy Shop ingest:
 mixed-name Parquet files, day-floored snapshot expiry (thousands of live
 snapshots), and `max_query_range_seconds = 86400`. Product constraints still
 forbid a second TSDB, an application WAL, and deleting tenant data to make
@@ -114,7 +114,7 @@ Keep DuckLake as the only store. **Learn from GreptimeDB** (TWCS, inverted-index
 
 - Flush-through ingest still commits once per OTLP request; snapshot **count** is `ceil(age / commit_interval) + headroom`.
 - Prom resolves series from day postings (not SST row-group prune) and fails loud at `max_series`.
-- SQL names `union_metrics` / `committed_metrics` remain; Prom must not scan the fat/view path.
+- SQL names `union_metrics` / `committed_metrics` remain as compatibility relations; Prom must not scan that path.
 - Layout + G9 tests live under `make test-perf` (no new public Make target).
 - Research clone `./greptime` is reference + **external** bench target only.
 - Ready gate: 49 AC ids, `release_full` JSON schema, Greptime ratio rows required.

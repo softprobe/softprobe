@@ -28,7 +28,7 @@ The system provides:
 - **Separated Storage Architecture**: Metadata (spans, attributes) and bodies stored separately for efficient access patterns
 - **Business Attribute Indexing**: Search sessions by business identifiers (user ID, order ID, confirmation code) without scanning payloads
 - **Iceberg Data Lake**: Vendor-neutral storage enabling SQL queries and analytics
-- **Session Management**: Session-aware buffering for traces and logs (NOT metrics)
+- **Session Management**: Session-aware buffering for traces and logs
 
 ### Primary Goal
 
@@ -83,7 +83,6 @@ Bodies are stored separately from metadata to avoid expensive read/write operati
 ┌────────────────────────────┐
 │ OTLP Collector (Rust/Axum) │
 │ - Trace/Log Buffer (unified)│
-│ - Metrics Buffer (separate) │
 └────────┬───────────────────┘
          │
          │ Coordinated Flush
@@ -92,7 +91,7 @@ Bodies are stored separately from metadata to avoid expensive read/write operati
 │ Apache Iceberg Tables             │
 │ ├─ traces (session-based)    │
 │ ├─ logs (session-based)      │
-│ └─ metrics (metric_name-based)│
+│ └─ metric_samples (metric_name-based)│
 └────────┬──────────────────────────┘
          │
          │ Direct Query with Predicates
@@ -111,7 +110,6 @@ Bodies are stored separately from metadata to avoid expensive read/write operati
 |-----------|---------------|------------|
 | **OTLP Endpoints** | Accept standard OTLP traces/logs/metrics | Rust (Axum), Tonic |
 | **Session Buffer** | Unified buffer for traces+logs by session_id | Rust (DashMap) |
-| **Metrics Buffer** | Separate buffer organized by metric_name | Rust (DashMap) |
 | **Iceberg Writer** | Coordinated writes to separate tables | iceberg-rust 0.7 |
 | **Query Engine** | Direct Iceberg scans with predicates | iceberg-rust, DuckDB |
 | **Object Storage** | S3-compatible backend | MinIO/S3/R2 |
@@ -224,20 +222,6 @@ Initial implementation incorrectly included WAL files in the DuckDB union view q
 - **Storage**: Writes to `logs` table with session-based row groups
 
 **Session Coordination**: While buffers are separate, session timeouts can be coordinated to ensure traces and logs for a session are queryable around the same time. This is a query optimization, not a storage requirement.
-
-### 3.2 Separate Metrics Buffering
-
-**Rationale**: Metrics are aggregations, NOT session-correlated.
-
-- **Buffer Organization**: HashMap<metric_name, Vec<MetricDataPoint>> OR global Vec<MetricDataPoint>
-- **Flush Triggers**:
-  - Size: ~128MB buffer size
-  - Age: 60 seconds (independent of session timeouts)
-- **Storage Pattern**: Organized by metric_name + timestamp, NOT session_id
-
-**Note**: Iceberg may not be ideal for time-series metrics. Consider Prometheus/InfluxDB later.
-
----
 
 ## 4. Storage Platform Decision
 
@@ -412,14 +396,14 @@ CREATE TABLE logs (
 PARTITIONED BY (date)
 ```
 
-### 5.3 Table: metrics (Experimental)
+### 5.3 Table: metric_samples (Experimental)
 
 **Partition**: `date, metric_name` (NOT session-based)
 **Sort Order**: `metric_name, timestamp`
 **Row Groups**: Organized by metric_name, NOT session_id
 
 ```
-CREATE TABLE metrics (
+CREATE TABLE metric_samples (
   metric_name STRING,
   description STRING,
   unit STRING,
@@ -519,7 +503,7 @@ duckdb -c "SELECT COUNT(*) FROM iceberg_scan('s3://warehouse/traces') WHERE sess
 
 **Notes**:
 - Maintenance runs asynchronously and does NOT change commit frequency or ingestion latency.
-- Maintenance cadence and retention policy are configurable per table (traces/logs/metrics).
+- Maintenance cadence and retention policy are configurable per table (traces/logs/metric_samples).
 
 ---
 
@@ -554,7 +538,7 @@ See tasks.md (historical path: `../../openspec/changes/add-iceberg-otlp-migratio
 
 ### Decision 2: Separate Iceberg Tables per Signal Type
 
-**Choice**: Use separate tables (`traces`, `logs`, `metrics`) instead of a unified table
+**Choice**: Use separate tables (`traces`, `logs`, `metric_samples`) instead of a unified table
 **Rationale**: Optimizes schema and queries for each signal type - traces, logs, and metrics have fundamentally different access patterns and structure
 **Alternatives Considered**:
 - Single unified table (complex schema, harder to optimize for different query patterns)
@@ -571,22 +555,18 @@ See tasks.md (historical path: `../../openspec/changes/add-iceberg-otlp-migratio
 - Embedded secondary indexes (not yet mature in Iceberg ecosystem)
 **Trade-off**: Accept potentially slower queries vs. dedicated index in exchange for simpler architecture and no ETL pipeline
 
-### Decision 4: Separate Buffers for Traces, Logs, and Metrics
+### Decision 4: Separate Buffers for Traces and Logs
 
-**Choice**: Separate buffers for traces, logs, and metrics - each signal type buffered independently
+**Choice**: Separate buffers for traces and logs - each signal type buffered independently
 **Rationale**:
 - **Traces**: Buffered by session_id, written to `traces` table with session-based row groups
 - **Logs**: Buffered independently by session_id, written to `logs` table with session-based row groups
-- **Metrics**: Buffered by metric_name (NOT session), written to `metrics` table
 - **Why separate?**: Unified buffer would cause Iceberg fragmentation - writing to separate tables from one buffer creates many small Parquet files
 **Alternatives Considered**:
 - Unified buffer for traces+logs (would cause file fragmentation and poor Iceberg compaction)
-- Single buffer for all three signal types (metrics are fundamentally different - aggregations, not session-correlated)
 **Implementation**:
 - Independent buffers with separate flush triggers based on size/time
 - Session timeout coordination (30 min) ensures traces and logs for a session are queryable around the same time
-- Metrics flushed independently organized by metric_name + timestamp
-**Note**: Iceberg may not be ideal for time-series metrics - consider Prometheus/InfluxDB later
 
 ### Decision 5: Multi-App Row Groups
 

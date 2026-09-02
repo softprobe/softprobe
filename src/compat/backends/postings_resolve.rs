@@ -1,7 +1,7 @@
 //! Prometheus series resolve via day-partitioned `metric_postings` (§9.1).
 //!
 //! Equality matchers → postings intersect → `series_id` set; then skinny
-//! `metric_samples` / `metric_hist_samples` scan. Does not scan fat `metrics`
+//! `metric_samples` / `metric_hist_samples` scan. Does not scan the compatibility relation
 //! or full `union_metrics` for resolve.
 
 use crate::compat::backends::grain::{grain_table_sql, select_sample_grain, SampleGrain};
@@ -126,9 +126,9 @@ pub fn equality_postings(matchers: &[LabelMatcher]) -> Vec<EqualityPosting> {
     out
 }
 
-/// Posting `__name__` candidates: exact Prom name + dotted OTel form.
-/// Classic `_bucket`/`_sum`/`_count` are dual-written as their own series, so we
-/// must **not** also resolve the bare hist base name (that doubled cardinality).
+/// Posting `__name__` candidates: exact Prom name + dotted OTel form. Classic
+/// `_bucket`/`_sum`/`_count` names are dual-written as their own series, so a
+/// suffix selector must not also resolve the native histogram base series.
 pub fn posting_name_values(prom_name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for cand in [
@@ -168,10 +168,11 @@ pub fn resolve_series_ids_sql(
     let postings = qualified_metrics_layout_table(catalog, "metric_postings");
     let lim = max_series.saturating_add(1);
     let day_pred = days.sql_predicate("");
-    let day_and = if day_pred.is_empty() {
+    let name_day_pred = days.sql_predicate("p.");
+    let name_day_and = if name_day_pred.is_empty() {
         String::new()
     } else {
-        format!(" AND {day_pred}")
+        format!(" AND {name_day_pred}")
     };
     if equality.is_empty() {
         // No equality → cardinality of all series in the window; fail loud at max_series.
@@ -197,11 +198,11 @@ pub fn resolve_series_ids_sql(
     let parts: Vec<String> = ordered
         .iter()
         .map(|eq| {
-            let vals = sql_in_list(&eq.values);
             let name = sql_string_literal(&eq.label_name);
             format!(
-                "SELECT series_id FROM {postings} \
-                 WHERE label_name = {name} AND label_value IN ({vals}){day_and}"
+                "SELECT p.series_id FROM {postings} p \
+                 WHERE p.label_name = {name} AND p.label_value IN ({}){name_day_and}",
+                sql_in_list(&eq.values)
             )
         })
         .collect();
@@ -285,7 +286,7 @@ fn step_bucket_interval_sql(step_ms: Option<i64>) -> Option<String> {
     Some(format!("INTERVAL '{secs} seconds'"))
 }
 
-/// Skinny sample scan after resolve (AC-Q7). No fat `metrics` / full `union_metrics`.
+/// Skinny sample scan after resolve (AC-Q7). No full compatibility-relation scan.
 ///
 /// `grain` selects raw / 5m / 1h / hist (§9.1). Downsample empty tables yield empty
 /// results until maintenance builds them — planner still emits the correct FROM.
@@ -365,7 +366,8 @@ pub fn samples_scan_sql(
 
 /// For gauge FiveMin/OneHour grains: scan raw with step-bucketing for correctness.
 ///
-/// Downsample tables may have gaps due to watermark lag and late-arriving data.
+/// Downsample tables may have gaps while a bucket is still open or before a
+/// maintenance pass has materialized its key.
 /// Rather than UNION (which introduces duplicate-handling complexity), we scan
 /// raw with step-bucketing applied — this guarantees correctness for all windows.
 /// For OneHour grain on very long ranges (>48h) where raw scan would be expensive,
@@ -959,29 +961,23 @@ pub fn enforce_resolved_series_cap(count: usize, max_series: usize) -> Result<()
 
 /// True when SQL is a postings+samples resolve path (AC-Q7 shape check).
 pub fn sql_is_postings_resolve_path(resolve_sql: &str, samples_sql: &str) -> bool {
-    let resolve_ok = resolve_sql.contains("metric_postings")
-        && !resolve_sql.contains("FROM metrics")
-        && !resolve_sql.contains("FROM union_metrics");
+    let resolve_ok =
+        resolve_sql.contains("metric_postings") && !resolve_sql.contains("FROM union_metrics");
     let samples_ok = (samples_sql.contains("metric_samples")
         || samples_sql.contains("metric_samples_5m")
         || samples_sql.contains("metric_samples_1h")
         || samples_sql.contains("metric_hist_samples"))
         && samples_sql.contains("series_id IN")
-        && !samples_sql.contains("FROM metrics ")
-        && !samples_sql.contains("FROM metrics\n")
         && !samples_sql.contains("FROM union_metrics");
     resolve_ok && samples_ok
 }
 
 /// True when hist Prom short-window SQL uses postings + `metric_hist_samples` (AC-H2).
 pub fn sql_is_hist_prom_path(resolve_sql: &str, samples_sql: &str) -> bool {
-    let resolve_ok = resolve_sql.contains("metric_postings")
-        && !resolve_sql.contains("FROM metrics")
-        && !resolve_sql.contains("FROM union_metrics");
+    let resolve_ok =
+        resolve_sql.contains("metric_postings") && !resolve_sql.contains("FROM union_metrics");
     let samples_ok = samples_sql.contains("metric_hist_samples")
         && samples_sql.contains("series_id IN")
-        && !samples_sql.contains("FROM metrics ")
-        && !samples_sql.contains("FROM metrics\n")
         && !samples_sql.contains("FROM union_metrics")
         // Gauge skinny samples must not back hist selectors on the short path.
         && !samples_sql.contains("metric_samples sm")
@@ -1198,10 +1194,9 @@ mod tests {
             !sql.contains("metric_samples"),
             "AC-Q6: must not scan metric_samples for discovery, got {sql}"
         );
-        assert!(!sql.contains("FROM metrics"));
     }
 
-    /// T-Q7 / AC-Q7: resolve + samples SQL shape (postings + series_id IN, no fat).
+    /// T-Q7 / AC-Q7: resolve + samples SQL shape (postings + series_id IN).
     #[test]
     fn resolve_and_samples_sql_uses_postings_not_fat() {
         let days = RecordDateRange {
@@ -1668,7 +1663,7 @@ mod tests {
         }
     }
 
-    /// T-H2 / AC-H2: short hist selector SQL references hist+postings, not fat metrics.
+    /// T-H2 / AC-H2: short hist selector SQL references hist+postings.
     #[test]
     fn hist_prom_sql_uses_hist_samples_and_postings() {
         let end = 1_700_000_000_000i64;

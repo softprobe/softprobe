@@ -284,6 +284,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         explicit_bounds: Some(vec![10.0, 50.0]),
         quantiles: None,
         aggregation_temporality: Some("CUMULATIVE".into()),
+        is_monotonic: None,
         exemplars_json: Some(r#"[{"value":1.5}]"#.into()),
     };
 
@@ -311,6 +312,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             },
         ]),
         aggregation_temporality: None,
+        is_monotonic: None,
         exemplars_json: None,
     };
 
@@ -573,48 +575,4 @@ async fn http_otlp_nested_attributes_round_trip_ducklake() {
     let parsed: serde_json::Value = serde_json::from_str(&attrs_json).unwrap();
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
-}
-
-#[tokio::test]
-async fn legacy_metrics_table_widens_on_gauge_ingest() {
-    use async_trait::async_trait;
-    use softprobe_runtime::ingest_engine::IngestPipeline;
-
-    use crate::util::metrics_fidelity_contract::{
-        contract_legacy_metrics_table_widens_on_gauge_ingest, MetricsFidelityBackend,
-    };
-
-    struct SqliteBackend {
-        _temp: TempDir,
-        pipeline: IngestPipeline,
-        metadata_path: String,
-        data_path: String,
-    }
-
-    #[async_trait]
-    impl MetricsFidelityBackend for SqliteBackend {
-        fn attach(&self) -> duckdb::Connection {
-            attach(&self.metadata_path, &self.data_path)
-        }
-
-        async fn write_metric_batches(
-            &self,
-            batches: Vec<Vec<softprobe_runtime::models::Metric>>,
-        ) -> anyhow::Result<()> {
-            self.pipeline.write_metric_batches(batches).await
-        }
-    }
-
-    let temp = TempDir::new().expect("temp");
-    let config = file_backed_test_config(&temp);
-    let metadata_path = config.ducklake.metadata_path.clone();
-    let data_path = config.ducklake.data_path.clone();
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let backend = SqliteBackend {
-        _temp: temp,
-        pipeline,
-        metadata_path,
-        data_path,
-    };
-    contract_legacy_metrics_table_widens_on_gauge_ingest(&backend).await;
 }

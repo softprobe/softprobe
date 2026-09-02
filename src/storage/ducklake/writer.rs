@@ -1,9 +1,7 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
-use crate::storage::schema::tables::{
-    OtlpLogsTable, OtlpMetricsTable, ScoreConfigTable, ScoreTable, TraceTable,
-};
+use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_with_variant_casts;
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
@@ -25,7 +23,7 @@ use super::attach::{
 };
 use super::object_store::configure_object_store;
 use super::util::{
-    ensure_log_timestamp_precision, ensure_metrics_fidelity_columns, ensure_trace_fidelity_columns,
+    ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
     ensure_trace_timestamp_precision, ensure_variant_column_types, escape_sql_literal,
     size_literal, WriteAttemptError,
 };
@@ -207,7 +205,7 @@ impl DuckLakeWriter {
         table: &TelemetryTable,
     ) -> Result<()> {
         if matches!(table, TelemetryTable::Metrics) {
-            // Layout family replaces fat `metrics` for DDL ensure (promotions / empty bootstrap).
+            // Layout family owns metric DDL (promotions / empty bootstrap).
             let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
             let pool = self.get_or_create_pool(dk)?;
             return tokio::task::spawn_blocking(move || {
@@ -235,10 +233,6 @@ impl DuckLakeWriter {
 
     pub async fn logs_schema(&self) -> Result<Arc<Schema>> {
         Ok(Arc::new(OtlpLogsTable::schema()))
-    }
-
-    pub async fn metrics_schema(&self) -> Result<Arc<Schema>> {
-        Ok(Arc::new(OtlpMetricsTable::schema()))
     }
 
     pub(super) async fn write_record_batches_internal(
@@ -361,10 +355,6 @@ impl DuckLakeWriter {
                         }
                         if variant_table_name == "logs" {
                             ensure_log_timestamp_precision(conn, qualified_table)
-                                .map_err(WriteAttemptError::Fatal)?;
-                        }
-                        if variant_table_name == "metrics" {
-                            ensure_metrics_fidelity_columns(conn, qualified_table)
                                 .map_err(WriteAttemptError::Fatal)?;
                         }
                         conn.execute_batch(&insert).map_err(|e| {
@@ -549,20 +539,13 @@ impl DuckLakeWriter {
         match table_name {
             "traces" => "ORDER BY record_date, app_id, session_id, timestamp",
             "logs" => "ORDER BY record_date, session_id, timestamp",
-            "metrics" => "ORDER BY record_date, metric_name, timestamp",
             "scores" => "ORDER BY record_date, name, timestamp",
             _ => "",
         }
     }
 
     pub(super) fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {
-        for table in [
-            "traces",
-            "logs",
-            "metrics",
-            "scores",
-            ScoreConfigTable::table_name(),
-        ] {
+        for table in ["traces", "logs", "scores", ScoreConfigTable::table_name()] {
             let qualified = self.qualified_table_name(table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
             conn.execute_batch(&format!(

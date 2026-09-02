@@ -1,7 +1,7 @@
 //! AC-Q2 / AC-Q5: backdated fixtures → SQL materialize 1h/collapse → non-empty Prom.
 //!
 //! Catalog rows alone are not enough: PromQL lookback must cover 1h grain, and
-//! `sum by (job) (rate(...[5m]))` over ≥2h must short-circuit to collapse samples.
+//! `sum by (job) (rate(...[5m]))` over ≥2h must evaluate against collapse samples.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

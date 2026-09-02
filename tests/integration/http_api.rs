@@ -1173,7 +1173,7 @@ async fn spans_without_events_are_readable() {
 /// ever read inlined data back, let alone after maintenance ran over it.
 ///
 /// Two facts are pinned, discovered while writing this test:
-/// - Tables with a VARIANT column (traces/logs/metrics since the VARIANT
+/// - Tables with a VARIANT column (traces/logs/metric_samples since the VARIANT
 ///   attribute migration) are NOT inlined at all -- tiny span batches write
 ///   Parquet despite the config. If a ducklake upgrade starts inlining
 ///   VARIANT tables, the first assertion fails and forces a conscious look.

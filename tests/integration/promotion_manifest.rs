@@ -7,7 +7,7 @@ fn parses_representative_telemetry_manifest() {
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [traces, logs, metrics]
+  tables: [traces, logs, metric_samples]
 columns:
   - name: division_name
     type: string

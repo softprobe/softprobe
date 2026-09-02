@@ -12,7 +12,7 @@ Parquet variant shredding:
 |-------|---------|
 | `traces` | `attributes` |
 | `logs` | `attributes`, `resource_attributes` |
-| `metrics` | `attributes`, `resource_attributes` |
+| `metric_samples` | `attributes`, `resource_attributes` |
 
 Out of scope (still `MAP(VARCHAR, VARCHAR)`):
 

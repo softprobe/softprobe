@@ -34,7 +34,7 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 
 | Feature | Write / storage | Prometheus query path |
 |---------|-----------------|------------------------|
-| VARIANT on `metrics.attributes` / `resource_attributes` | Yes — JSON staging → `::JSON::VARIANT` on INSERT; typed shredding for a few hot keys (`gen_ai.usage.*_tokens`, `sp.cost.total`) | **Used.** Equality matchers and SELECT project per-key `CAST(col['k'] AS VARCHAR)` (and promoted columns). **No** `CAST(... AS JSON)` on the sample path. |
+| VARIANT on metric-series labels / resource attributes | Yes — JSON staging → `::JSON::VARIANT` on INSERT; typed shredding for a few hot keys (`gen_ai.usage.*_tokens`, `sp.cost.total`) | **Used.** Equality matchers and SELECT project per-key `CAST(col['k'] AS VARCHAR)` (and promoted columns). **No** `CAST(... AS JSON)` on the sample path. |
 | Telemetry column promotion | Opt-in via `POST /v1/promotions/apply`; ingest extracts into typed columns | **Used when applied.** Canonical hot-label manifest [`docs/promotion/metrics-prom-hot-labels.yaml`](../promotion/metrics-prom-hot-labels.yaml); COALESCE(promoted, VARIANT path). Softprobe does not auto-promote arbitrary keys. |
 
 **Implication:** Series identity \(N\) is resolved from reserved aliases ∪ matcher/grouping labels ∪ active promotion sources ∪ cached `ducklake_file_variant_stats` paths (capped). Missing keys yield NULL labels — never a full JSON blob decode. Bare VARIANT SELECT remains unsupported by duckdb-rs.
@@ -152,7 +152,7 @@ bench overlay documents the anti-pattern (1s scrape + `send_batch_size: 8`).
 
 **B4. Write-path Parquet properties** (evaluate): larger row groups; enable bloom filters on `metric_name` / promoted columns **if** DuckLake/Parquet path honors them on read. Prototype behind a measured A/B — do not assume Iceberg-era bloom docs still apply.
 
-**Exit criteria:** Under sustained demo ingest, metrics table median data file size trends toward target (or inlining absorbs small batches); file count plateaus with maintenance on.
+**Exit criteria:** Under sustained demo ingest, the metrics-family median data-file size trends toward target (or inlining absorbs small batches); file count plateaus with maintenance on.
 
 ### Phase C — Caching and Grafana-friendly behavior
 

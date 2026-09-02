@@ -203,7 +203,14 @@ impl Log {
         log_record
             .body
             .as_ref()
-            .and_then(crate::models::any_value_to_stored_string)
+            .and_then(|value| match value.value.as_ref() {
+                Some(
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::ArrayValue(_)
+                    | opentelemetry_proto::tonic::common::v1::any_value::Value::KvlistValue(_),
+                ) => crate::models::any_value_to_json(value)
+                    .and_then(|json| serde_json::to_string(&json).ok()),
+                _ => crate::models::any_value_to_stored_string(value),
+            })
     }
 }
 
@@ -299,6 +306,34 @@ mod tests {
         let ra = HashMap::new();
         let log = Log::from_otlp(lr, &ra).expect("from_otlp");
         assert_eq!(log.body, "body");
+    }
+
+    #[test]
+    fn from_otlp_structured_body_is_plain_json() {
+        use opentelemetry_proto::tonic::common::v1::{
+            any_value, AnyValue, ArrayValue, KeyValue, KeyValueList,
+        };
+        let lr = LogRecord {
+            time_unix_nano: 1,
+            body: Some(AnyValue {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: vec![KeyValue {
+                        key: "attempt".into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                                values: vec![AnyValue {
+                                    value: Some(any_value::Value::IntValue(1)),
+                                }],
+                            })),
+                        }),
+                    }],
+                })),
+            }),
+            ..Default::default()
+        };
+        let log = Log::from_otlp(lr, &HashMap::new()).expect("from_otlp");
+        assert_eq!(log.body, r#"{"attempt":[1]}"#);
+        assert!(!log.body.starts_with(crate::models::NESTED_JSON_PREFIX));
     }
 
     #[test]

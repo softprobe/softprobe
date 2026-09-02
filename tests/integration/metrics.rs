@@ -7,7 +7,6 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message;
 use reqwest::Client;
 use reqwest::StatusCode;
-use std::time::Duration;
 
 use crate::util::http::start_test_server;
 
@@ -155,34 +154,6 @@ async fn test_metrics_ingestion_json() {
     assert_eq!(json["success"], true);
     assert_eq!(json["ingested_count"], 2);
     println!("Response: {}", json);
-}
-
-#[tokio::test]
-async fn test_metrics_buffer_flush() {
-    let (base_url, _cache_dir) = start_test_server().await;
-    let client = Client::new();
-
-    // Send multiple metric requests
-    for i in 0..5 {
-        let request = create_test_metrics_request();
-        let body = request.encode_to_vec();
-
-        let response = client
-            .post(&format!("{}/v1/metrics", base_url))
-            .header("Content-Type", "application/x-protobuf")
-            .body(body)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        println!("Sent batch {}", i + 1);
-    }
-
-    // Wait for buffer flush (60 seconds max, but should flush much sooner due to size)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    println!("Metrics successfully buffered and flushed");
 }
 
 #[tokio::test]

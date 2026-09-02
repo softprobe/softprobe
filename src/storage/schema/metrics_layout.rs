@@ -30,6 +30,8 @@ metric_name VARCHAR, \
 metric_type VARCHAR, \
 unit VARCHAR, \
 description VARCHAR, \
+aggregation_temporality VARCHAR, \
+is_monotonic BOOLEAN, \
 labels VARIANT, \
 record_date DATE",
         sorted_by: "metric_name, series_id",
@@ -232,7 +234,7 @@ pub fn ensure_metrics_layout_table(
 /// Maintenance compaction/expire targets for the metrics family (AC-M1).
 ///
 /// Order matches §7.2: raw/index first, then downsample/collapse. Does not include
-/// legacy fat `metrics` or traces/logs/scores.
+/// obsolete wide metric layout or traces/logs/scores.
 pub const MAINTENANCE_METRICS_FAMILY_TABLES: &[&str] = &[
     "metric_samples",
     "metric_postings",
@@ -284,8 +286,8 @@ pub fn apply_metrics_layout_partition_sort(
 
 /// Compatibility SELECT body for public `union_metrics` / `committed_metrics` (AC-D4 / §6.7).
 ///
-/// Joins skinny samples (+ hist) to `metric_series`. Column list matches fat `metrics` so
-/// existing SQL / telemetry / Prom scanners keep working without dual-writing fat rows.
+/// Joins skinny samples (+ hist) to `metric_series`. Column list preserves the
+/// existing SQL / telemetry / Prom scanners keep working without duplicate writes.
 /// `labels` is exposed as both `attributes` and `resource_attributes` ( Prom identity +
 /// original OTel keys are stored on the series VARIANT at ingest).
 pub fn union_metrics_from_layout_sql(catalog_prefix: &str) -> String {

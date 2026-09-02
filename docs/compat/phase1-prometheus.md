@@ -22,7 +22,7 @@ Rules:
 
 - Handlers parse params / call backend / encode only — **no raw SQL** in HTTP.
 - Tenant only from `Extension<TenantInfo>` / `AppState::engine_for_tenant`.
-- SQL reads the rewritten `union_metrics` relation (not bare `metrics`).
+- SQL reads the canonical `metric_samples` relation.
 - Unsupported AST → `unsupported_feature` via `compat::envelopes`.
 - Scan / series / label-value caps fail loud (`limit_exceeded`); invalid matcher regex → `bad_data`.
 - **`query_range` / PromQL range eval:** one DuckDB fetch per unique selector

@@ -3,4 +3,4 @@
 
 CREATE OR REPLACE VIEW traces AS SELECT * FROM softprobe.softprobe.traces;
 CREATE OR REPLACE VIEW logs AS SELECT * FROM softprobe.softprobe.logs;
-CREATE OR REPLACE VIEW metrics AS SELECT * FROM softprobe.softprobe.metrics;
+CREATE OR REPLACE VIEW metric_samples AS SELECT * FROM softprobe.softprobe.metric_samples;

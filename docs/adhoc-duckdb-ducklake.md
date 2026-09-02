@@ -23,7 +23,7 @@ If `CONFIG_FILE` is wrong, you will ATTACH to an empty or wrong schema and see n
 make duckdb-shell
 ```
 
-The script prints the resolved config path and DuckLake scope from the generated init header, adds **`traces` / `logs` / `metrics` views only when those tables exist**, and runs a **`SELECT 1`** smoke before the REPL.
+The script prints the resolved config path and DuckLake scope from the generated init header, adds **`traces` / `logs` / `metric_samples` views only when those tables exist**, and runs a **`SELECT 1`** smoke before the REPL.
 
 ## Manual ATTACH (reference)
 
