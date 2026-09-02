@@ -1016,14 +1016,15 @@ pub fn compile_scores_for_trace_sql(
 ) -> Result<String, String> {
     let mut span_conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     push_optional_time_bounds(&mut span_conditions, from, to)?;
+    let predicate = format!(
+        "trace_id = {trace} OR span_id IN (SELECT span_id FROM union_spans WHERE {span_where})",
+        trace = sql_string_literal(trace_id),
+        span_where = span_conditions.join(" AND ")
+    );
     Ok(format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = format!(
-            "trace_id = {trace} OR span_id IN (SELECT span_id FROM union_spans WHERE {span_where})",
-            trace = sql_string_literal(trace_id),
-            span_where = span_conditions.join(" AND ")
-        )
+        predicate = predicate
     ))
 }
 
@@ -1041,15 +1042,16 @@ pub fn compile_scores_for_session_sql(
         from_ts = timestamp_ns_literal(&from),
         to_ts = timestamp_ns_literal(&to),
     );
+    let predicate = format!(
+        "session_id = {session} \
+         OR trace_id IN (SELECT DISTINCT trace_id FROM union_spans WHERE {member_filter}) \
+         OR span_id IN (SELECT span_id FROM union_spans WHERE {member_filter})",
+        session = sql_string_literal(session_id),
+    );
     Ok(format!(
         "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = format!(
-            "session_id = {session} \
-             OR trace_id IN (SELECT DISTINCT trace_id FROM union_spans WHERE {member_filter}) \
-             OR span_id IN (SELECT span_id FROM union_spans WHERE {member_filter})",
-            session = sql_string_literal(session_id),
-        )
+        predicate = predicate
     ))
 }
 
