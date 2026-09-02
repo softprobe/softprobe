@@ -367,17 +367,23 @@ query:
   cache_dir: "$STATE_DIR/cache"
 
 # Demo: maintenance ON so TWCS keeps open-day Parquet near the file cap (PromQL
-# SLO). Compact every 15s (collector batches every 60s) so live file count stays
-# near TWCS_OPEN_DAY_FILE_CAP=2. Dual-write is allowlisted to avoid HTTP 503.
+# SLO). Compact every 30s (aligned with ingest batching) with lower wave caps
+# so the demo stack does not peg CPU on no-progress merge waves.
 maintenance:
   enabled: true
   target_file_size_bytes: 67108864
-  interval_seconds: 15
+  interval_seconds: 30
   metadata_enabled: true
   metadata_interval_seconds: 30
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 60
+  open_day_file_cap: 4
+  max_waves_per_table: 8
+  max_compacted_files_per_wave: 32
+  closed_day_max_compacted_files: 256
+  closed_day_max_waves: 64
+  max_merge_file_size_bytes: 8388608
 
 ducklake:
   catalog_type: "postgres"

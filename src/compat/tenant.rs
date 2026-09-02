@@ -362,8 +362,10 @@ mod tests {
 
     #[test]
     fn validate_time_range_rejects_when_cap_configured() {
-        let mut limits = QueryLimits::default();
-        limits.max_query_range_seconds = 86_400;
+        let limits = QueryLimits {
+            max_query_range_seconds: 86_400,
+            ..QueryLimits::default()
+        };
         let err = limits
             .validate_time_range_ms(Some(0), Some(200_000_000))
             .expect_err("must reject when cap > 0");

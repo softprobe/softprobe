@@ -8,13 +8,12 @@
 //! Integration `T-F6` proves live files stay single-day after merge; if that fails,
 //! do not claim AC-F6.
 
+use crate::config::MaintenanceConfig;
 use chrono::NaiveDate;
 
 /// Closed-day merge if more than this many live files (complete compact → 1 file).
 pub const TWCS_TRIGGER_FILE_NUM: usize = 2;
-/// After a maintenance pass, today's open-day live sample files must be ≤ this (AC-F4).
-/// Keep this tiny: Grafana PromQL pays ~3–5ms per open Parquet file on the query
-/// path (Greptime-style “few SSTs”); 40–60 open-day files alone blow the 100ms SLO.
+/// Default open-day live file soft cap (AC-F4). Override via `MaintenanceConfig`.
 pub const TWCS_OPEN_DAY_FILE_CAP: usize = 2;
 
 /// Live Parquet stats for one `record_date` partition.
@@ -53,12 +52,13 @@ pub fn should_merge_partition(
     stats: &PartitionFileStats,
     kind: DayKind,
     size_pressure: bool,
+    policy: &TwcsPolicy,
 ) -> bool {
     match kind {
         DayKind::Closed => {
             !closed_day_meets_file_bar(stats.live_file_count, stats.total_bytes) || size_pressure
         }
-        DayKind::Open => stats.live_file_count > TWCS_OPEN_DAY_FILE_CAP,
+        DayKind::Open => stats.live_file_count > policy.open_day_file_cap,
     }
 }
 
@@ -73,43 +73,71 @@ pub struct TwcsMergeAction {
     pub sql: String,
 }
 
+pub fn ducklake_merge_adjacent_files_sql(
+    catalog_alias: &str,
+    table: &str,
+    schema: &str,
+    max_compacted_files: Option<u64>,
+    max_file_size_bytes: Option<u64>,
+) -> String {
+    let mut args = format!("schema => '{schema}'");
+    if let Some(max_compacted_files) = max_compacted_files {
+        args.push_str(&format!(", max_compacted_files => {max_compacted_files}"));
+    }
+    if let Some(max_file_size_bytes) = max_file_size_bytes {
+        args.push_str(&format!(", max_file_size => {max_file_size_bytes}"));
+    }
+    format!("CALL ducklake_merge_adjacent_files('{catalog_alias}', '{table}', {args});")
+}
+
 /// Bounded merge CALL Softprobe actually executes (AC-Q9 wave size).
-///
-/// No `record_date =` filter string: that would be audit theater — DuckLake does
-/// not accept `partition_filter` in our shipped extension. Partition locality is
-/// a DuckLake invariant under `PARTITIONED BY (record_date)` (T-F6).
 pub fn twcs_merge_sql(
     catalog_alias: &str,
     table: &str,
     schema: &str,
     max_compacted_files: u64,
+    policy: &TwcsPolicy,
 ) -> String {
-    format!(
-        "CALL ducklake_merge_adjacent_files('{catalog_alias}', '{table}', \
-schema => '{schema}', max_compacted_files => {max_compacted_files});"
+    ducklake_merge_adjacent_files_sql(
+        catalog_alias,
+        table,
+        schema,
+        Some(max_compacted_files),
+        Some(policy.max_merge_file_size_bytes),
     )
+}
+
+/// Inputs for [`plan_twcs_merges`].
+#[derive(Debug, Clone, Copy)]
+pub struct TwcsMergePlan<'a> {
+    pub table: &'a str,
+    pub catalog_alias: &'a str,
+    pub schema: &'a str,
+    pub partitions: &'a [PartitionFileStats],
+    pub today: NaiveDate,
+    pub size_pressure: bool,
+    pub max_compacted_files: u64,
+    pub policy: &'a TwcsPolicy,
 }
 
 /// Build per-day merge actions for one table. Each action covers exactly one
 /// `record_date` — planning never combines two days into one intent (AC-F6).
-pub fn plan_twcs_merges(
-    table: &str,
-    catalog_alias: &str,
-    schema: &str,
-    partitions: &[PartitionFileStats],
-    today: NaiveDate,
-    size_pressure: bool,
-    max_compacted_files: u64,
-) -> Vec<TwcsMergeAction> {
-    let sql = twcs_merge_sql(catalog_alias, table, schema, max_compacted_files);
+pub fn plan_twcs_merges(plan: &TwcsMergePlan<'_>) -> Vec<TwcsMergeAction> {
+    let sql = twcs_merge_sql(
+        plan.catalog_alias,
+        plan.table,
+        plan.schema,
+        plan.max_compacted_files,
+        plan.policy,
+    );
     let mut actions = Vec::new();
-    for stats in partitions {
-        let kind = day_kind(stats.record_date, today);
-        if !should_merge_partition(stats, kind, size_pressure) {
+    for stats in plan.partitions {
+        let kind = day_kind(stats.record_date, plan.today);
+        if !should_merge_partition(stats, kind, plan.size_pressure, plan.policy) {
             continue;
         }
         actions.push(TwcsMergeAction {
-            table: table.to_string(),
+            table: plan.table.to_string(),
             record_date: stats.record_date,
             sql: sql.clone(),
         });
@@ -174,7 +202,6 @@ pub fn live_data_file_paths_sql(catalog_alias: &str, table: &str) -> String {
 /// Small open-day CALL when already close to the AC-F4 cap (AC-Q9).
 pub const TWCS_MAX_COMPACTED_FILES_PER_WAVE: u64 = 32;
 /// Open-day wave cap per table per maintenance pass (AC-F4).
-/// Must drain a live ingest storm (~2k files) in one pass; do not stop at 8×32.
 pub const TWCS_MAX_WAVES_PER_TABLE: usize = 32;
 
 /// Closed-day files per merge CALL. Must be ≥ open-day 32 so leftover thousands
@@ -184,25 +211,61 @@ pub const TWCS_CLOSED_DAY_MAX_COMPACTED_FILES: u64 = 256;
 /// files in one maintenance pass without an unbounded loop.
 pub const TWCS_CLOSED_DAY_MAX_WAVES: usize = 64;
 
-/// Files one closed-day pass can compact (`waves × files/wave`).
-pub fn closed_day_file_capacity() -> u64 {
-    TWCS_CLOSED_DAY_MAX_WAVES as u64 * TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+/// TWCS merge policy knobs (from `MaintenanceConfig` at runtime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwcsPolicy {
+    pub open_day_file_cap: usize,
+    pub max_waves_per_table: usize,
+    pub max_compacted_files_per_wave: u64,
+    pub closed_day_max_compacted_files: u64,
+    pub closed_day_max_waves: usize,
+    pub max_merge_file_size_bytes: u64,
 }
 
-/// Files one open-day pass can compact. Uses the large CALL size when the
-/// table is over 256 live files so Grafana demos cannot outrun TWCS.
-pub fn open_day_file_capacity() -> u64 {
-    TWCS_MAX_WAVES_PER_TABLE as u64 * TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+impl Default for TwcsPolicy {
+    fn default() -> Self {
+        Self {
+            open_day_file_cap: TWCS_OPEN_DAY_FILE_CAP,
+            max_waves_per_table: TWCS_MAX_WAVES_PER_TABLE,
+            max_compacted_files_per_wave: TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+            closed_day_max_compacted_files: TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+            closed_day_max_waves: TWCS_CLOSED_DAY_MAX_WAVES,
+            max_merge_file_size_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+impl From<&MaintenanceConfig> for TwcsPolicy {
+    fn from(m: &MaintenanceConfig) -> Self {
+        Self {
+            open_day_file_cap: m.open_day_file_cap,
+            max_waves_per_table: m.max_waves_per_table,
+            max_compacted_files_per_wave: m.max_compacted_files_per_wave,
+            closed_day_max_compacted_files: m.closed_day_max_compacted_files,
+            closed_day_max_waves: m.closed_day_max_waves,
+            max_merge_file_size_bytes: m.max_merge_file_size_bytes,
+        }
+    }
+}
+
+/// Files one closed-day pass can compact (`waves × files/wave`).
+pub fn closed_day_file_capacity(policy: &TwcsPolicy) -> u64 {
+    policy.closed_day_max_waves as u64 * policy.closed_day_max_compacted_files
 }
 
 /// Per-CALL bound for an open-day wave. Tiny leftover (≤256 files) keeps the
-/// small 32-file CALL; a storm uses the closed-day 256-file CALL.
-pub fn open_day_max_compacted_files(live_files: usize) -> u64 {
-    if live_files > TWCS_CLOSED_DAY_MAX_COMPACTED_FILES as usize {
-        TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+/// small CALL size; a storm uses the closed-day CALL size.
+pub fn open_day_max_compacted_files(live_files: usize, policy: &TwcsPolicy) -> u64 {
+    if live_files > policy.closed_day_max_compacted_files as usize {
+        policy.closed_day_max_compacted_files
     } else {
-        TWCS_MAX_COMPACTED_FILES_PER_WAVE
+        policy.max_compacted_files_per_wave
     }
+}
+
+/// Files one open-day pass can compact in a single maintenance pass.
+pub fn open_day_file_capacity(policy: &TwcsPolicy) -> u64 {
+    policy.max_waves_per_table as u64 * policy.closed_day_max_compacted_files
 }
 
 /// Live open-day file total. Per-day partition stats can undercount right
@@ -284,10 +347,23 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
+    fn policy() -> TwcsPolicy {
+        TwcsPolicy::default()
+    }
+
+    #[test]
+    fn twcs_policy_matches_maintenance_config_defaults() {
+        assert_eq!(
+            TwcsPolicy::default(),
+            TwcsPolicy::from(&MaintenanceConfig::default())
+        );
+    }
+
     #[test]
     fn closed_day_triggers_at_two_files() {
         let today = d(2026, 8, 15);
         let day = d(2026, 8, 14);
+        let p = policy();
         let one = PartitionFileStats {
             record_date: day,
             live_file_count: 1,
@@ -299,16 +375,26 @@ mod tests {
             total_bytes: 1_000,
         };
         assert_eq!(TWCS_TRIGGER_FILE_NUM, 2);
-        assert!(!should_merge_partition(&one, day_kind(day, today), false));
-        assert!(should_merge_partition(&two, day_kind(day, today), false));
-        assert!(should_merge_partition(&one, day_kind(day, today), true));
+        assert!(!should_merge_partition(
+            &one,
+            day_kind(day, today),
+            false,
+            &p
+        ));
+        assert!(should_merge_partition(
+            &two,
+            day_kind(day, today),
+            false,
+            &p
+        ));
+        assert!(should_merge_partition(&one, day_kind(day, today), true, &p));
         let two_over_target = PartitionFileStats {
             record_date: day,
             live_file_count: 2,
             total_bytes: 65 * 1024 * 1024,
         };
         assert!(
-            !should_merge_partition(&two_over_target, day_kind(day, today), false),
+            !should_merge_partition(&two_over_target, day_kind(day, today), false, &p),
             "AC-F8: two files over 64 MiB already meet the bar"
         );
     }
@@ -324,6 +410,7 @@ mod tests {
     #[test]
     fn open_day_triggers_only_above_cap() {
         let today = d(2026, 8, 15);
+        let p = policy();
         let under = PartitionFileStats {
             record_date: today,
             live_file_count: TWCS_OPEN_DAY_FILE_CAP,
@@ -335,8 +422,8 @@ mod tests {
             total_bytes: 1_000,
         };
         assert_eq!(day_kind(today, today), DayKind::Open);
-        assert!(!should_merge_partition(&under, DayKind::Open, false));
-        assert!(should_merge_partition(&over, DayKind::Open, false));
+        assert!(!should_merge_partition(&under, DayKind::Open, false, &p));
+        assert!(should_merge_partition(&over, DayKind::Open, false, &p));
     }
 
     /// AC-F6 planner: one action per `record_date`; never a combined multi-day intent.
@@ -355,15 +442,17 @@ mod tests {
                 total_bytes: 20_000_000,
             },
         ];
-        let actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let p = policy();
+        let actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            TWCS_MAX_COMPACTED_FILES_PER_WAVE,
-        );
+            size_pressure: false,
+            max_compacted_files: TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+            policy: &p,
+        });
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].record_date, d(2026, 8, 13));
         assert_eq!(actions[1].record_date, d(2026, 8, 14));
@@ -377,6 +466,10 @@ mod tests {
                 action.sql.contains("max_compacted_files"),
                 "AC-Q9: wave must be bounded"
             );
+            assert!(
+                action.sql.contains("max_file_size"),
+                "merge must skip already-sized files"
+            );
             // Honesty: no fake partition_filter / comment claiming a day filter.
             assert!(
                 !action.sql.contains("partition_filter"),
@@ -387,15 +480,16 @@ mod tests {
                 "do not emit unused record_date= filter theater"
             );
         }
-        let closed_actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let closed_actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
-        );
+            size_pressure: false,
+            max_compacted_files: TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+            policy: &p,
+        });
         assert_eq!(
             closed_actions.len(),
             2,
@@ -425,26 +519,24 @@ mod tests {
             live_file_count: 1,
             total_bytes: 100,
         }];
-        let actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            32,
-        );
+            size_pressure: false,
+            max_compacted_files: 32,
+            policy: &policy(),
+        });
         assert!(actions.is_empty());
     }
 
     /// AC-F8: 64 × 256 files/wave can compact ~10k leftover closed-day files.
     #[test]
     fn closed_day_wave_budget_covers_ten_thousand_files() {
-        assert!(
-            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES >= TWCS_MAX_COMPACTED_FILES_PER_WAVE,
-            "closed-day files/wave must be ≥ open-day 32"
-        );
-        let cap = closed_day_file_capacity();
+        let p = policy();
+        let cap = closed_day_file_capacity(&p);
         assert!(
             cap >= 10_000,
             "AC-F8: closed-day cap {cap} cannot finish 10k leftover files \
@@ -452,16 +544,16 @@ mod tests {
             TWCS_CLOSED_DAY_MAX_WAVES,
             TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
         );
-        assert!(cap > open_day_file_capacity());
+        assert!(cap > open_day_file_capacity(&p));
         assert!(
-            open_day_file_capacity() >= 2000,
+            open_day_file_capacity(&p) >= 2000,
             "AC-F4: open-day cap {} cannot drain a ~2k-file ingest storm in one pass",
-            open_day_file_capacity()
+            open_day_file_capacity(&p)
         );
         assert_eq!(TWCS_MAX_WAVES_PER_TABLE, 32);
         assert_eq!(TWCS_MAX_COMPACTED_FILES_PER_WAVE, 32);
-        assert_eq!(open_day_max_compacted_files(25), 32);
-        assert_eq!(open_day_max_compacted_files(1774), 256);
+        assert_eq!(open_day_max_compacted_files(25, &p), 32);
+        assert_eq!(open_day_max_compacted_files(1774, &p), 256);
     }
 
     #[test]

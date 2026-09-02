@@ -142,6 +142,9 @@ default = []
 # MinIO + full ingest/query integration tests
 integration-e2e = []
 
+[lints.rust]
+warnings = "deny"
+
 [[test]]
 name = "integration_perf"
 path = "tests/integration_perf.rs"

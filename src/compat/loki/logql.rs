@@ -36,6 +36,18 @@ pub fn parse_logql(query: &str) -> Result<LogsQueryRequest, CompatError> {
             s if s.starts_with("unwrap ") => {
                 return Err(unsupported("LogQL unwrap"));
             }
+            s if s.starts_with("drop ") => {
+                let label = s["drop ".len()..].trim();
+                if label.is_empty() {
+                    return Err(bad("drop requires a label name"));
+                }
+                if label != "__error__" {
+                    return Err(unsupported("LogQL drop"));
+                }
+                // Grafana Explore logs volume appends `| drop __error__` after
+                // builder filters. Parser errors are not surfaced as labels yet,
+                // so drop is a no-op until json/logfmt error labeling exists.
+            }
             s if s.starts_with('=')
                 || s.starts_with("!=")
                 || s.starts_with('~')
@@ -614,5 +626,22 @@ mod tests {
             request.line_filters,
             vec![LogLineFilter::Contains("failed|timeout".into())]
         );
+    }
+
+    #[test]
+    fn parses_drop_error_stage_as_noop() {
+        let request =
+            parse_logql(r#"{service_name="load-generator"} |= `` | drop __error__"#).unwrap();
+        assert_eq!(
+            request.line_filters,
+            vec![LogLineFilter::Contains(String::new())]
+        );
+    }
+
+    #[test]
+    fn rejects_drop_of_non_error_labels() {
+        let err = parse_logql(r#"{job="api"} | drop service_name"#).unwrap_err();
+        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+        assert_eq!(err.message, "LogQL drop");
     }
 }

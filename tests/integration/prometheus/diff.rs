@@ -80,18 +80,19 @@ fn runner_cases_for_selection(
         .collect()
 }
 
+#[allow(clippy::needless_borrow)]
 fn write_prometheus_artifacts(
     case: &PromDiffCase,
-    lake_raw: Option<&Value>,
-    oracle_raw: Option<&Value>,
+    lake_raw: &Value,
+    oracle_raw: &Value,
 ) -> std::io::Result<PathBuf> {
     crate::compat_support::lifecycle::write_failure_artifacts(
         "prometheus",
         &case.id,
         &case.path,
         &case.params,
-        lake_raw,
-        oracle_raw,
+        Some(lake_raw),
+        Some(oracle_raw),
         normalize_prom_response,
         "PROMETHEUS_RAW_ARTIFACT",
         "PROMETHEUS_NORMALIZED_ARTIFACT",
@@ -233,7 +234,7 @@ async fn mini_diff_vs_pinned_prometheus() {
         executed.insert(descriptor.case_id.clone());
 
         if status != StatusCode::OK || lake_raw["status"] != "success" {
-            let artifacts = write_prometheus_artifacts(&case, Some(&lake_raw), Some(&oracle_raw))
+            let artifacts = write_prometheus_artifacts(case, &lake_raw, &oracle_raw)
                 .expect("write Prometheus failure artifacts");
             recorder
                 .record_case(descriptor, "failure", "softprobe_http_or_envelope_failure")
@@ -247,7 +248,7 @@ async fn mini_diff_vs_pinned_prometheus() {
             );
         }
         if oracle_raw["status"] != "success" {
-            let artifacts = write_prometheus_artifacts(&case, Some(&lake_raw), Some(&oracle_raw))
+            let artifacts = write_prometheus_artifacts(case, &lake_raw, &oracle_raw)
                 .expect("write Prometheus failure artifacts");
             recorder
                 .record_case(descriptor, "failure", "oracle_failure")
@@ -264,7 +265,7 @@ async fn mini_diff_vs_pinned_prometheus() {
         let oracle_n = normalize_prom_response(oracle_raw.clone());
         let lake_n = normalize_prom_response(lake_raw.clone());
         if lake_n != oracle_n {
-            let artifacts = write_prometheus_artifacts(&case, Some(&lake_raw), Some(&oracle_raw))
+            let artifacts = write_prometheus_artifacts(case, &lake_raw, &oracle_raw)
                 .expect("write Prometheus failure artifacts");
             recorder
                 .record_case(descriptor, "failure", "normalized_mismatch")
@@ -278,7 +279,7 @@ async fn mini_diff_vs_pinned_prometheus() {
             );
         }
 
-        write_prometheus_artifacts(&case, Some(&lake_raw), Some(&oracle_raw))
+        write_prometheus_artifacts(case, &lake_raw, &oracle_raw)
             .expect("write Prometheus differential artifacts");
         recorder
             .record_case(descriptor, "pass", "matched")

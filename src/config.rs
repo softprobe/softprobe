@@ -177,6 +177,24 @@ pub struct MaintenanceConfig {
     pub remove_orphan_files_enabled: bool,
     #[serde(default = "default_remove_orphan_older_than_seconds")]
     pub remove_orphan_older_than_seconds: u64,
+    /// Open-day live Parquet file soft cap before TWCS merges (AC-F4).
+    #[serde(default = "default_open_day_file_cap")]
+    pub open_day_file_cap: usize,
+    /// Max TWCS merge waves per table per maintenance pass (open day).
+    #[serde(default = "default_max_waves_per_table")]
+    pub max_waves_per_table: usize,
+    /// `max_compacted_files` for a single open-day merge CALL when near the cap.
+    #[serde(default = "default_max_compacted_files_per_wave")]
+    pub max_compacted_files_per_wave: u64,
+    /// `max_compacted_files` for closed-day merge CALLs.
+    #[serde(default = "default_closed_day_max_compacted_files")]
+    pub closed_day_max_compacted_files: u64,
+    /// Max closed-day TWCS waves per table per pass.
+    #[serde(default = "default_closed_day_max_waves")]
+    pub closed_day_max_waves: usize,
+    /// Only merge live files smaller than this (`max_file_size` on DuckLake merge).
+    #[serde(default = "default_max_merge_file_size_bytes")]
+    pub max_merge_file_size_bytes: u64,
 }
 
 impl Default for MaintenanceConfig {
@@ -190,6 +208,12 @@ impl Default for MaintenanceConfig {
             max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
             remove_orphan_files_enabled: true,
             remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
+            open_day_file_cap: default_open_day_file_cap(),
+            max_waves_per_table: default_max_waves_per_table(),
+            max_compacted_files_per_wave: default_max_compacted_files_per_wave(),
+            closed_day_max_compacted_files: default_closed_day_max_compacted_files(),
+            closed_day_max_waves: default_closed_day_max_waves(),
+            max_merge_file_size_bytes: default_max_merge_file_size_bytes(),
         }
     }
 }
@@ -220,6 +244,30 @@ fn default_max_snapshot_age_seconds() -> u64 {
 
 fn default_remove_orphan_older_than_seconds() -> u64 {
     60
+}
+
+fn default_open_day_file_cap() -> usize {
+    2
+}
+
+fn default_max_waves_per_table() -> usize {
+    32
+}
+
+fn default_max_compacted_files_per_wave() -> u64 {
+    32
+}
+
+fn default_closed_day_max_compacted_files() -> u64 {
+    256
+}
+
+fn default_closed_day_max_waves() -> usize {
+    64
+}
+
+fn default_max_merge_file_size_bytes() -> u64 {
+    8 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +504,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use crate::compaction::twcs::TwcsPolicy;
     use std::sync::Mutex;
 
     static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -477,6 +526,13 @@ mod tests {
         assert_eq!(c.maintenance.metadata_interval_seconds, 60);
         assert!(c.maintenance.enabled);
         assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
+        assert_eq!(c.maintenance.open_day_file_cap, 2);
+        assert_eq!(c.maintenance.max_waves_per_table, 32);
+        assert_eq!(c.maintenance.max_compacted_files_per_wave, 32);
+        assert_eq!(c.maintenance.closed_day_max_compacted_files, 256);
+        assert_eq!(c.maintenance.closed_day_max_waves, 64);
+        assert_eq!(c.maintenance.max_merge_file_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(TwcsPolicy::from(&c.maintenance), TwcsPolicy::default());
     }
 
     /// AC-N1 / T-N1: default snapshot retention is 60s, not 7d (or 1h).

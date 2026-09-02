@@ -720,10 +720,8 @@ mod tests {
 
     #[test]
     fn insert_chunk_is_one_parquet_per_otlp_batch_not_hundreds() {
-        assert!(
-            INSERT_CHUNK >= 65536,
-            "each INSERT is a DuckLake parquet file; small chunks explode postings on demo ingest"
-        );
+        // INSERT_CHUNK is 65536 — one DuckLake parquet file per OTLP batch, not per row.
+        assert_eq!(INSERT_CHUNK, 65536);
     }
 
     fn attach_ducklake(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {

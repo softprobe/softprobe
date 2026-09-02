@@ -29,6 +29,7 @@ pub const PHASE2_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
 pub const FIXTURE_LAG_NS: i64 = 1_000_000_000;
 
 /// Current UNIX epoch nanoseconds (test-clock helper for time-shift math).
+#[cfg(feature = "integration-e2e")]
 pub fn system_time_now_ns() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -672,7 +673,7 @@ fn wait_loki_result_with_probe(
     mut probe: impl FnMut(&str) -> LokiProbeObservation,
 ) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let mut last_observed = String::from("no response");
+    let mut last_observed;
 
     loop {
         let observation = probe(url);

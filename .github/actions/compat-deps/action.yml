@@ -1,17 +1,41 @@
 name: Ensure compatibility toolchain
-description: Install ruby/python3/curl on self-hosted runners when missing.
+description: Bootstrap GitHub-hosted ubuntu-latest runners (Rust + CI packages).
 runs:
   using: composite
   steps:
-    - name: Ensure ruby/python3/curl
+    - name: Restore Cargo cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ env.HOME }}/.cache/thelake/cargo
+          ${{ env.HOME }}/.cache/thelake/target
+        key: thelake-${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+        restore-keys: |
+          thelake-${{ runner.os }}-rust-
+
+    - name: Prepare cache directories
+      shell: bash
+      run: mkdir -p "$HOME/.cache/thelake/cargo" "$HOME/.cache/thelake/target"
+
+    - name: Install system packages
       shell: bash
       run: |
         set -euo pipefail
-        missing=()
-        command -v ruby >/dev/null 2>&1 || missing+=("ruby-full")
-        command -v python3 >/dev/null 2>&1 || missing+=("python3")
-        command -v curl >/dev/null 2>&1 || missing+=("curl")
-        if [ "${#missing[@]}" -gt 0 ]; then
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
-        fi
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          build-essential \
+          clang \
+          cmake \
+          curl \
+          mold \
+          pkg-config \
+          libssl-dev \
+          protobuf-compiler \
+          python3 \
+          ripgrep \
+          ruby-full
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy

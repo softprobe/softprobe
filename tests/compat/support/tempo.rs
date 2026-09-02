@@ -704,7 +704,7 @@ impl TempoOracle {
     pub fn wait_for_search_case(&self, case: &TempoCase, timeout: std::time::Duration) {
         let url = tempo_case_url(&self.base, case);
         let start = std::time::Instant::now();
-        let mut last_observed = String::from("no response");
+        let mut last_observed;
 
         loop {
             let observation = std::process::Command::new("curl")

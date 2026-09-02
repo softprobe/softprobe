@@ -5,7 +5,8 @@ use crate::compaction::downsample::{count_sql, downsample_1h_from_raw_sql, downs
 use crate::compaction::executor::{cleanup_old_files_sql, expire_snapshots_sql};
 use crate::compaction::twcs::{
     live_data_file_paths_sql, live_files_spanning_record_dates_sql, plan_twcs_merges,
-    twcs_merge_sql, PartitionFileStats, TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+    twcs_merge_sql, PartitionFileStats, TwcsMergePlan, TwcsPolicy,
+    TWCS_MAX_COMPACTED_FILES_PER_WAVE,
 };
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use chrono::{Duration, NaiveDate, Utc};
@@ -142,11 +143,13 @@ fn downsample_keeps_raw_and_second_pass_is_noop() {
 #[test]
 fn maintenance_merge_waves_are_bounded_for_queries() {
     let day = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+    let policy = TwcsPolicy::default();
     let sql = twcs_merge_sql(
         "softprobe",
         "metric_samples",
         "main",
         TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+        &policy,
     );
     assert!(
         sql.contains(&format!(
@@ -154,19 +157,24 @@ fn maintenance_merge_waves_are_bounded_for_queries() {
         )),
         "AC-Q9: expected bounded wave, got {sql}"
     );
-    let actions = plan_twcs_merges(
-        "metric_samples",
-        "softprobe",
-        "main",
-        &[PartitionFileStats {
+    assert!(sql.contains(&format!(
+        "max_file_size => {}",
+        policy.max_merge_file_size_bytes
+    )));
+    let actions = plan_twcs_merges(&TwcsMergePlan {
+        table: "metric_samples",
+        catalog_alias: "softprobe",
+        schema: "main",
+        partitions: &[PartitionFileStats {
             record_date: day,
             live_file_count: 8,
             total_bytes: 1_000_000,
         }],
-        NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(),
-        false,
-        TWCS_MAX_COMPACTED_FILES_PER_WAVE,
-    );
+        today: NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(),
+        size_pressure: false,
+        max_compacted_files: TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+        policy: &policy,
+    });
     assert_eq!(actions.len(), 1);
     assert!(actions[0].sql.contains("max_compacted_files"));
 }
@@ -219,11 +227,13 @@ fn twcs_merge_keeps_files_single_record_date() {
         "T-F6 precondition: need many live files before merge, got {files_before}"
     );
 
+    let policy = TwcsPolicy::default();
     let merge = twcs_merge_sql(
         &catalog,
         "metric_samples",
         "main",
         TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+        &policy,
     );
     conn.execute_batch(&merge)
         .unwrap_or_else(|e| panic!("T-F6 merge failed: {e}"));

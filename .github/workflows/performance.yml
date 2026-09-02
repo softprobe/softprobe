@@ -1,7 +1,7 @@
 name: Performance Tests
 
 # Manual only — not part of the PR/main CI gate.
-# Warm self-hosted SLO: make test-perf ≤ 8m (hard timeout 15m).
+# Warm SLO: make test-perf ≤ 8m (hard timeout 15m).
 # Quality bar: PERF_TARGET_MS=1000 (warm union_logs p95 < 1s).
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
 jobs:
   performance:
     name: Performance (${{ inputs.suite }})
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       CI: "true"
@@ -42,8 +42,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # Skip dtolnay/rust-toolchain: arc-runner already has rustc/cargo/rustfmt/clippy
-      # (and mold/clang). make doctor fails fast if anything is missing.
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
+
+      - name: Bootstrap ubuntu runner
+        uses: ./.github/actions/ubuntu-runner
+
       - name: Doctor
         run: make doctor
 

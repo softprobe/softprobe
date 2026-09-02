@@ -65,8 +65,10 @@ pub fn downsample_1h_from_5m_sql(catalog_alias: &str) -> String {
            max(last_ts) AS last_ts\n\
          FROM {src}\n\
          WHERE window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND time_bucket(INTERVAL '1 hour', window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
            AND time_bucket(INTERVAL '1 hour', window_ts) > {wm}\n\
-         GROUP BY series_id, time_bucket(INTERVAL '1 hour', window_ts);"
+         GROUP BY series_id, time_bucket(INTERVAL '1 hour', window_ts)\n\
+         HAVING max(window_ts) >= time_bucket(INTERVAL '1 hour', window_ts) + INTERVAL '55 minutes';"
     )
 }
 
@@ -89,6 +91,7 @@ pub fn downsample_1h_from_raw_sql(catalog_alias: &str) -> String {
            max(timestamp) AS last_ts\n\
          FROM {src}\n\
          WHERE timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
+           AND time_bucket(INTERVAL '1 hour', timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
            AND time_bucket(INTERVAL '1 hour', timestamp) > {wm}\n\
          GROUP BY series_id, time_bucket(INTERVAL '1 hour', timestamp);"
     )
@@ -209,6 +212,7 @@ pub fn hist_downsample_1h_from_5m_for_day_sql(
          WITH src AS (\n\
            SELECT * FROM {src}\n\
            WHERE window_ts < now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND time_bucket(INTERVAL '1 hour', window_ts) <= now() - {DOWNSAMPLE_1H_LAG}\n\
              AND time_bucket(INTERVAL '1 hour', window_ts) > {wm}\n\
              {day_filter}\n\
          ),\n\
@@ -221,6 +225,7 @@ pub fn hist_downsample_1h_from_5m_for_day_sql(
              max(last_ts) AS last_ts\n\
            FROM src\n\
            GROUP BY 1, 2\n\
+           HAVING max(window_ts) >= time_bucket(INTERVAL '1 hour', window_ts) + INTERVAL '55 minutes'\n\
          ),\n\
          bucket_parts AS (\n\
            SELECT s.series_id,\n\
@@ -265,6 +270,7 @@ pub fn hist_downsample_1h_from_raw_for_day_sql(
          WITH src AS (\n\
            SELECT * FROM {src}\n\
            WHERE timestamp < now() - {DOWNSAMPLE_1H_LAG}\n\
+             AND time_bucket(INTERVAL '1 hour', timestamp) <= now() - {DOWNSAMPLE_1H_LAG}\n\
              AND time_bucket(INTERVAL '1 hour', timestamp) > {wm}\n\
              {day_filter}\n\
          ),\n\
@@ -323,10 +329,24 @@ mod tests {
         assert!(from_5m.contains("INTERVAL '1 hour'"));
         assert!(from_5m.contains("INSERT INTO softprobe.metric_samples_1h"));
         assert!(from_5m.contains("max(window_ts)"));
+        assert!(
+            from_5m
+                .contains("time_bucket(INTERVAL '1 hour', window_ts) <= now() - INTERVAL '1 hour'"),
+            "1h from 5m must wait for closed hours"
+        );
+        assert!(
+            from_5m.contains("INTERVAL '55 minutes'"),
+            "1h from 5m must wait for last 5m slot in hour"
+        );
 
         let from_raw = downsample_1h_from_raw_sql("softprobe");
         assert!(from_raw.contains("FROM softprobe.metric_samples\n"));
         assert!(from_raw.contains("INTERVAL '1 hour'"));
+        assert!(
+            from_raw
+                .contains("time_bucket(INTERVAL '1 hour', timestamp) <= now() - INTERVAL '1 hour'"),
+            "1h from raw must wait for closed hours"
+        );
     }
 
     /// AC-M2 shape: watermark predicate prevents full rebuild.

@@ -786,8 +786,8 @@ pub struct PostingCacheKey {
     pub label_value: String,
 }
 
-/// Short TTL: Grafana refresh storms hit warm sets; ingest-on stays eventual.
-pub const POSTING_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Grafana refresh storms hit warm sets; long dashboard sweeps need ≥5m TTL.
+pub const POSTING_CACHE_TTL: Duration = Duration::from_secs(300);
 const POSTING_CACHE_MAX: usize = 8192;
 
 #[derive(Clone)]
@@ -1711,7 +1711,8 @@ mod tests {
         let end = 1_700_000_000_000i64;
         let hour = 3_600_000i64;
         let day = 24 * hour;
-        let cases: &[(i64, Option<i64>, &str, fn(&str) -> bool)] = &[
+        type HistPromSqlCase<'a> = (i64, Option<i64>, &'a str, fn(&str) -> bool);
+        let cases: &[HistPromSqlCase<'_>] = &[
             (
                 3 * hour,
                 Some(20_000),

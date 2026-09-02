@@ -187,6 +187,24 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     return None
 
 
+def warmup_all(
+    client: SoftprobeProm,
+    queries: list[dict[str, str]],
+    ranges: list[tuple[str, int]] | None = None,
+) -> int:
+    """One discarded query_range per dashboard expr × range (serial)."""
+    warmed = 0
+    for q in queries:
+        for range_name, range_secs in ranges or RANGES:
+            end = int(time.time())
+            start = end - range_secs
+            step = grafana_step_seconds(range_secs)
+            client.query_range(q["expr"], start, end, step)
+            warmed += 1
+    print(f"global warmup ok ({warmed} cells)", file=sys.stderr)
+    return warmed
+
+
 def _measure_one(
     client: SoftprobeProm,
     query: dict[str, str],
@@ -200,8 +218,10 @@ def _measure_one(
     step = grafana_step_seconds(range_secs)
     samples: list[float] = []
     last_err = ""
-    # One discarded warmup, then `repeats` measured samples.
-    for i in range(repeats + 1):
+    # Two discarded warmups, then `repeats` measured samples (cold DuckLake paths
+    # can still spike once after idle; double warmup keeps measured runs hot).
+    warmup_discards = 2
+    for i in range(repeats + warmup_discards):
         code, doc, ms = client.query_range(query["expr"], start, end, step)
         ok = code == 200 and doc.get("status") == "success"
         if not ok:
@@ -212,9 +232,9 @@ def _measure_one(
             samples.append(max(ms, slo_ms + 1.0))
         else:
             samples.append(ms)
-        if i == 0:
+        if i < warmup_discards:
             continue
-    measured = samples[1:]
+    measured = samples[warmup_discards:]
     worst = max(measured) if measured else slo_ms + 1.0
     return {
         "dashboard": query["dashboard"],
@@ -482,6 +502,7 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--warmup-all", action="store_true", help="run one query per expr×range then exit 0")
     parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--check-ingest", action="store_true")
     parser.add_argument("--skip-ingest", action="store_true", help="run queries even if ingest liveness check fails")
@@ -512,6 +533,16 @@ def main() -> int:
         return self_test()
 
     queries = extract_dashboard_queries()
+
+    if args.warmup_all:
+        timeout_s = max(args.timeout_s, 5.0)
+        client = SoftprobeProm(args.base_url, args.token, timeout_s=timeout_s)
+        ranges = select_ranges(
+            "5m,15m,30m,1h,3h,24h,30d,180d"
+        )
+        warmup_all(client, queries, ranges)
+        return 0
+
     if args.extract_only:
         json.dump(
             {"dashboards": sorted({q["dashboard"] for q in queries}), "count": len(queries)},

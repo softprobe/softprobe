@@ -784,12 +784,12 @@ impl PrefetchBackend {
             }
         }
 
-        // Short panels (≤24h): skip Grafana step-bucketing on prefetch when step is
+        // Short panels (<24h): skip Grafana step-bucketing on prefetch when step is
         // coarse vs scrape cadence or vs a range-vector window — preserves PromQL
-        // parity for 30s scrapes at 1m steps and *_over_time windows. Long panels
-        // still bucket at range/4 when step exceeds [range] to protect the SLO.
+        // parity for 30s scrapes at 1m steps and *_over_time windows. Exactly 24h
+        // must bucket (Grafana step ~78s); unbucketed k6 raw scans exceed scan_cap.
         let query_span_ms = (end_ms - start_ms).abs();
-        let effective_step = if query_span_ms <= crate::compat::backends::grain::RAW_RANGE_MS
+        let effective_step = if query_span_ms < crate::compat::backends::grain::RAW_RANGE_MS
             && (min_range_window.is_some() || step_ms > 30_000)
         {
             None
@@ -2141,6 +2141,95 @@ mod tests {
         assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
         assert_eq!(*backend.last_start.lock().unwrap(), Some(-240_000));
         assert_eq!(*backend.last_end.lock().unwrap(), Some(120_000));
+    }
+
+    #[tokio::test]
+    async fn prefetch_buckets_at_24h_but_not_just_under() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CaptureBackend {
+            calls: AtomicUsize,
+            last_step: std::sync::Mutex<Option<i64>>,
+            series: Vec<MetricSeries>,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CaptureBackend {
+            async fn query_range(
+                &self,
+                _ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                *self.last_step.lock().unwrap() = request.step_ms;
+                Ok(self.series.clone())
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("__name__".into(), "k6_http_reqs".into());
+        let series = vec![MetricSeries {
+            labels,
+            samples: vec![Sample {
+                timestamp_ms: 0,
+                value: 1.0,
+            }],
+        }];
+        let expr = parse_promql("sum(k6_http_reqs)").unwrap();
+        let day_ms = 24 * 60 * 60 * 1000i64;
+        let step_ms = 78_000i64;
+        let end = 1_700_000_000_000i64;
+
+        let under = CaptureBackend {
+            calls: AtomicUsize::new(0),
+            last_step: std::sync::Mutex::new(None),
+            series: series.clone(),
+        };
+        let _ = eval_range(&under, &ctx(), &expr, end - day_ms + 1, end, step_ms)
+            .await
+            .unwrap();
+        assert_eq!(*under.last_step.lock().unwrap(), None);
+
+        let at = CaptureBackend {
+            calls: AtomicUsize::new(0),
+            last_step: std::sync::Mutex::new(None),
+            series,
+        };
+        let _ = eval_range(&at, &ctx(), &expr, end - day_ms, end, step_ms)
+            .await
+            .unwrap();
+        assert_eq!(*at.last_step.lock().unwrap(), Some(step_ms));
     }
 
     #[tokio::test]

@@ -802,6 +802,7 @@ class Harness:
         tables: list[str] | None = None,
         *,
         max_compacted_files: int = 32,
+        max_file_size_bytes: int = 8 * 1024 * 1024,
         waves: int = 8,
     ) -> list[str]:
         """Force bounded ducklake_merge_adjacent_files waves (Softprobe TWCS)."""
@@ -821,7 +822,8 @@ class Harness:
             notes.append(f"{table}:set={c1}:{n1[:80]}")
             merge_sql = (
                 f"CALL ducklake_merge_adjacent_files('{cat}', '{table}', "
-                f"schema => '{schema}', max_compacted_files => {int(max_compacted_files)})"
+                f"schema => '{schema}', max_compacted_files => {int(max_compacted_files)}, "
+                f"max_file_size => {int(max_file_size_bytes)})"
             )
             for wave in range(1, int(waves) + 1):
                 c2, n2 = self.sql_exec(merge_sql, timeout=300.0)

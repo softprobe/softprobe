@@ -39,7 +39,6 @@ struct TenantPayloads {
     metrics: Vec<u8>,
     logs: Vec<u8>,
     traces: Vec<u8>,
-    trace_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -575,7 +574,6 @@ fn tenant_payloads(tenant: &str) -> TenantPayloads {
         metrics,
         logs,
         traces,
-        trace_id,
     }
 }
 
@@ -610,17 +608,6 @@ fn string_any(value: &str) -> AnyValue {
     }
 }
 
-fn string_value(attribute: &KeyValue) -> &str {
-    match attribute
-        .value
-        .as_ref()
-        .and_then(|value| value.value.as_ref())
-    {
-        Some(any_value::Value::StringValue(value)) => value,
-        _ => "",
-    }
-}
-
 fn number_point(timestamp: u64, value: f64, tenant: &str) -> NumberDataPoint {
     NumberDataPoint {
         attributes: vec![kv("tenant.marker", tenant)],
@@ -648,8 +635,8 @@ mod tests {
         let tenant_a = tenant_payloads("grafana-phase4-tenant-a");
         let tenant_b = tenant_payloads("grafana-phase4-tenant-b");
 
-        assert_eq!(tenant_a.trace_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        assert_eq!(tenant_b.trace_id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(trace_id_for("a"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(trace_id_for("b"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_ne!(tenant_a.metrics, tenant_b.metrics);
 
         let metrics = ExportMetricsServiceRequest::decode(tenant_a.metrics.as_slice()).unwrap();
@@ -659,6 +646,15 @@ mod tests {
             .iter()
             .find(|attribute| attribute.key == "tenant.marker")
             .unwrap();
-        assert_eq!(string_value(marker), "grafana-phase4-tenant-a");
+        let marker_value = marker
+            .value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| match value {
+                any_value::Value::StringValue(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert_eq!(marker_value, "grafana-phase4-tenant-a");
     }
 }

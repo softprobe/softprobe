@@ -256,8 +256,30 @@ impl DuckLakeMetricsBackend {
         }
     }
 
-    fn scan_cap(ctx: &TenantContext) -> usize {
-        ctx.limits.max_series.saturating_mul(10).max(10_000)
+    /// Base cap is `max(max_series*10, 10_000)`. Step-bucketed scans are bounded by
+    /// `resolved_series × (range/step)` (Grafana grid), not raw scrape rows.
+    fn scan_cap(
+        ctx: &TenantContext,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        step_ms: Option<i64>,
+        resolved_series: usize,
+    ) -> usize {
+        const STEP_BUCKET_MIN_MS: i64 = 15_000;
+        let base = ctx.limits.max_series.saturating_mul(10).max(10_000);
+        let Some(step) = step_ms.filter(|s| *s >= STEP_BUCKET_MIN_MS) else {
+            return base;
+        };
+        let (Some(start), Some(end)) = (start_ms, end_ms) else {
+            return base;
+        };
+        let range = (end - start).abs().max(1) as u128;
+        let step_u = step as u128;
+        let points_per_series = (range / step_u).saturating_add(1) as usize;
+        let grid = resolved_series
+            .saturating_mul(points_per_series)
+            .saturating_add(1);
+        base.max(grid)
     }
 
     /// Classic hist/summary Prom name (`_bucket` / `_sum` / `_count`).
@@ -286,14 +308,14 @@ impl DuckLakeMetricsBackend {
     ) -> Result<Vec<RawMetricRow>, CompatError> {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
-        let cap = Self::scan_cap(ctx);
-        let fetch_limit = cap.saturating_add(1);
         let series_ids = self
             .resolve_series_ids(ctx, start_ms, end_ms, matchers)
             .await?;
         if series_ids.is_empty() {
             return Ok(Vec::new());
         }
+        let cap = Self::scan_cap(ctx, start_ms, end_ms, step_ms, series_ids.len());
+        let fetch_limit = cap.saturating_add(1);
 
         let catalog = self.layout_catalog();
         let is_histogram = Self::is_classic_hist_selector(matchers);
@@ -2324,7 +2346,7 @@ mod tests {
             value: "http_requests".into(),
         }];
         assert_eq!(
-            pushdown_distinct_metric_matchers(&[group.clone()]),
+            pushdown_distinct_metric_matchers(std::slice::from_ref(&group)),
             Some(group.as_slice())
         );
         assert_eq!(
@@ -2358,6 +2380,39 @@ mod tests {
         let err = enforce_distinct_cap(11, 10, "label values").unwrap_err();
         assert_eq!(err.code, CompatErrorCode::LimitExceeded);
         assert!(err.message.contains("label values count 11"));
+    }
+
+    #[test]
+    fn scan_cap_scales_with_grafana_step_grid() {
+        use crate::authn::TenantInfo;
+        use crate::compat::tenant::{ProtocolScope, QueryLimits};
+        let ctx = TenantContext::from_authenticated(
+            TenantInfo {
+                tenant_id: "t".into(),
+                bucket_name: "b".into(),
+                dataset_id: "d".into(),
+            },
+            ProtocolScope::Prometheus,
+            None,
+            QueryLimits::default(),
+        )
+        .unwrap();
+        let day_ms = 24 * 60 * 60 * 1000i64;
+        let step_ms = 78_000i64; // Grafana-like 24h step
+        let end = 1_700_000_000_000i64;
+        let start = end - day_ms;
+        let base = DuckLakeMetricsBackend::scan_cap(&ctx, None, None, None, 200);
+        assert_eq!(base, 100_000);
+        let grid =
+            DuckLakeMetricsBackend::scan_cap(&ctx, Some(start), Some(end), Some(step_ms), 200);
+        let points = (day_ms / step_ms + 1) as usize;
+        assert_eq!(
+            grid,
+            200_usize
+                .saturating_mul(points)
+                .saturating_add(1)
+                .max(100_000)
+        );
     }
 
     #[test]

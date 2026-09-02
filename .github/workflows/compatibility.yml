@@ -91,7 +91,7 @@ jobs:
   real-preflight:
     name: Real compatibility prerequisites
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CARGO_BUILD_JOBS: "2"
@@ -128,7 +128,7 @@ jobs:
     name: Prometheus differential
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CI: "true"
@@ -251,7 +251,7 @@ jobs:
     name: Loki differential
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CI: "true"
@@ -366,7 +366,7 @@ jobs:
     name: Tempo differential
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CI: "true"
@@ -483,7 +483,7 @@ jobs:
     # own evidence. The service-backed steps below are gated on success.
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       CI: "true"
@@ -639,7 +639,7 @@ jobs:
     # Mock mode still reaches this job because the prerequisite jobs are skipped.
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff, grafana-system]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -816,7 +816,7 @@ jobs:
   drift-preflight:
     name: Scheduled candidate drift prerequisites
     if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
@@ -945,7 +945,7 @@ jobs:
     name: Drift Prometheus candidate
     if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [drift-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
@@ -980,7 +980,7 @@ jobs:
     name: Drift Loki candidate
     if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [drift-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
@@ -1015,7 +1015,7 @@ jobs:
     name: Drift Tempo candidate
     if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [drift-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
@@ -1050,7 +1050,7 @@ jobs:
     name: Drift Grafana candidate
     if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [drift-preflight]
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
@@ -1318,7 +1318,7 @@ jobs:
   fast-pr:
     name: Fast PR compatibility lane
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CI: "true"
@@ -1352,7 +1352,7 @@ jobs:
         run: cargo check --lib
 
       - name: Run lint
-        run: cargo clippy --lib --bin softprobe-runtime -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run unit tests without containers
         run: cargo test --lib -- --test-threads=1

@@ -24,7 +24,6 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 use softprobe_runtime::models::{Log, Metric, Span};
-use tracing_subscriber;
 
 #[derive(Parser, Clone)]
 #[command(
@@ -388,43 +387,43 @@ async fn run_phase(
 
     if phase.enable_ingest() {
         if args.span_qps > 0 {
-            tasks.spawn(run_open_loop_writer(
-                http_client.clone(),
-                format!("{}/v1/traces", base_url),
-                "span",
-                args.span_qps,
+            tasks.spawn(run_open_loop_writer(OpenLoopWriterConfig {
+                client: http_client.clone(),
+                url: format!("{}/v1/traces", base_url),
+                label: "span",
+                events_per_sec: args.span_qps,
                 batch_size,
                 deadline,
-                Arc::clone(&semaphore),
-                Arc::clone(&span_stats),
-                SignalKind::Span,
-            ));
+                semaphore: Arc::clone(&semaphore),
+                stats: Arc::clone(&span_stats),
+                kind: SignalKind::Span,
+            }));
         }
         if args.log_qps > 0 {
-            tasks.spawn(run_open_loop_writer(
-                http_client.clone(),
-                format!("{}/v1/logs", base_url),
-                "log",
-                args.log_qps,
+            tasks.spawn(run_open_loop_writer(OpenLoopWriterConfig {
+                client: http_client.clone(),
+                url: format!("{}/v1/logs", base_url),
+                label: "log",
+                events_per_sec: args.log_qps,
                 batch_size,
                 deadline,
-                Arc::clone(&semaphore),
-                Arc::clone(&log_stats),
-                SignalKind::Log,
-            ));
+                semaphore: Arc::clone(&semaphore),
+                stats: Arc::clone(&log_stats),
+                kind: SignalKind::Log,
+            }));
         }
         if args.metric_qps > 0 {
-            tasks.spawn(run_open_loop_writer(
-                http_client.clone(),
-                format!("{}/v1/metrics", base_url),
-                "metric",
-                args.metric_qps,
+            tasks.spawn(run_open_loop_writer(OpenLoopWriterConfig {
+                client: http_client.clone(),
+                url: format!("{}/v1/metrics", base_url),
+                label: "metric",
+                events_per_sec: args.metric_qps,
                 batch_size,
                 deadline,
-                Arc::clone(&semaphore),
-                Arc::clone(&metric_stats),
-                SignalKind::Metric,
-            ));
+                semaphore: Arc::clone(&semaphore),
+                stats: Arc::clone(&metric_stats),
+                kind: SignalKind::Metric,
+            }));
         }
     }
 
@@ -465,7 +464,8 @@ enum SignalKind {
     Metric,
 }
 
-async fn run_open_loop_writer(
+#[derive(Clone)]
+struct OpenLoopWriterConfig {
     client: reqwest::Client,
     url: String,
     label: &'static str,
@@ -475,7 +475,20 @@ async fn run_open_loop_writer(
     semaphore: Arc<Semaphore>,
     stats: Arc<ProducerStats>,
     kind: SignalKind,
-) -> Result<()> {
+}
+
+async fn run_open_loop_writer(cfg: OpenLoopWriterConfig) -> Result<()> {
+    let OpenLoopWriterConfig {
+        client,
+        url,
+        label,
+        events_per_sec,
+        batch_size,
+        deadline,
+        semaphore,
+        stats,
+        kind,
+    } = cfg;
     let batches_per_sec = events_per_sec as f64 / batch_size as f64;
     let interval = Duration::from_secs_f64((1.0 / batches_per_sec.max(0.001)).max(0.000_001));
     let mut ticker = tokio::time::interval(interval);
@@ -636,10 +649,10 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
         kind: span
             .span_kind
             .as_ref()
-            .and_then(|k| match k.as_str() {
-                "SERVER" => Some(span::SpanKind::Server as i32),
-                "CLIENT" => Some(span::SpanKind::Client as i32),
-                _ => Some(span::SpanKind::Internal as i32),
+            .map(|k| match k.as_str() {
+                "SERVER" => span::SpanKind::Server as i32,
+                "CLIENT" => span::SpanKind::Client as i32,
+                _ => span::SpanKind::Internal as i32,
             })
             .unwrap_or(span::SpanKind::Internal as i32),
         start_time_unix_nano: span.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
@@ -746,7 +759,7 @@ fn log_to_otlp(log: &Log) -> ExportLogsServiceRequest {
             .observed_timestamp
             .map(|t| t.timestamp_nanos_opt().unwrap_or(0) as u64)
             .unwrap_or(0),
-        severity_number: log.severity_number as i32,
+        severity_number: log.severity_number,
         severity_text: log.severity_text.clone(),
         body: Some(AnyValue {
             value: Some(any_value::Value::StringValue(log.body.clone())),
@@ -994,7 +1007,7 @@ fn pick_query_case(seed: u64) -> QueryCase {
 fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
     let date_filter = (Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d");
     let now_ts = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)";
-    let hit = seed % 5 != 0;
+    let hit = !seed.is_multiple_of(5);
     let session = if hit {
         format!("stress-session-{}", seed % 256)
     } else {
@@ -1137,7 +1150,11 @@ fn sample_span(counter: u64) -> Span {
     let session_id = format!("stress-session-{}", counter % 256);
 
     let app_id = format!("stress-app-{}", counter % 4);
-    let method = if counter % 4 == 0 { "POST" } else { "GET" };
+    let method = if counter.is_multiple_of(4) {
+        "POST"
+    } else {
+        "GET"
+    };
     let path = match counter % 8 {
         0 => "/api/login",
         1 => "/api/orders",
@@ -1149,8 +1166,8 @@ fn sample_span(counter: u64) -> Span {
         _ => "/healthz",
     };
 
-    let burst = (counter / 200) % 10 == 0;
-    let is_error = burst && (counter % 10 == 0);
+    let burst = (counter / 200).is_multiple_of(10);
+    let is_error = burst && counter.is_multiple_of(10);
     let http_status = if is_error { 500 } else { 200 };
     let duration_ms = if is_error {
         900
@@ -1198,8 +1215,8 @@ fn sample_span(counter: u64) -> Span {
 
 fn sample_log(counter: u64) -> Log {
     let timestamp = Utc::now();
-    let burst = (counter / 200) % 10 == 0;
-    let is_error = burst && (counter % 10 == 0);
+    let burst = (counter / 200).is_multiple_of(10);
+    let is_error = burst && counter.is_multiple_of(10);
     let severity_number = if is_error { 17 } else { 12 };
     let severity_text = if is_error { "ERROR" } else { "INFO" };
     let session_id = Some(format!("stress-session-{}", counter % 256));
@@ -1255,7 +1272,7 @@ fn sample_metric(counter: u64) -> Metric {
         format!("stress-service-{}", counter % 4),
     );
 
-    let burst = (counter / 200) % 10 == 0;
+    let burst = (counter / 200).is_multiple_of(10);
     let value = if burst {
         900.0
     } else {
@@ -1429,7 +1446,7 @@ fn percentile(durations: &[Duration], percentile: usize) -> u128 {
     }
     let mut sorted = durations.to_owned();
     sorted.sort();
-    let target = ((sorted.len() * percentile) + 99) / 100;
+    let target = (sorted.len() * percentile).div_ceil(100);
     let idx = target.min(sorted.len()).saturating_sub(1);
     sorted[idx].as_millis()
 }

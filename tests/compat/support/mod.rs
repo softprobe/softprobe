@@ -51,6 +51,7 @@ pub mod conformance {
     /// Load per-case canonical descriptors straight from the conformance
     /// manifest so runner receipts can carry manifest-static requests even
     /// when execution uses shifted fixtures. Returns (id, runner_id, descriptor).
+    #[cfg(feature = "integration-e2e")]
     pub fn load_manifest_descriptors(
         path: &str,
     ) -> Result<Vec<(String, Option<String>, CompatCaseDescriptor)>, String> {
@@ -76,7 +77,7 @@ pub mod conformance {
             let endpoint = entry
                 .get("endpoint")
                 .ok_or_else(|| format!("{id}: no endpoint"))?;
-            let method = endpoint
+            let _method = endpoint
                 .get("method")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("{id}: no method"))?
@@ -158,6 +159,7 @@ pub mod conformance {
         Ok((!selected.is_empty()).then_some(selected))
     }
 
+    #[allow(clippy::redundant_closure)]
     pub fn select_differential_cases<'a, T, F>(
         protocol: &str,
         cases: &'a [T],
@@ -945,7 +947,7 @@ pub mod lifecycle {
             .unwrap_or_else(|error| panic!("docker run {name}: {error}"));
         assert!(run.success(), "failed to start oracle container {name}");
         // Expose for readiness-timeout diagnostics.
-        std::env::set_var("COMPAT_ORACLE_CONTAINER", &name);
+        std::env::set_var("COMPAT_ORACLE_CONTAINER", name);
         ContainerGuard {
             name: name.to_string(),
         }
@@ -988,6 +990,7 @@ pub mod lifecycle {
         assert!(ok, "{message}");
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_reference_service(
         prefix: &str,
         image: &str,
@@ -1080,6 +1083,7 @@ pub mod lifecycle {
         }
     }
 
+    #[allow(clippy::redundant_closure)]
     fn wait_http_status_with_probe(
         url: &str,
         timeout: Duration,
@@ -1104,6 +1108,7 @@ pub mod lifecycle {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn write_failure_artifacts(
         protocol: &str,
         case_id: &str,
@@ -1490,7 +1495,7 @@ mod selector_tests {
         );
         let mut recorder = CompatExecutionRecorder::new_at(
             "shared",
-            &[case.clone()],
+            std::slice::from_ref(&case),
             Some("test-run"),
             temp.path(),
         )
@@ -1540,7 +1545,7 @@ mod selector_tests {
         .expect("manifest descriptor");
         let mut recorder = CompatExecutionRecorder::new_at(
             "loki",
-            &[descriptor.clone()],
+            std::slice::from_ref(&descriptor),
             Some("manifest-run"),
             temp.path(),
         )

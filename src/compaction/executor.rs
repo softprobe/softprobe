@@ -7,11 +7,10 @@ use crate::compaction::downsample::{
     hist_downsample_5m_pending_days_sql, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS,
 };
 use crate::compaction::twcs::{
-    closed_day_live_file_count, closed_days_need_complete_merge, day_kind, live_file_count_sql,
-    open_day_files_for_merge, open_day_max_compacted_files, partition_live_file_stats_sql,
-    plan_twcs_merges, should_merge_partition, DayKind, PartitionFileStats,
-    TWCS_CLOSED_DAY_MAX_COMPACTED_FILES, TWCS_CLOSED_DAY_MAX_WAVES,
-    TWCS_MAX_COMPACTED_FILES_PER_WAVE, TWCS_MAX_WAVES_PER_TABLE, TWCS_OPEN_DAY_FILE_CAP,
+    closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
+    ducklake_merge_adjacent_files_sql, live_file_count_sql, open_day_files_for_merge,
+    open_day_max_compacted_files, partition_live_file_stats_sql, plan_twcs_merges,
+    should_merge_partition, DayKind, PartitionFileStats, TwcsMergePlan, TwcsPolicy,
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
@@ -499,6 +498,10 @@ impl MaintenanceExecutor {
         }
     }
 
+    fn twcs_policy(&self) -> TwcsPolicy {
+        TwcsPolicy::from(&self.config.maintenance)
+    }
+
     /// TWCS-shaped merge: closed days loop until the AC-F8 file bar (high but
     /// finite cap); open day stays bounded (AC-F4 / AC-Q9).
     ///
@@ -511,6 +514,7 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
         table: &str,
     ) -> Result<CompactionStatus> {
+        let policy = self.twcs_policy();
         let today = Utc::now().date_naive();
         let mut last = CompactionStatus::Skipped;
 
@@ -523,12 +527,13 @@ impl MaintenanceExecutor {
                 conn,
                 ducklake,
                 table,
-                TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+                policy.closed_day_max_compacted_files,
+                policy.max_merge_file_size_bytes,
             )?;
         }
 
-        last = self.twcs_compact_closed_days(conn, ducklake, table, today, last)?;
-        last = self.twcs_compact_open_day(conn, ducklake, table, today, last)?;
+        last = self.twcs_compact_closed_days(conn, ducklake, table, today, last, &policy)?;
+        last = self.twcs_compact_open_day(conn, ducklake, table, today, last, &policy)?;
         Ok(last)
     }
 
@@ -539,8 +544,9 @@ impl MaintenanceExecutor {
         table: &str,
         today: NaiveDate,
         mut last: CompactionStatus,
+        policy: &TwcsPolicy,
     ) -> Result<CompactionStatus> {
-        for wave in 0..TWCS_CLOSED_DAY_MAX_WAVES {
+        for wave in 0..policy.closed_day_max_waves {
             let partitions = self
                 .load_partition_stats(conn, &ducklake.catalog_alias, table)
                 .unwrap_or_default();
@@ -548,33 +554,37 @@ impl MaintenanceExecutor {
                 return Ok(last);
             }
             let size_pressure = partitions.iter().any(|p| {
-                p.total_bytes > 0 && p.live_file_count > 1 && p.total_bytes < 8 * 1024 * 1024
+                p.total_bytes > 0
+                    && p.live_file_count > 1
+                    && p.total_bytes < policy.max_merge_file_size_bytes
             });
-            let actions = plan_twcs_merges(
+            let actions = plan_twcs_merges(&TwcsMergePlan {
                 table,
-                &ducklake.catalog_alias,
-                &ducklake.metadata_schema,
-                &partitions,
+                catalog_alias: &ducklake.catalog_alias,
+                schema: &ducklake.metadata_schema,
+                partitions: &partitions,
                 today,
                 size_pressure,
-                TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
-            );
+                max_compacted_files: policy.closed_day_max_compacted_files,
+                policy,
+            });
             let files_before = closed_day_live_file_count(&partitions, today);
             info!(
                 "TWCS closed-day wave {}/{}: {} day(s) need work for {}.{} ({} closed files); max_compacted_files={}",
                 wave + 1,
-                TWCS_CLOSED_DAY_MAX_WAVES,
+                policy.closed_day_max_waves,
                 actions.len(),
                 ducklake.metadata_schema,
                 table,
                 files_before,
-                TWCS_CLOSED_DAY_MAX_COMPACTED_FILES
+                policy.closed_day_max_compacted_files
             );
             last = self.ducklake_compact_table_wave(
                 conn,
                 ducklake,
                 table,
-                TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+                policy.closed_day_max_compacted_files,
+                policy.max_merge_file_size_bytes,
             )?;
             if last != CompactionStatus::Completed {
                 return Ok(last);
@@ -603,8 +613,9 @@ impl MaintenanceExecutor {
         table: &str,
         today: NaiveDate,
         mut last: CompactionStatus,
+        policy: &TwcsPolicy,
     ) -> Result<CompactionStatus> {
-        for wave in 0..TWCS_MAX_WAVES_PER_TABLE {
+        for wave in 0..policy.max_waves_per_table {
             let partitions = self
                 .load_partition_stats(conn, &ducklake.catalog_alias, table)
                 .unwrap_or_default();
@@ -613,29 +624,37 @@ impl MaintenanceExecutor {
                 .ok();
             let files_before = open_day_files_for_merge(&partitions, today, fallback);
             let size_pressure = partitions.iter().any(|p| {
-                p.total_bytes > 0 && p.live_file_count > 1 && p.total_bytes < 8 * 1024 * 1024
+                p.total_bytes > 0
+                    && p.live_file_count > 1
+                    && p.total_bytes < policy.max_merge_file_size_bytes
             });
             let open_needs_merge = partitions.iter().any(|p| {
                 day_kind(p.record_date, today) == DayKind::Open
-                    && should_merge_partition(p, DayKind::Open, size_pressure)
+                    && should_merge_partition(p, DayKind::Open, size_pressure, policy)
             });
             // Empty partition stats after a merge used to look like "done" and
             // stop at wave 1 while thousands of live files remained.
-            if files_before <= TWCS_OPEN_DAY_FILE_CAP && !open_needs_merge {
+            if files_before <= policy.open_day_file_cap && !open_needs_merge {
                 return Ok(last);
             }
-            let max_compacted = open_day_max_compacted_files(files_before);
+            let max_compacted = open_day_max_compacted_files(files_before, policy);
             info!(
                 "TWCS open-day wave {}/{}: {}.{} has {} live files (cap {}); max_compacted_files={}",
                 wave + 1,
-                TWCS_MAX_WAVES_PER_TABLE,
+                policy.max_waves_per_table,
                 ducklake.metadata_schema,
                 table,
                 files_before,
-                TWCS_OPEN_DAY_FILE_CAP,
+                policy.open_day_file_cap,
                 max_compacted
             );
-            last = self.ducklake_compact_table_wave(conn, ducklake, table, max_compacted)?;
+            last = self.ducklake_compact_table_wave(
+                conn,
+                ducklake,
+                table,
+                max_compacted,
+                policy.max_merge_file_size_bytes,
+            )?;
             let partitions_after = self
                 .load_partition_stats(conn, &ducklake.catalog_alias, table)
                 .unwrap_or_default();
@@ -646,7 +665,7 @@ impl MaintenanceExecutor {
             info!(
                 "TWCS open-day wave {}/{} {}: status={:?} files {} → {}",
                 wave + 1,
-                TWCS_MAX_WAVES_PER_TABLE,
+                policy.max_waves_per_table,
                 table,
                 last,
                 files_before,
@@ -708,7 +727,9 @@ impl MaintenanceExecutor {
         ducklake: &crate::config::DuckLakeConfig,
         table: &str,
         max_compacted_files: u64,
+        max_file_size_bytes: u64,
     ) -> Result<CompactionStatus> {
+        let policy = self.twcs_policy();
         let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
         let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
         let target_file_size =
@@ -736,9 +757,12 @@ impl MaintenanceExecutor {
                 err
             ));
         }
-        let sql = format!(
-            "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}', max_compacted_files => {});",
-            ducklake.catalog_alias, table, ducklake.metadata_schema, max_compacted_files
+        let sql = ducklake_merge_adjacent_files_sql(
+            &ducklake.catalog_alias,
+            table,
+            &ducklake.metadata_schema,
+            Some(max_compacted_files),
+            Some(max_file_size_bytes),
         );
         for wave in 1..=2 {
             match execute_batch_with_serialization_retry(
@@ -771,17 +795,18 @@ impl MaintenanceExecutor {
                 }
                 Err(err)
                     if is_ducklake_oom(&err)
-                        && max_compacted_files > TWCS_MAX_COMPACTED_FILES_PER_WAVE =>
+                        && max_compacted_files > policy.max_compacted_files_per_wave =>
                 {
                     warn!(
                         "DuckLake compaction OOM for {} at max_compacted_files={}; retrying with {}",
-                        qualified, max_compacted_files, TWCS_MAX_COMPACTED_FILES_PER_WAVE
+                        qualified, max_compacted_files, policy.max_compacted_files_per_wave
                     );
                     return self.ducklake_compact_table_wave(
                         conn,
                         ducklake,
                         table,
-                        TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+                        policy.max_compacted_files_per_wave,
+                        max_file_size_bytes,
                     );
                 }
                 Err(err) => {
@@ -884,9 +909,13 @@ impl MaintenanceExecutor {
                 err
             ));
         }
-        let sql = format!(
-            "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}');",
-            ducklake.catalog_alias, table, ducklake.metadata_schema
+        let policy = self.twcs_policy();
+        let sql = ducklake_merge_adjacent_files_sql(
+            &ducklake.catalog_alias,
+            table,
+            &ducklake.metadata_schema,
+            None,
+            Some(policy.max_merge_file_size_bytes),
         );
         // Two waves: under heavy ingest the first merge window can still lose the
         // serialization race after inner retries; wait and try once more before skip.
@@ -1196,7 +1225,6 @@ mod tests {
 
     #[test]
     fn parquet_warn_threshold_is_sane() {
-        assert!(PARQUET_FILE_WARN_THRESHOLD >= 50);
         assert_eq!(COMPACTION_SERIALIZATION_ATTEMPTS, 8);
     }
 

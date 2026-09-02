@@ -251,7 +251,7 @@ async fn gold_overview_query_range_30m_succeeds_with_heartbeat() {
     let conn_after = attach(&metadata_path, &data_path);
     let after = heartbeat_sample_count(&conn_after);
     assert!(
-        after >= before + 1,
+        after > before,
         "AC-Q0 / T-Q0: layout_ingest_heartbeat row count must increase during queries \
          (before={before}, after={after})"
     );

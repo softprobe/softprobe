@@ -207,6 +207,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_grafana_explore_logs_volume_with_drop_error() {
+        let parsed = parse_logs_volume_query(
+            r#"sum by (level) (count_over_time({service_name="load-generator"} |= `` | drop __error__[$__auto]))"#,
+        )
+        .expect("parse")
+        .expect("volume");
+        assert_eq!(parsed.group_by, vec!["level".to_string()]);
+        assert_eq!(parsed.range_ns, 1);
+        assert_eq!(parsed.request.matchers[0].name, "service_name");
+        assert_eq!(
+            parsed.request.line_filters,
+            vec![crate::compat::backends::logs::LogLineFilter::Contains(
+                String::new()
+            )]
+        );
+    }
+
+    #[test]
     fn parses_grafana_logs_volume_expression() {
         let parsed =
             parse_logs_volume_query(r#"sum by (level) (count_over_time({service_name="ad"}[1m]))"#)
