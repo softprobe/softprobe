@@ -33,6 +33,11 @@ These requirements always apply to design, implementation, refactoring, and revi
    senior-architect subagent that reads the relevant code, tests, documentation,
    and project goals. The review must be substantive, not a rubber stamp.
    Resolve every blocking finding and repeat review until green.
+4. **Name by module and domain, not by plan.** Source files, modules, packages,
+   tests, and identifiers must use code-module and business-domain phrases only.
+   Never encode planning/roadmap vocabulary in the tree (`phase0`/`phase1`,
+   leftovers, milestones, epics, sprints, “option A/B”). Specs and plans may use
+   those words; implementation code must not.
 
 Prefer shared abstractions that remove duplication over parallel implementations.
-Especially enforce rules 1 and 2.
+Especially enforce rules 1, 2, and 4.
