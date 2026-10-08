@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, bill/deploy, v0.2 ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, v0.2 ]
   workflow_dispatch:
 
 env:

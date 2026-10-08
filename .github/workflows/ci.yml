@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, v0.2]
   pull_request:
-    branches: [main]
+    branches: [main, v0.2]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
