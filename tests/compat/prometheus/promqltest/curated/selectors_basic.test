@@ -1,0 +1,36 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/selectors.test patterns
+# Copyright The Prometheus Authors — Apache-2.0
+# (trimmed to Phase 1 selectors; no rate/offset)
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"} 0+30x10
+  http_requests{job="api-server", instance="1", group="canary"} 0+40x10
+
+eval instant at 50m http_requests{group="production"}
+  http_requests{job="api-server", instance="0", group="production"} 100
+  http_requests{job="api-server", instance="1", group="production"} 200
+
+eval instant at 50m http_requests{group=~"can.*"}
+  http_requests{job="api-server", instance="0", group="canary"} 300
+  http_requests{job="api-server", instance="1", group="canary"} 400
+
+eval instant at 50m http_requests{group!="canary"}
+  http_requests{job="api-server", instance="0", group="production"} 100
+  http_requests{job="api-server", instance="1", group="production"} 200
+
+eval instant at 50m http_requests{group!~"prod.*"}
+  http_requests{job="api-server", instance="0", group="canary"} 300
+  http_requests{job="api-server", instance="1", group="canary"} 400
+
+# https://github.com/prometheus/prometheus/issues/3575
+eval instant at 0s http_requests{foo!="bar"}
+  http_requests{job="api-server", instance="0", group="production"} 0
+  http_requests{job="api-server", instance="1", group="production"} 0
+  http_requests{job="api-server", instance="0", group="canary"} 0
+  http_requests{job="api-server", instance="1", group="canary"} 0
+
+eval instant at 50m http_requests{job="api-server", instance="1"}
+  http_requests{job="api-server", instance="1", group="production"} 200
+  http_requests{job="api-server", instance="1", group="canary"} 400

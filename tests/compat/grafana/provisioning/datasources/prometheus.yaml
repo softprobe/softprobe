@@ -1,0 +1,54 @@
+# Softprobe Prometheus datasources (Grafana native) — Phase 4.
+# Pin: grafana/grafana:11.2.0 (docs/compat/references.v0.yaml)
+#
+# Grafana env expansion supports ${VAR} only (not shell ${VAR:-default}).
+# Each tenant datasource uses a stable UID and sends both the bearer token and
+# the tenant scope header so the same dashboard variables work across signals.
+
+apiVersion: 1
+
+datasources:
+  # Compatibility UID for the existing single-tenant dashboard set.
+  - name: Softprobe Prometheus
+    type: prometheus
+    uid: softprobe-prom
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      httpHeaderName1: Authorization
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_API_KEY}"
+
+  - name: Softprobe Prometheus · tenant A
+    type: prometheus
+    uid: softprobe-prom-a
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_A_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_A_ID}"
+
+  - name: Softprobe Prometheus · tenant B
+    type: prometheus
+    uid: softprobe-prom-b
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_B_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_B_ID}"

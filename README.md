@@ -1,24 +1,243 @@
 # Softprobe
 
-Softprobe is being organized around agent observability and evaluation. The
-primary telemetry backend is
-[`softprobe/thelake`](https://github.com/softprobe/thelake); this repository
-currently contains the Istio tracing integration, with agent and evaluation
-components to be added as they are developed.
+> **The durable evidence foundation for production AI.** Softprobe preserves
+> AI traces and recordings as customer-controlled data assets, directly
+> queryable with standard SQL and reusable across investigation, evaluation,
+> regression, governance, and continuous-improvement workflows.
 
-## OpenTelemetry modules
+Softprobe is an agent observability and evaluation platform. Its Rust runtime
+accepts authenticated OpenTelemetry data, stores durable telemetry evidence,
+and serves tenant-scoped queries for investigation and evaluation workflows.
 
-The retained Istio WebAssembly integration lives in
-[`modules/otel/istio-wasm`](modules/otel/istio-wasm). It captures HTTP traffic
-from Istio workloads and exports trace data through the OpenTelemetry protocol.
-It remains a standalone Rust crate and can be developed from the repository root:
+The official site is [softprobe.ai](https://softprobe.ai).
 
-```bash
-make build
-make integration-test
+Traditional software telemetry is often retained only for a short incident
+window. AI traces have lasting value: today's production recording can become
+tomorrow's evaluation case, regression test, audit evidence, or improvement
+dataset. Softprobe keeps that evidence open and durable, while Parquet VARIANT
+shredding and tenant-controlled column promotion provide workload-specific
+query paths without discarding the original context.
+
+See the [product positioning](docs/positioning.md) for the strategy and
+technical rationale.
+
+## Architecture
+
+DuckLake is the only durable telemetry backend:
+
+```text
+OTLP HTTP/gRPC
+  -> tenant-bound runtime
+  -> Arrow + temporary Parquet
+  -> DuckLake transaction
+  -> PostgreSQL/SQLite metadata
+  -> inlined rows or Parquet under data_path
 ```
 
-The module's [development guide](modules/otel/istio-wasm/docs/development.md)
-and [deployment guide](modules/otel/istio-wasm/docs/deployment.md) cover local
-setup and Istio installation. The root Cargo workspace currently contains this
-module.
+Ingest is flush-through: one OTLP request becomes one DuckLake commit. The
+OpenTelemetry collector owns batching. There is no application ingest buffer,
+staged storage tier, application WAL, Apache Iceberg, or Lakekeeper path.
+
+See [`docs/design.md`](docs/design.md) for the current architecture and
+[`docs/legacy/`](docs/legacy/README.md) for superseded designs.
+
+The Istio HTTP capture adapter remains available as an OpenTelemetry module in
+[`modules/otel/istio-wasm`](modules/otel/istio-wasm). It can provide agent and
+service traces to the same observability and evaluation workflows. Build or run
+its integration suite with `make istio-build` and
+`make istio-integration-test`.
+
+## Local development
+
+Prerequisites:
+
+- Rust toolchain
+- Docker and Docker Compose
+- a dynamic DuckDB library (`DUCKDB_DOWNLOAD_LIB=1` lets the build fetch it)
+
+Start MinIO and DuckLake PostgreSQL:
+
+```bash
+make setup
+```
+
+Build and run checks (cargo cache under `~/.cache/softprobe`):
+
+```bash
+make doctor
+make build
+make test          # unit + lightweight
+make test-e2e      # needs setup
+make ci            # fmt + lint + test + test-e2e
+```
+
+Stop local infrastructure:
+
+```bash
+make teardown
+```
+
+`make ci` is the pre-merge gate. Performance is `make test-perf` (manual / release).
+
+GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
+
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 18m.
+- `.github/workflows/performance.yml` — **manual** only: `make test-perf`
+  (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
+- `.github/workflows/release.yml` — on GitHub Release: `make release`
+  (`test-perf` + `build-release` + `publish`, `--release`; PR already ran `ci`). Warm SLO ≤ 25m.
+
+## Run
+
+```bash
+export CONFIG_FILE=config.yaml
+export SOFTPROBE_AUTH_URL=http://127.0.0.1:8091/validate
+cargo run --bin softprobe-runtime
+```
+
+Defaults:
+
+- HTTP: `0.0.0.0:8090`
+- OTLP/gRPC traces: `0.0.0.0:4317`
+- config file: `config.yaml`
+
+Set `SOFTPROBE_GRPC_DISABLE=1` to disable the gRPC listener.
+
+## Configuration
+
+The canonical example is [`config.yaml`](config.yaml). The active storage
+section is `ducklake`:
+
+```yaml
+ducklake:
+  catalog_type: "postgres" # postgres (production) or sqlite (local)
+  metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
+  data_path: "./warehouse/ducklake/data/"
+  catalog_alias: "softprobe"
+  metadata_schema: "softprobe"
+  data_inlining_row_limit: 0
+  writer_pool_size: 4
+```
+
+YAML holds non-secret settings only. The top-level sections are `server`,
+`object_store` (`region` / optional `endpoint`), `query`, `maintenance`,
+`ducklake`, and `dropdown_catalog`. Unknown or legacy keys are rejected. Object
+storage credentials are never stored in YAML; resolve them from the
+environment:
+
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [/ `AWS_SESSION_TOKEN`]: `s3://`
+  paths (MinIO, R2, AWS)
+- `GCS_HMAC_ACCESS_KEY_ID` / `GCS_HMAC_SECRET` (or `GCP_HMAC_*`): `gs://` paths
+
+Supported direct environment overrides are:
+
+- `CONFIG_FILE`
+- `PORT`
+- `S3_REGION`
+- `SOFTPROBE_MAX_HTTP_BODY_BYTES`
+
+The runtime also uses deployment variables such as `SOFTPROBE_AUTH_URL`,
+`SOFTPROBE_LISTEN_ADDR`, and `OTEL_GRPC_PORT`.
+
+For `gs://` DuckLake paths, DuckDB uses GCS HMAC interoperability credentials:
+`GCS_HMAC_ACCESS_KEY_ID` and `GCS_HMAC_SECRET` (or their `GCP_HMAC_*`
+aliases).
+
+## Main HTTP endpoints
+
+Health and discovery:
+
+- `GET /health`
+- `GET /ready`
+- `GET /openapi.json`
+- `GET /swagger`
+
+OTLP ingestion:
+
+- `POST /v1/traces`
+- `POST /v1/logs`
+- `POST /v1/metrics`
+
+LLM evaluation:
+
+- `POST /v1/llm/scores`
+
+Query and telemetry:
+
+- `POST /v1/query/sql` (internal/debug SQL surface)
+- `POST /v1/telemetry/search`
+- `POST /v1/telemetry/details`
+- `GET /v1/telemetry/fields`
+- `GET /v1/telemetry/fields/{field}/values`
+- `GET /v1/telemetry/sessions/{session_id}`
+- `GET /v1/telemetry/traces/{trace_id}`
+- `GET /v1/llm/sessions/{session_id}/recording` (web session replay batches)
+- `GET /v1/data/ducklake-connection`
+
+Control-plane routes also cover tenant provisioning, promotions, and dropdown
+catalog lookups. `/v1/*` operational routes require bearer authentication
+(`OPTIONS /v1/*` is exempt for browser CORS preflight); tenant provisioning
+validates its admin bearer inside the handler.
+
+Web session recording contract:
+[`docs/instrumentation_guide.md`](docs/instrumentation_guide.md#web-session-recording-rrweb)
+and the Softprobe LLM
+[web session replay guide](https://github.com/softprobe/sp-llm/blob/main/docs/web-session-replay.md).
+
+The focused ingestion and promotion HTTP contract is
+[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml). Schema promotion
+semantics are in [`docs/promotion.md`](docs/promotion.md).
+
+## Query DuckLake locally
+
+```bash
+make duckdb-shell
+```
+
+This renders the configured DuckLake ATTACH statement, performs a `SELECT 1`
+smoke, and starts DuckDB. See
+[`docs/adhoc-duckdb-ducklake.md`](docs/adhoc-duckdb-ducklake.md).
+
+## Instrumentation and promotion
+
+HTTP bodies are captured from `http.request` and `http.response` span events.
+When those event fields are absent, the runtime accepts equivalent span
+attributes, including OBI `.content` body keys. Business identifiers are
+explicit searchable `sp.*` span attributes set by the application — Softprobe
+does not invent them.
+
+- Instrumentation: [`docs/instrumentation_guide.md`](docs/instrumentation_guide.md)
+- Schema promotion (explicit manifests for declared `sp.*` and other sources):
+  [`docs/promotion.md`](docs/promotion.md)
+
+## Maintenance
+
+The runtime schedules DuckLake-native maintenance for every configured tenant
+scope:
+
+- merge adjacent data files;
+- expire old snapshots;
+- clean old files;
+- prune optional dropdown-catalog values.
+
+Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
+
+## Publish Docker image
+
+Product bits are built **once on the host** (`make build-release` →
+`cargo build --release --locked` → `dist/`). The Dockerfile is packaging-only
+(`COPY dist/…`); it never runs cargo. Cache lives at `~/.cache/softprobe`.
+
+Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
+(`test-perf` + unconditional `build-release` + `publish` under `--release`).
+PR CI (`make ci`, dev profile) does not build `dist/`.
+
+Local/emergency image push: `make build-release && make publish TAG=vX.Y.Z`
+(on Mac, `TARGET_PLATFORM=linux/amd64 make build-release` re-enters the same
+Make recipe in a linux/amd64 container). `publish` refuses incomplete `dist/`.
+Optional BuildKit registry cache (`…/splake:buildcache`) speeds base layers
+only — do not deploy `:buildcache` as a runtime image.
+
+## License
+
+Apache-2.0

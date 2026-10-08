@@ -1,0 +1,27 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Dense finite samples only (NaN series omitted — OTLP/OpenMetrics path drops NaNs).
+
+load 10s
+  metric 1 2 3 4 5
+
+eval instant at 1m avg_over_time(metric[1m])
+  {} 3
+
+eval instant at 1m sum_over_time(metric[1m])/count_over_time(metric[1m])
+  {} 3
+
+eval instant at 1m sum_over_time(metric[1m])
+  {} 15
+
+eval instant at 1m min_over_time(metric[1m])
+  {} 1
+
+eval instant at 1m max_over_time(metric[1m])
+  {} 5
+
+eval instant at 1m last_over_time(metric[1m])
+  metric 5
+
+eval instant at 1m count_over_time(metric[1m])
+  {} 5

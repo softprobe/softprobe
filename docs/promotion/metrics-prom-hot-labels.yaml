@@ -1,0 +1,44 @@
+# Canonical metrics hot-label promotion for Prometheus / Grafana.
+# Apply via POST /v1/promotions/apply before ingest so typed columns fill.
+# Softprobe does not auto-promote arbitrary attribute keys.
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [metrics]
+columns:
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name
+  - name: instance_id
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.instance.id
+  - name: host_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: host.name
+  - name: deployment_environment
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: deployment.environment
+  - name: http_method
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: http.method
+  - name: http_route
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: http.route

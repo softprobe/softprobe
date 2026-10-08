@@ -1,0 +1,32 @@
+# GCS Benchmark Configuration
+# Setup:
+#   1. Set GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET (DuckDB httpfs for gs://)
+#   2. Update ducklake.data_path and postgres metadata_path
+#   3. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin softprobe-runtime
+
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600
+  worker_threads: null
+
+object_store:
+  region: "us-central1"
+
+query:
+  max_connections: 16
+  cache_dir: "/var/tmp/datalake/cache"
+
+maintenance:
+  enabled: true
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
+
+ducklake:
+  catalog_type: "postgres"
+  metadata_path: "host=YOUR_PG_HOST port=5432 dbname=ducklake user=ducklake password=YOUR_PASSWORD"
+  data_path: "gs://YOUR-GCS-BUCKET/ducklake/"
+  catalog_alias: "softprobe"
+  metadata_schema: "softprobe"
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

@@ -1,0 +1,7 @@
+# Softprobe overlay for OpenTelemetry Demo compose (loaded last).
+# Gives the demo collector a route to Softprobe on the Docker host.
+
+services:
+  otel-collector:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

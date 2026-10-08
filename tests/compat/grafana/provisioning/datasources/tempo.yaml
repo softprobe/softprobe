@@ -1,0 +1,56 @@
+# Softprobe Tempo datasources (Grafana native) — Phase 4.
+# The URL is the Softprobe HTTP base; Grafana appends /api/*.
+# Grafana env expansion supports ${VAR} only (not shell ${VAR:-default}).
+
+apiVersion: 1
+
+datasources:
+  - name: Softprobe Tempo · tenant A
+    type: tempo
+    uid: softprobe-tempo-a
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+      tracesToLogsV2:
+        datasourceUid: softprobe-loki-a
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: service.name
+          - key: service.namespace
+          - key: trace_id
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{${__tags}} | json | trace_id = "${__span.traceId}"'
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_A_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_A_ID}"
+
+  - name: Softprobe Tempo · tenant B
+    type: tempo
+    uid: softprobe-tempo-b
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+      tracesToLogsV2:
+        datasourceUid: softprobe-loki-b
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: service.name
+          - key: service.namespace
+          - key: trace_id
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{${__tags}} | json | trace_id = "${__span.traceId}"'
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_B_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_B_ID}"

@@ -1,0 +1,199 @@
+name: OpenTelemetry Istio Wasm Release
+
+on:
+  push:
+    tags:
+      - 'otel-istio-wasm-v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: softprobe
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Extract version from tag
+      id: version
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        VERSION=${TAG_NAME#otel-istio-wasm-v}
+        echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "image_tag=v${VERSION}" >> $GITHUB_OUTPUT
+        echo "Tag: $TAG_NAME, Version: $VERSION"
+
+    - name: Update Cargo.toml version
+      run: |
+        sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" modules/otel/istio-wasm/Cargo.toml
+        echo "Updated Cargo.toml version to ${{ steps.version.outputs.version }}"
+        grep "^version = " modules/otel/istio-wasm/Cargo.toml
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-release-
+          ${{ runner.os }}-cargo-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl jq protobuf-compiler
+
+    - name: Check dependencies
+      run: make istio-check-deps-build
+
+    - name: Build WASM binary
+      run: make istio-build
+
+    - name: Verify test configuration exists
+      run: |
+        if [ ! -f modules/otel/istio-wasm/test/envoy.yaml ]; then
+          echo "Error: modules/otel/istio-wasm/test/envoy.yaml not found"
+          exit 1
+        fi
+        echo "✓ Istio module Envoy configuration found"
+
+    - name: Run integration tests
+      run: make istio-integration-test
+      env:
+        DOCKER_BUILDKIT: 1
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker images
+      run: |
+        # Override VERSION from Makefile to use our extracted version
+        export VERSION=${{ steps.version.outputs.image_tag }}
+        echo "Building Docker images with version: $VERSION"
+
+        # Build images
+        make istio-docker-build
+
+        # Also tag as latest for releases
+        docker tag ${REGISTRY}/otel-istio-wasm:$VERSION ${REGISTRY}/otel-istio-wasm:latest
+        docker tag ${REGISTRY}/sp-envoy:$VERSION ${REGISTRY}/sp-envoy:latest
+
+        # Push all tags
+        docker push ${REGISTRY}/otel-istio-wasm:$VERSION
+        docker push ${REGISTRY}/otel-istio-wasm:latest
+        docker push ${REGISTRY}/sp-envoy:$VERSION
+        docker push ${REGISTRY}/sp-envoy:latest
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        IMAGE_TAG="${{ steps.version.outputs.image_tag }}"
+        WASM_SHA256="$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)"
+        cat > release_notes.md << 'EOF'
+        ## OTEL Istio Wasm Module Release @TAG@
+
+        ### What's Changed
+
+        This release includes the Softprobe OpenTelemetry Istio Wasm integration.
+
+        ### Docker Images
+
+        - `softprobe/otel-istio-wasm:@IMAGE_TAG@`
+        - `softprobe/sp-envoy:@IMAGE_TAG@`
+
+        ### WASM Binary
+
+        The WASM binary is attached to this release and can be used directly with Envoy or Istio.
+
+        **SHA256:** `@SHA256@`
+
+        ### Deployment
+
+        Update your `WasmPlugin` configuration to use this version:
+
+        ```yaml
+        apiVersion: extensions.istio.io/v1alpha1
+        kind: WasmPlugin
+        metadata:
+          name: sp-istio-agent
+          namespace: istio-system
+        spec:
+          url: oci://docker.io/softprobe/otel-istio-wasm:@IMAGE_TAG@
+          sha256: @SHA256@
+        ```
+
+        ### Integration Test Results
+
+        ✅ All integration tests passed
+        ✅ End-to-end telemetry pipeline validated
+        ✅ Softprobe backend connectivity verified
+
+        EOF
+        sed -i "s/@TAG@/${TAG}/g; s/@IMAGE_TAG@/${IMAGE_TAG}/g; s/@SHA256@/${WASM_SHA256}/g" release_notes.md
+
+    - name: Update deployment configs with release version
+      run: |
+        HASH=$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/minimal.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/minimal.yaml
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: Release ${{ steps.version.outputs.tag }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          target/wasm32-unknown-unknown/release/sp_istio_agent.wasm
+          target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256
+          modules/otel/istio-wasm/deploy/minimal.yaml
+          modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+          modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Summary
+      run: |
+        echo "🎉 Release ${{ steps.version.outputs.tag }} completed successfully!"
+        echo ""
+        echo "📦 Docker Images Published:"
+        echo "  - softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}"
+        echo "  - softprobe/otel-istio-wasm:latest"
+        echo "  - softprobe/sp-envoy:${{ steps.version.outputs.image_tag }}"
+        echo "  - softprobe/sp-envoy:latest"
+        echo ""
+        echo "📋 Release Assets:"
+        echo "  - sp_istio_agent.wasm"
+        echo "  - sp_istio_agent.wasm.sha256"
+        echo "  - modules/otel/istio-wasm/deploy/minimal.yaml"
+        echo "  - modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml"
+        echo ""
+        echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"

@@ -2,9 +2,9 @@ name: Integration Tests
 
 on:
   push:
-    branches: [ main, bill/deploy ]
+    branches: [ main, bill/deploy, v0.2 ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, v0.2 ]
   workflow_dispatch:
 
 env:
@@ -40,7 +40,7 @@ jobs:
         sudo apt-get install -y curl jq protobuf-compiler
 
     - name: Check dependencies
-      run: make check-deps-build
+      run: make istio-check-deps-build
 
     - name: Verify test configuration exists
       run: |
@@ -51,7 +51,7 @@ jobs:
         echo "✓ Istio module Envoy configuration found"
 
     - name: Run integration tests
-      run: make integration-test
+      run: make istio-integration-test
       env:
         # Ensure Docker daemon is available
         DOCKER_BUILDKIT: 1

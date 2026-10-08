@@ -1,0 +1,46 @@
+# Softprobe Loki datasources (Grafana native) — Phase 4.
+# The URL is the Softprobe HTTP base; Grafana appends /loki/api/v1/*.
+# Grafana env expansion supports ${VAR} only (not shell ${VAR:-default}).
+
+apiVersion: 1
+
+datasources:
+  - name: Softprobe Loki · tenant A
+    type: loki
+    uid: softprobe-loki-a
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      maxLines: 1000
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([0-9a-fA-F]{16,32})"'
+          urlDisplayLabel: View trace
+          url: '$${__value.raw}'
+          datasourceUid: softprobe-tempo-a
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_A_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_A_ID}"
+
+  - name: Softprobe Loki · tenant B
+    type: loki
+    uid: softprobe-loki-b
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      maxLines: 1000
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([0-9a-fA-F]{16,32})"'
+          urlDisplayLabel: View trace
+          url: '$${__value.raw}'
+          datasourceUid: softprobe-tempo-b
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_B_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_TENANT_B_ID}"

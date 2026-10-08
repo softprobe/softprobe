@@ -1,0 +1,30 @@
+# AWS S3 + DuckLake benchmark configuration.
+# Credentials: IAM role on EC2, or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+# Update ducklake.data_path and postgres metadata_path before running.
+
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600
+  worker_threads: null
+
+object_store:
+  region: "us-east-1"
+
+query:
+  max_connections: 16
+  cache_dir: "/var/tmp/datalake/cache"
+
+maintenance:
+  enabled: true
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
+
+ducklake:
+  catalog_type: "postgres"
+  metadata_path: "host=YOUR_PG_HOST port=5432 dbname=ducklake user=ducklake password=YOUR_PASSWORD"
+  data_path: "s3://YOUR-AWS-BUCKET/ducklake/"
+  catalog_alias: "softprobe"
+  metadata_schema: "softprobe"
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

@@ -1,0 +1,16 @@
+{
+  "case": "loki_scope_header_mismatch",
+  "request": {
+    "method": "GET",
+    "path": "/loki/api/v1/query",
+    "headers": {
+      "Authorization": "Bearer good-key",
+      "X-Scope-OrgID": "other-tenant"
+    }
+  },
+  "expect": {
+    "http_status": 403,
+    "body_protocol": "loki",
+    "notes": "stub returns Loki error envelope after TenantContext rejects mismatched scope"
+  }
+}

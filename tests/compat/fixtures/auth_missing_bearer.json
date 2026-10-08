@@ -1,0 +1,13 @@
+{
+  "case": "missing_authorization",
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/query",
+    "headers": {}
+  },
+  "expect": {
+    "http_status": 401,
+    "body": null,
+    "notes": "runtime_auth_middleware returns status-only UNAUTHORIZED"
+  }
+}

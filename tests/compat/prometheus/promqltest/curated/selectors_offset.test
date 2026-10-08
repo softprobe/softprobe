@@ -1,0 +1,16 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/selectors.test
+# Copyright The Prometheus Authors — Apache-2.0
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"} 0+30x10
+  http_requests{job="api-server", instance="1", group="canary"} 0+40x10
+
+eval instant at 50m http_requests{group="production",job="api-server"} offset 5m
+  http_requests{job="api-server", instance="0", group="production"} 90
+  http_requests{job="api-server", instance="1", group="production"} 180
+
+eval instant at 50m sum_over_time(http_requests{group="production",job="api-server"}[10m] offset 5m)
+  {job="api-server", instance="0", group="production"} 170
+  {job="api-server", instance="1", group="production"} 340

@@ -1,0 +1,13 @@
+{
+  "case_id": "metrics-classic-histogram-v0",
+  "signal": "metrics",
+  "metric_name": "http.server.duration",
+  "metric_type": "histogram",
+  "count": 10,
+  "sum": 100.0,
+  "bucket_counts": [2, 5, 3],
+  "explicit_bounds": [10.0, 50.0],
+  "aggregation_temporality": "CUMULATIVE",
+  "attributes": { "http.route": "/api/orders" },
+  "resource_attributes": { "service.name": "checkout" }
+}

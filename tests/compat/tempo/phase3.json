@@ -1,0 +1,439 @@
+{
+  "evidence": {
+    "issue": "#31",
+    "phase": "Phase 3",
+    "reference_manifest": "docs/compat/references.v0.yaml",
+    "reference_image": "grafana/tempo@sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50",
+    "normalization": "tests/compat/support/tempo.rs::normalize_tempo_response"
+  },
+  "capability": {
+    "protocol": "tempo",
+    "phase": "phase_3",
+    "supported_endpoints": [
+      "/api/traces/{trace_id}",
+      "/api/v2/traces/{trace_id}",
+      "/api/search",
+      "/api/search/tags",
+      "/api/search/tag/{tag}/values"
+    ],
+    "supported_features": [
+      "v1_trace_lookup",
+      "v2_trace_lookup",
+      "search",
+      "tag_names",
+      "tag_values",
+      "traceql_resource_selectors",
+      "traceql_span_selectors",
+      "traceql_intrinsic_filters",
+      "nanosecond_timing",
+      "topology_parent_span_ids",
+      "resource_attributes_where_stored",
+      "span_attributes",
+      "status",
+      "events",
+      "instrumentation_scope",
+      "links",
+      "deterministic_ordering",
+      "empty_results",
+      "tenant_scoping"
+    ],
+    "unsupported_features": [
+      "traceql_pipelines",
+      "traceql_aggregations",
+      "event_fields",
+      "link_fields",
+      "instrumentation_scope_fields",
+      "tag_query_filters"
+    ],
+    "fidelity_gaps": [],
+    "ordering_policy": "trace_start_time_asc,trace_id_asc; spans_start_time_asc,span_id_asc; tag_names_asc; tag_values_asc"
+  },
+  "records": [
+    {
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span_id": "0000000000000001",
+      "parent_span_id": null,
+      "name": "checkout",
+      "kind": 2,
+      "start_time_unix_nano": "1700000000123456789",
+      "end_time_unix_nano": "1700000002123456789",
+      "resource": {"service.name": "api", "deployment.environment": "prod"},
+      "scope": {"name": "tempo.phase3.fixture", "version": "1.0.0"},
+      "attributes": {
+        "http.method": "GET",
+        "http.route": "/checkout",
+        "db.system": "postgres"
+      },
+      "status_code": 2,
+      "status_message": "upstream failed",
+      "events": [
+        {
+          "name": "exception",
+          "timestamp_unix_nano": "1700000001123456789",
+          "attributes": {"exception.type": "Timeout", "exception.message": "upstream"}
+        }
+      ],
+      "links": [
+        {
+          "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "span_id": "0000000000000003",
+          "attributes": {"link.kind": "async", "link.source": "checkout"}
+        }
+      ]
+    },
+    {
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span_id": "0000000000000002",
+      "parent_span_id": "0000000000000001",
+      "name": "query",
+      "kind": 3,
+      "start_time_unix_nano": "1700000001123456789",
+      "end_time_unix_nano": "1700000001623456789",
+      "resource": {"service.name": "api", "deployment.environment": "prod"},
+      "scope": {"name": "tempo.phase3.fixture", "version": "1.0.0"},
+      "attributes": {
+        "http.method": "GET",
+        "peer.service": "postgres"
+      },
+      "status_code": 1,
+      "status_message": null,
+      "events": [],
+      "links": []
+    },
+    {
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span_id": "0000000000000004",
+      "parent_span_id": "0000000000000002",
+      "name": "grandchild",
+      "kind": 3,
+      "start_time_unix_nano": "1700000001223456789",
+      "end_time_unix_nano": "1700000001323456789",
+      "resource": {"service.name": "api", "deployment.environment": "prod"},
+      "scope": {"name": "tempo.phase3.fixture", "version": "1.0.0"},
+      "attributes": {
+        "http.method": "GET",
+        "peer.service": "postgres"
+      },
+      "status_code": 1,
+      "status_message": null,
+      "events": [
+        {
+          "name": "cache.miss",
+          "timestamp_unix_nano": "1700000001273456789",
+          "attributes": {"exception.type": "CacheMiss"}
+        }
+      ],
+      "links": [
+        {
+          "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "span_id": "0000000000000003",
+          "attributes": {"link.kind": "cache", "link.source": "grandchild"}
+        }
+      ]
+    },
+    {
+      "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span_id": "0000000000000005",
+      "parent_span_id": "0000000000000001",
+      "name": "parallel",
+      "kind": 1,
+      "start_time_unix_nano": "1700000001523456789",
+      "end_time_unix_nano": "1700000002023456789",
+      "resource": {"service.name": "api-parallel", "deployment.environment": "prod"},
+      "scope": {"name": "tempo.phase3.parallel", "version": "1.1.0"},
+      "attributes": {
+        "http.method": "GET",
+        "http.route": "/checkout"
+      },
+      "status_code": 1,
+      "status_message": null,
+      "events": [],
+      "links": []
+    },
+    {
+      "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "span_id": "0000000000000003",
+      "parent_span_id": null,
+      "name": "worker",
+      "kind": 1,
+      "start_time_unix_nano": "1700000010123456789",
+      "end_time_unix_nano": "1700000011123456789",
+      "resource": {"service.name": "worker", "deployment.environment": "staging"},
+      "scope": {"name": "tempo.phase3.separate", "version": "2.0.0"},
+      "attributes": {
+        "http.method": "POST",
+        "queue.name": "jobs"
+      },
+      "status_code": 0,
+      "status_message": null,
+      "events": [],
+      "links": []
+    }
+  ],
+  "cases": [
+    {
+      "id": "tempo-v1-trace-fidelity",
+      "provenance": "issue-31/phase-3/otlp-fidelity",
+      "path": "/api/traces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "params": {},
+      "expect": {"status": 200, "envelope": "v1", "trace_count": 4},
+      "differential": true
+    },
+    {
+      "id": "tempo-v2-trace-fidelity",
+      "provenance": "issue-31/phase-3/otlp-fidelity",
+      "path": "/api/v2/traces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "params": {},
+      "expect": {"status": 200, "envelope": "v2", "trace_count": 4},
+      "differential": true
+    },
+    {
+      "id": "tempo-v1-trace-not-found",
+      "provenance": "issue-31/phase-3/not-found",
+      "path": "/api/traces/cccccccccccccccccccccccccccccccc",
+      "params": {},
+      "expect": {"status": 404, "envelope": "not_found"}
+    },
+    {
+      "id": "tempo-v2-trace-malformed-id",
+      "provenance": "issue-31/phase-3/malformed-id",
+      "path": "/api/v2/traces/not-a-valid-trace-id",
+      "params": {},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-resource-selector",
+      "provenance": "issue-31/phase-3/traceql-resource",
+      "path": "/api/search",
+      "params": {
+        "q": "{ resource.service.name = \"api\" }",
+        "limit": "20",
+        "start": "1700000000",
+        "end": "1700000003"
+      },
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1},
+      "differential": true
+    },
+    {
+      "id": "tempo-search-span-selector",
+      "provenance": "issue-31/phase-3/traceql-span",
+      "path": "/api/search",
+      "params": {"q": "{ span.http.method = \"GET\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-service-filter",
+      "provenance": "issue-31/phase-3/service-filter",
+      "path": "/api/search",
+      "params": {"q": "{ resource.service.name = \"api\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-name-filter",
+      "provenance": "issue-31/phase-3/name-filter",
+      "path": "/api/search",
+      "params": {"q": "{ name = \"query\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-status-filter",
+      "provenance": "issue-31/phase-3/status-filter",
+      "path": "/api/search",
+      "params": {"q": "{ status = \"ERROR\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-status-unquoted-error",
+      "provenance": "issue-31/phase-3/status-unquoted-error",
+      "path": "/api/search",
+      "params": {"q": "{ status = error }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-status-unquoted-ok",
+      "provenance": "issue-31/phase-3/status-unquoted-ok",
+      "path": "/api/search",
+      "params": {"q": "{ status = ok }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-traceql-fractional-duration",
+      "provenance": "issue-31/phase-3/traceql-fractional-duration",
+      "path": "/api/search",
+      "params": {"q": "{ duration >= 1.5s }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-span-status-code-gte-2",
+      "provenance": "issue-31/phase-3/status-code-intrinsic",
+      "path": "/api/search",
+      "params": {"q": "{ span.status_code >= 2 }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-duration-filter",
+      "provenance": "issue-31/phase-3/duration-filter",
+      "path": "/api/search",
+      "params": {"minDuration": "1.5s"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-intrinsic-filter",
+      "provenance": "issue-31/phase-3/traceql-intrinsic",
+      "path": "/api/search",
+      "params": {"q": "{ name = \"checkout\" || status = \"ERROR\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-instrumentation-name",
+      "provenance": "issue-31/phase-3/instrumentation-name",
+      "path": "/api/search",
+      "params": {"q": "{ instrumentation.name = \"tempo.phase3.fixture\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-instrumentation-version",
+      "provenance": "issue-31/phase-3/instrumentation-version",
+      "path": "/api/search",
+      "params": {"q": "{ instrumentation.version = \"1.0.0\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-malformed-traceql",
+      "provenance": "issue-31/phase-3/malformed-traceql",
+      "path": "/api/search",
+      "params": {"q": "{ name = }"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-valid-bounds",
+      "provenance": "issue-31/phase-3/valid-bounds",
+      "path": "/api/search",
+      "params": {"start": "1700000000.123456", "end": "1700000003.123456"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-invalid-bound-value",
+      "provenance": "issue-31/phase-3/invalid-bounds",
+      "path": "/api/search",
+      "params": {"start": "not-a-timestamp", "end": "1700000003"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-deterministic-order",
+      "provenance": "issue-31/phase-3/deterministic-ordering",
+      "path": "/api/search",
+      "params": {"limit": "20"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 2}
+    },
+    {
+      "id": "tempo-search-duration-and-bounds",
+      "provenance": "issue-31/phase-3/bounds-duration",
+      "path": "/api/search",
+      "params": {
+        "start": "1700000000.123456",
+        "end": "1700000003.123456",
+        "minDuration": "2s",
+        "maxDuration": "2s"
+      },
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-empty-result",
+      "provenance": "issue-31/phase-3/empty-result",
+      "path": "/api/search",
+      "params": {"q": "{ resource.service.name = \"missing\" }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 0}
+    },
+    {
+      "id": "tempo-search-unsupported-pipeline",
+      "provenance": "issue-31/phase-3/unsupported-traceql",
+      "path": "/api/search",
+      "params": {"q": "{ name = \"checkout\" } >> { name = \"query\" }"},
+      "expect": {"status": 501, "envelope": "error", "softprobe_code": "unsupported_feature"}
+    },
+    {
+      "id": "tempo-search-reversed-bounds",
+      "provenance": "issue-31/phase-3/bad-bounds",
+      "path": "/api/search",
+      "params": {"start": "1700000002", "end": "1700000001"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-duration-bounds",
+      "provenance": "issue-31/phase-3/bad-duration",
+      "path": "/api/search",
+      "params": {"minDuration": "3s", "maxDuration": "1s"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-limit-zero",
+      "provenance": "issue-31/phase-3/bad-limit",
+      "path": "/api/search",
+      "params": {"limit": "0"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "bad_request"}
+    },
+    {
+      "id": "tempo-search-limit-one",
+      "provenance": "issue-31/phase-3/limit-bound",
+      "path": "/api/search",
+      "params": {"limit": "1"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-limit-exceeded",
+      "provenance": "issue-31/phase-3/limit-bound",
+      "path": "/api/search",
+      "params": {"limit": "10001"},
+      "expect": {"status": 400, "envelope": "error", "softprobe_code": "limit_exceeded"}
+    },
+    {
+      "id": "tempo-search-tags",
+      "provenance": "issue-31/phase-3/tag-search",
+      "path": "/api/search",
+      "params": {"tags": "service.name=api"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-tag-names",
+      "provenance": "issue-31/phase-3/tag-names",
+      "path": "/api/search/tags",
+      "params": {},
+      "expect": {
+        "status": 200,
+        "envelope": "tag_names",
+        "values": ["db.system", "deployment.environment", "exception.message", "exception.type", "http.method", "http.route", "link.kind", "link.source", "peer.service", "queue.name", "service.name"]
+      },
+      "differential": true
+    },
+    {
+      "id": "tempo-tag-values",
+      "provenance": "issue-31/phase-3/tag-values",
+      "path": "/api/search/tag/service.name/values",
+      "params": {},
+      "expect": {"status": 200, "envelope": "tag_values", "values": ["api", "api-parallel", "worker"]},
+      "differential": true
+    },
+    {
+      "id": "tempo-tag-values-peer-service",
+      "provenance": "issue-31/phase-3/tag-values-isolation",
+      "path": "/api/search/tag/peer.service/values",
+      "params": {},
+      "expect": {"status": 200, "envelope": "tag_values", "values": ["postgres"]}
+    },
+    {
+      "id": "tempo-tag-names-query-filter-unsupported",
+      "provenance": "issue-31/phase-3/unsupported-tag-filter",
+      "path": "/api/search/tags",
+      "params": {"q": "service.name=api"},
+      "expect": {"status": 501, "envelope": "error", "softprobe_code": "unsupported_feature"}
+    },
+    {
+      "id": "tempo-tag-values-query-filter-unsupported",
+      "provenance": "issue-31/phase-3/unsupported-tag-filter",
+      "path": "/api/search/tag/service.name/values",
+      "params": {"q": "api"},
+      "expect": {"status": 501, "envelope": "error", "softprobe_code": "unsupported_feature"}
+    }
+  ]
+}

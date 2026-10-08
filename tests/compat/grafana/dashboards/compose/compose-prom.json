@@ -1,0 +1,66 @@
+{
+  "annotations": { "list": [] },
+  "description": "Compose-lane Prometheus dashboard bound to the deterministic grafana_phase4_requests_total seed.",
+  "editable": false,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        {
+          "expr": "grafana_phase4_requests_total{job=\"checkout\"}",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Seeded requests total",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        {
+          "expr": "sum by (job) (grafana_phase4_requests_total)",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Requests by job",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        {
+          "expr": "avg_over_time(grafana_phase4_requests_total[5m])",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Average over time",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["compose-smoke"],
+  "templating": { "list": [] },
+  "time": { "from": "2023-11-14T22:13:20Z", "to": "2023-11-14T22:14:20Z" },
+  "timezone": "utc",
+  "title": "Softprobe Compose Prom Smoke",
+  "uid": "compose-prom",
+  "version": 1
+}

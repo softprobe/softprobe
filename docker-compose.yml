@@ -1,0 +1,117 @@
+networks:
+  backend_net:
+    driver: bridge
+
+services:
+  ducklake-postgres:
+    image: postgres:17
+    container_name: ducklake-postgres
+    environment:
+      - POSTGRES_PASSWORD=ducklake
+      - POSTGRES_USER=ducklake
+      - POSTGRES_DB=ducklake
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -p 5432 -d ducklake"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend_net
+    volumes:
+      - ducklake-postgres-data:/var/lib/postgresql/data
+
+  minio:
+    # Official MinIO images are no longer publicly pullable; use the public
+    # pgsty drop-in for local development.
+    image: pgsty/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_DOMAIN=minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./warehouse/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      backend_net:
+        aliases:
+          - warehouse.minio
+
+  auth-mock:
+    image: wiremock/wiremock:3.9.2
+    container_name: auth-mock
+    command: ["--port", "8080", "--global-response-templating"]
+    volumes:
+      - ./tests/mocks/auth:/home/wiremock
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend_net
+
+  otlp-backend:
+    build: .
+    container_name: otlp-backend
+    depends_on:
+      ducklake-postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      auth-mock:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=info
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - DUCKLAKE_METADATA_SCHEMA=softprobe
+      - SOFTPROBE_AUTH_URL=http://auth-mock:8080/validate
+      - OTEL_GRPC_PORT=4317
+      - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
+      - CONFIG_FILE=/app/config.yaml
+    volumes:
+      - ./tests/config/test-docker.yaml:/app/config.yaml:ro
+    networks:
+      - backend_net
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "8090:8090"  # Runtime HTTP API
+
+  grafana:
+    image: grafana/grafana:10.4.0-ubuntu  # Ubuntu-based for glibc/libstdc++ compatibility
+    platform: linux/amd64  # Force x86_64 for DuckDB plugin compatibility
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=motherduck-duckdb-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/plugins:/var/lib/grafana/plugins
+      - grafana-storage:/var/lib/grafana
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+
+volumes:
+  grafana-storage:
+  ducklake-postgres-data:

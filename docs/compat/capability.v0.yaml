@@ -1,0 +1,324 @@
+version: compat.v0
+otlp_write_canonical: true
+# Stable capability identifiers consumed by the conformance manifest.  Keep
+# this list canonical; per-case allowlists may only reference these IDs.
+capability_ids:
+  - prometheus.query
+  - prometheus.query_range
+  - prometheus.labels
+  - prometheus.series
+  - prometheus.metadata
+  - loki.query
+  - loki.query_range
+  - loki.labels
+  - loki.label_values
+  - loki.series
+  - loki.index_stats
+  - loki.tail
+  - tempo.v1_trace
+  - tempo.v2_trace
+  - tempo.search
+  - tempo.search_tags
+  - tempo.tag_values
+# Only features listed here may be used by a conformance allowlist to approve
+# a normalized difference.  Keep this registry aligned with the documented
+# unsupported-feature entries in each protocol section below.
+unsupported_feature_ids:
+  prometheus.query:
+    - native_histogram_functions
+  loki.query_range:
+    - interval_sampling
+  tempo.search:
+    - tag_query_filters
+status:
+  phase_0_baseline: approved_contract
+  phase_1_prometheus: implemented_subset
+  phase_2_loki: implemented_subset
+  phase_3_tempo: implemented_subset
+  phase_4_grafana:
+    repository_harness: implemented_validation_only
+    service_backed_acceptance: pending_external_evidence
+  tracking:
+    parent_scope: https://github.com/softprobe/thelake/issues/25
+    grafana: https://github.com/softprobe/thelake/issues/27
+    conformance: https://github.com/softprobe/thelake/issues/28
+evidence:
+  repository_implementation:
+    prometheus: implemented_subset
+    loki: implemented_subset
+    tempo: implemented_subset
+    grafana:
+      provisioning_and_validation_harness: implemented_validation_only
+      service_backed_system_acceptance: external_evidence_required
+  repository_harness:
+    status: mock_validation_only
+    meaning: Local fixtures, authenticated test routers, protocol contract tests, and provisioning checks validate the repository-side implementation; a passing mock run is not service-backed compatibility evidence.
+  service_backed_acceptance:
+    status: external_evidence_required
+    prerequisites:
+      - Docker daemon and pinned Prometheus, Loki, Tempo, and Grafana reference images are available.
+      - Prometheus, Loki, and Tempo differential runs produce complete raw and normalized per-case artifacts with no unapproved differences.
+      - Grafana real-system validation receives an immutable digest for grafana/grafana:11.2.0, Softprobe URL, API keys, and tenant IDs; G1-G8 all pass.
+      - Real manifest conformance runs without the mock selector and retains complete per-case request, response, normalized, diff, and outcome artifacts.
+protocols:
+  prometheus:
+    base_path: /api/v1
+    write_apis: false
+    endpoints:
+      - method: [GET, POST]
+        path: /api/v1/query
+        status: phase_1
+      - method: [GET, POST]
+        path: /api/v1/query_range
+        status: phase_1
+      - method: [GET]
+        path: /api/v1/labels
+        status: supported
+      - method: [GET]
+        path: /api/v1/label/{name}/values
+        status: supported
+      - method: [GET]
+        path: /api/v1/series
+        status: supported
+      - method: [GET]
+        path: /api/v1/metadata
+        status: supported
+    language_features:
+      promql: subset_phase_1
+      promql_supported:
+        - vector_selectors
+        - label_matchers
+        - instant_and_range_vectors
+        - aggregations_sum_min_max_avg_count_by_without
+        - aggregations_topk_bottomk
+        - arithmetic_and_comparison
+        - set_operators_and_or_unless
+        - rate_irate_increase
+        - delta_idelta
+        - over_time_sum_avg_min_max_count_last
+        - math_abs_ceil_floor_round
+        - offset_modifier
+      promql_unsupported:
+        - native_histogram_functions
+        - subqueries
+        - at_modifier
+        - on_ignoring_matching
+        - group_left_group_right
+        - summary_quantile_series_expansion
+        - full_function_catalog
+        - recording_rules_alerts
+  loki:
+    base_path: /loki/api/v1
+    write_apis: false
+    endpoints:
+      - method: [GET]
+        path: /loki/api/v1/query
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/query_range
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/labels
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/label/{name}/values
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/series
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/index/stats
+        status: supported
+      - method: [GET]
+        path: /loki/api/v1/tail
+        status: supported
+        notes: WebSocket live tail; polls DuckLake for new entries.
+    language_features:
+      logql: subset_phase_2
+      logql_supported:
+        - stream_selectors
+        - label_matchers_eq_ne_re_nre
+        - line_filters_contains_not_contains_regex_not_regex
+        - json_parser_stage
+        - logfmt_parser_stage
+        - parsed_field_matchers_after_parser
+        - instant_and_range_stream_queries
+      logql_unsupported:
+        - interval_sampling
+        - step_sampling
+        - unwrap
+        - parser_field_expressions
+        - logql_functions
+        - metric_queries_and_range_aggregations
+        - unlisted_pipeline_stages
+    parameters:
+      query:
+        status: supported
+        applies_to: [query, query_range]
+      start_end:
+        status: supported
+        applies_to: [query, query_range, labels, label_values, series]
+        notes: Nanosecond timestamps or parseable timestamp strings; query_range requires a complete window unless since is used.
+      since:
+        status: supported
+        applies_to: [query_range]
+        notes: Positive duration relative to end (or current time when end is omitted).
+      time:
+        status: supported
+        applies_to: [query]
+        notes: Instant query timestamp.
+      limit:
+        status: supported
+        default: 1000
+      direction:
+        status: supported
+        values: [forward, backward]
+        default: backward
+      matchers:
+        status: supported
+        applies_to: [label_values, series]
+        name: match[]
+      interval:
+        status: accepted_no_op
+        applies_to: [query_range]
+        notes: Parameter is accepted (Grafana always sends a step); stream responses are currently returned unsampled. Downsampling is Phase 2 follow-up work.
+      step:
+        status: accepted_no_op
+        applies_to: [query_range]
+        notes: Parameter is accepted (Grafana always sends a step); stream responses are currently returned unsampled. Downsampling is Phase 2 follow-up work.
+      timeout:
+        status: ignored
+        notes: The server uses query_timeout_seconds.
+      tenant_id:
+        status: ignored
+        notes: Tenant selection never comes from query parameters or request bodies.
+  tempo:
+    write_apis: false
+    endpoints:
+      - method: [GET]
+        path: /api/traces/{traceID}
+        status: supported_subset
+      - method: [GET]
+        path: /api/v2/traces/{traceID}
+        status: supported_subset
+      - method: [GET]
+        path: /api/search
+        status: supported_subset
+      - method: [GET]
+        path: /api/search/tags
+        status: supported_subset
+      - method: [GET]
+        path: /api/search/tag/{tag}/values
+        status: supported_subset
+    language_features:
+      traceql: subset_phase_3
+      traceql_supported:
+        - selector_boolean_and_or
+        - span_attribute_equality_inequality_regex
+        - resource_attribute_equality_inequality_regex
+        - intrinsic_name_kind_status_status_message_duration
+        - instrumentation_scope_name_version_equality_inequality_regex
+        - search_tags_resource_and_span_attributes
+        - search_min_max_duration
+        - search_start_end_limit
+      traceql_unsupported:
+        - event_fields
+        - link_fields
+        - instrumentation_scope_fields
+        - structural_parent_child_descendant_operators
+        - pipelines_and_aggregations
+        - traceql_metrics_and_exemplars
+    fidelity:
+      trace_lookup: supported_subset
+      search: supported_subset
+      topology_parent_span_ids: preserved
+      span_attributes: preserved_as_string_attributes
+      resource_attributes: preserved
+      status: preserved
+      events: preserved_with_nanosecond_timestamps
+      timestamp_precision: nanoseconds
+      span_links: preserved
+      instrumentation_scope: preserved_name_version
+      instrumentation_scope_unsupported_fields: explicit_unsupported_feature
+    fixture_contract:
+      path: tests/compat/tempo/phase3.json
+      protocol: tempo
+      phase: phase_3
+      supported_endpoints:
+        - /api/traces/{trace_id}
+        - /api/v2/traces/{trace_id}
+        - /api/search
+        - /api/search/tags
+        - /api/search/tag/{tag}/values
+      supported_features:
+        - v1_trace_lookup
+        - v2_trace_lookup
+        - search
+        - tag_names
+        - tag_values
+        - traceql_resource_selectors
+        - traceql_span_selectors
+        - traceql_intrinsic_filters
+        - nanosecond_timing
+        - topology_parent_span_ids
+        - resource_attributes_where_stored
+        - span_attributes
+        - status
+        - events
+        - instrumentation_scope
+        - links
+        - deterministic_ordering
+        - empty_results
+        - tenant_scoping
+      unsupported_features:
+        - traceql_pipelines
+        - traceql_aggregations
+        - event_fields
+        - link_fields
+        - instrumentation_scope_fields
+        - tag_query_filters
+      fidelity_gaps: []
+      instrumentation_scope_query_fields: [name, version]
+    parameters:
+      search:
+        status: supported_subset
+        supported: [tags, minDuration, maxDuration, start, end, limit, q]
+      tag_filters:
+        status: unsupported_feature
+        applies_to: ["/api/search/tags", "/api/search/tag/{tag}/values"]
+      tenant_id:
+        status: ignored
+        notes: Tenant selection never comes from query parameters or request bodies.
+  grafana:
+    native_datasources: prom_loki_tempo_phase_4
+    repository_harness: mock_validation_only
+    service_backed_acceptance: external_evidence_required
+    custom_plugin: out_of_scope
+storage_fidelity:
+  classic_histogram: preserved
+  summary: preserved
+  exponential_histogram: unsupported_feature
+  span_links: preserved
+  instrumentation_scope_columns: name_and_version_preserved
+  instrumentation_scope_other_fields: unsupported_feature
+errors:
+  unsupported_feature:
+    code: unsupported_feature
+    http_status: 501
+  unauthorized:
+    http_status: 401
+  forbidden:
+    http_status: 403
+limits:
+  # 0 = unlimited (Greptime-like; retention TTL bounds data, not this ceiling)
+  max_query_range_seconds: 0
+  max_series: 10000
+  max_response_bytes: 16777216
+  max_labels_per_series: 40
+  max_range_eval_points: 11000
+  query_timeout_seconds: 30
+auth:
+  bearer: softprobe_api_key
+  loki_scope_header: X-Scope-OrgID
+  tempo_scope_header: X-Scope-OrgID
+  scope_header_must_match_tenant: true
