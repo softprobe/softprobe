@@ -1,7 +1,7 @@
 services:
   envoy:
     image: envoyproxy/envoy:v1.27-latest
-    command: ["/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    command: ["/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info", "--concurrency", "1"]
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml
       - ../../../../target/wasm32-unknown-unknown/release/sp_istio_agent.wasm:/etc/envoy/sp_istio_agent.wasm
