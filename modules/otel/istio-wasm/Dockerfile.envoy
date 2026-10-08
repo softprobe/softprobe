@@ -1,0 +1,2 @@
+FROM envoyproxy/envoy:v1.27-latest
+COPY target/wasm32-unknown-unknown/release/sp_istio_agent.wasm /etc/envoy/sp_istio_agent.wasm

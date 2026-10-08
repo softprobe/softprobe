@@ -379,5 +379,3 @@ spec:
                 request_handle:headers():add("x-debug-service-account", service_account)
               end
             end
-
-
