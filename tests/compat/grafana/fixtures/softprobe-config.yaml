@@ -1,0 +1,27 @@
+server:
+  port: 4317
+  host: 0.0.0.0
+  max_body_size: 104857600
+  worker_threads: null
+
+object_store:
+  region: us-east-1
+  endpoint: http://minio:9000
+
+query:
+  max_connections: 10
+  cache_dir: /tmp/softprobe/duckdb
+
+maintenance:
+  enabled: false
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
+
+ducklake:
+  catalog_type: postgres
+  metadata_path: host=postgres port=5432 dbname=ducklake user=ducklake password=ducklake
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: softprobe
+  data_inlining_row_limit: 10000
+  writer_pool_size: 4

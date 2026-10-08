@@ -1,0 +1,13 @@
+# Curated PromQL for Softprobe micro-benchmark (declared subset only).
+# {{metric}} → first name from /api/v1/label/__name__/values after warm-up.
+#
+# Keep this list short and Grafana-like: selector, rate, sum, by, over_time.
+
+{{metric}}
+{__name__="{{metric}}"}
+{__name__="{{metric}}",job="prom-bench-host"}
+rate({{metric}}[1m])
+sum(rate({{metric}}[1m]))
+sum by (job) (rate({{metric}}[1m]))
+max_over_time({{metric}}[2m])
+avg_over_time({{metric}}[2m])

@@ -1,0 +1,51 @@
+server:
+  port: 8090
+  host: "0.0.0.0"
+  max_body_size: 104857600  # 100MB
+  worker_threads: null
+
+# Non-secret object-store settings. Credentials come from the environment:
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for s3:// (MinIO/R2/AWS)
+#   GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET for gs://
+object_store:
+  region: "us-east-1"
+  endpoint: "http://localhost:9000"  # Local MinIO
+
+query:
+  max_connections: 10
+  cache_dir: "/tmp/ingest-cache"
+
+maintenance:
+  enabled: true
+  target_file_size_bytes: 67108864  # 64MB
+  interval_seconds: 300
+  metadata_enabled: true
+  metadata_interval_seconds: 60
+  max_snapshot_age_seconds: 60
+  remove_orphan_files_enabled: true
+  remove_orphan_older_than_seconds: 60
+  open_day_file_cap: 2
+  max_waves_per_table: 32
+  max_compacted_files_per_wave: 32
+  closed_day_max_compacted_files: 256
+  closed_day_max_waves: 64
+  max_merge_file_size_bytes: 8388608  # 8MB — skip already-compacted files
+
+ducklake:
+  catalog_type: "postgres"
+  metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
+  data_path: "./warehouse/ducklake/data/"
+  catalog_alias: "softprobe"
+  metadata_schema: "softprobe"
+  # 0 = Parquet always so TWCS can merge skinny tables. VARIANT shredding
+  # (series.labels) already required Parquet. Opt-in 10000 only for inlined-reader tests.
+  data_inlining_row_limit: 0
+  # Per-scope DuckDB writer connections (1..=16). Default 4.
+  writer_pool_size: 4
+
+# UI dropdown EAV (Postgres); requires ducklake.catalog_type=postgres
+dropdown_catalog:
+  enabled: false
+  active_values_days: 7
+  maintenance_prune_enabled: true
+  upsert_batch_size: 500

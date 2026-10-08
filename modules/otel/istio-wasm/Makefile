@@ -14,6 +14,8 @@ WASM_TARGET := wasm32-unknown-unknown
 BUILD_DIR := ../../../target/$(WASM_TARGET)/release
 WASM_FILE := $(BUILD_DIR)/$(BINARY_NAME).wasm
 HASH_FILE := $(WASM_FILE).sha256
+CARGO_TARGET_DIR ?= ../../../target
+export CARGO_TARGET_DIR
 
 # Kind / Cluster configuration
 CLUSTER_NAME := sp-demo-cluster

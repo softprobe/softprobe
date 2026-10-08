@@ -1,39 +1,78 @@
-# Rust
-/target/
-**/*.rs.bk
-Cargo.lock
+HELP.md
+.agent/
+**/target/
+.git
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
 
-# Build artifacts
-*.wasm
-*.wat
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+logs
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
 *.log
 
-# Temporary files
-*.tmp
-*.temp
+### VS Code ###
+.vscode/
 
-# Local environment
+.DS_Store
+.venv/
+grafana/plugins/
+
+### Spark ###
+spark/*.csv
+spark/recordings
+spark/screenshots.json
+
+opentelemetry-javaagent.jar
+arex-agent.jar
+
+dependency-tree.txt
+
 .env
-.env.local
 
-# Docker
-.dockerignore
+# Google GitHub Actions auth credential files (also listed in .dockerignore).
+gha-creds-*.json
 
-# Generated protobuf files
-/src/generated/
+# Host linux builder cache (TARGET_PLATFORM=linux/amd64 on Mac)
+.cache-linux/
+
+**/node_modules/
+**/.venv/
+
+warehouse/
+
+**/.m2/
+
+__pycache__/
+mooncake/
+
+# Cursor stop-hook local cache/logs (HEAD test stamp, gate output)
+.cursor/hooks/.state/
+
+# Istio WebAssembly module artifacts
+*.wasm
+*.wat
 deploy/otel-auto-instrumentation-for-dev.yaml
 scripts/cleanup.sh
 scripts/logs-demo-airline.sh

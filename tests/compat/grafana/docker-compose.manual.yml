@@ -1,0 +1,73 @@
+# Manual Grafana inspection stack (Prom-only).
+# Prefer: make grafana-up / make grafana-down (Softprobe + Grafana + OTel Demo).
+#
+# Softprobe runtime runs on the host at :8090 (SOFTPROBE_URL for Grafana).
+#
+# Direct compose (Softprobe already running):
+#   docker compose -f tests/compat/grafana/docker-compose.manual.yml up -d
+#   open http://127.0.0.1:3000  (admin / admin)
+
+services:
+  postgres:
+    image: ${GRAFANA_PG_IMAGE:-postgres:19beta3}
+    container_name: thelake-grafana-postgres
+    environment:
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ducklake
+      POSTGRES_DB: ducklake
+    ports:
+      - "${GRAFANA_PG_HOST_PORT:-5434}:5432"
+    volumes:
+      - ${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  auth-mock:
+    image: wiremock/wiremock@sha256:d13997cd7b52583528a766019cfe7d4e91c4d224a67bdaa6f60efbb532f32176
+    container_name: thelake-grafana-auth-mock
+    command: ["--port", "8080", "--global-response-templating"]
+    volumes:
+      - ../../mocks/auth:/home/wiremock:ro
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    # GRAFANA_COMPOSE_IMAGE is resolved by the launcher for the canonical
+    # manifest check; keep the compose image itself immutable so a tag-only or
+    # placeholder environment override cannot weaken the manual stack.
+    image: grafana/grafana@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
+    container_name: thelake-grafana-manual
+    depends_on:
+      auth-mock:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: light
+      GF_LOG_LEVEL: info
+      # Reach Softprobe on the host (Linux docker).
+      # Auth-mock always returns tenant local-dev-tenant (single-tenant manual path).
+      # A≡B on purpose: Loki/Tempo/tenant-Prom expand TENANT_* at provision time;
+      # dual-tenant isolation is CI-only (docker-compose.ci.yml).
+      SOFTPROBE_URL: http://host.docker.internal:8090
+      SOFTPROBE_API_KEY: local-dev-key
+      SOFTPROBE_TENANT_A_API_KEY: local-dev-key
+      SOFTPROBE_TENANT_B_API_KEY: local-dev-key
+      SOFTPROBE_TENANT_A_ID: local-dev-tenant
+      SOFTPROBE_TENANT_B_ID: local-dev-tenant
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro

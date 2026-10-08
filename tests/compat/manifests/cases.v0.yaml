@@ -1,0 +1,302 @@
+version: compat.v0
+metadata:
+  fixture_provenance:
+    corpus: tests/compat/fixtures
+    source: repository-maintained synthetic compatibility fixtures
+    license: Apache-2.0; upstream-derived material is attributed per fixture corpus
+    source_commit: "5e01c3475dee99239ba48c8e901d4f5d7c52aece"
+    attribution: docs/compat/conformance.md#fixture-provenance
+  reference_pins:
+    manifest: docs/compat/references.v0.yaml
+    protocols:
+      prometheus: {image: prom/prometheus, tag: "v2.54.1", digest: "sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94"}
+      loki: {image: grafana/loki, tag: "3.1.1", digest: "sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986"}
+      tempo: {image: grafana/tempo, tag: "2.6.1", digest: "sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50"}
+  # Every release case inherits one of these validated references. The shared
+  # authenticated tenant helper owns setup; protocol suites own assertions.
+  tenant_isolation:
+    shared_helper: tests/compat/support/auth.rs
+    contracts:
+      prometheus: {path: tests/compat/prometheus/mod.rs, command: "cargo test --lib compat::prometheus"}
+      loki: {path: tests/compat/loki/mod.rs, command: "cargo test --lib compat::loki"}
+      tempo: {path: tests/compat/tempo/mod.rs, command: "cargo test --lib compat::tempo"}
+  drift_review:
+    policy: docs/compat/conformance.md#drift-review
+    required_checks: [mock_conformance, protocol_differential, reference_pin_check]
+  unsupported_feature_allowlist:
+    field: unsupported_feature_allowlist
+    entry_shape: {capability: capability.id, feature: documented_feature, path: normalized_diff_path}
+    source: docs/compat/matrix.md
+
+# Validator-consumed declarations. These are the same documented features
+# referenced by the per-case diff-approval entries below.
+unsupported_feature_allowlist:
+  prometheus.query: [native_histogram_functions]
+  loki.query_range: [interval_sampling]
+  tempo.search: [tag_query_filters]
+
+cases:
+  - id: prometheus-query-selector-instant
+    protocol: prometheus
+    runner_case_id: selector_instant
+    endpoint: {method: GET, path: /api/v1/query}
+    request:
+      params: {query: 'http_requests{job="checkout"}', time: "1700000120"}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.query, status: phase_1}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+    unsupported_feature_allowlist:
+      - {capability: prometheus.query, feature: native_histogram_functions, path: "$.data"}
+
+  - id: prometheus-query-aggregation
+    protocol: prometheus
+    runner_case_id: sum_by_job
+    endpoint: {method: GET, path: /api/v1/query}
+    request:
+      params: {query: 'sum by (job) (http_requests)', time: "1700000120"}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.query, status: phase_1}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-query-rate-counter-instant
+    protocol: prometheus
+    runner_case_id: rate_counter
+    endpoint: {method: GET, path: /api/v1/query}
+    request:
+      params: {query: 'rate(demo_counter_total[2m])', time: "1700000120"}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.query, status: phase_1}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-query-range-selector
+    protocol: prometheus
+    runner_case_id: range_selector
+    endpoint: {method: GET, path: /api/v1/query_range}
+    request:
+      params: {query: 'http_requests{job="api"}', start: "1700000000", end: "1700000120", step: "60"}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.query_range, status: phase_1}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-labels-discovery
+    protocol: prometheus
+    runner_case_id: labels
+    endpoint: {method: GET, path: /api/v1/labels}
+    request: {params: {'match[]': 'http_requests{job="api"}'}}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.labels, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-label-values-discovery
+    protocol: prometheus
+    runner_case_id: label_values
+    endpoint: {method: GET, path: /api/v1/label/job/values}
+    request: {params: {'match[]': 'http_requests{job="api"}'}}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.labels, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-series-discovery
+    protocol: prometheus
+    runner_case_id: series
+    endpoint: {method: GET, path: /api/v1/series}
+    request: {params: {'match[]': 'http_requests{job="api"}', start: "1700000000", end: "1700000120"}}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.series, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+
+  - id: prometheus-metadata-discovery
+    protocol: prometheus
+    endpoint: {method: GET, path: /api/v1/metadata}
+    request: {params: {metric: http_requests, limit: "10"}}
+    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
+    capability: {id: prometheus.metadata, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
+    reference: {service: prometheus, version: "v2.54.1"}
+    evidence: {retain: true}
+    # Differential runs preload samples as TSDB blocks via promtool, which
+    # drops scrape-time HELP/TYPE metadata, so the reference always answers
+    # with empty data here while Softprobe legitimately reports ingested
+    # metric metadata. Lake-side contract coverage still exercises this
+    # endpoint; revisit if the reference harness gains a scraping setup.
+    conformance_exclusion:
+      reason: "block-preloaded Prometheus cannot serve /api/v1/metadata (no scrape-time metadata)"
+      release_evidence: false
+
+  - id: loki-query-forward-duplicate-nanoseconds
+    protocol: loki
+    runner_case_id: loki-query-forward-duplicate-nanoseconds
+    endpoint: {method: GET, path: /loki/api/v1/query}
+    request:
+      params: {query: '{service_name="checkout"} |= "checkout" | json | level="info"', time: "1700000000000000001", direction: forward, limit: "10"}
+    fixture: {id: loki_success_minimal, path: tests/compat/fixtures/loki_success_minimal.json}
+    capability: {id: loki.query, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
+    reference: {service: loki, version: "3.1.1"}
+    evidence: {retain: true}
+
+  - id: loki-query-range-selectors-line-filters
+    protocol: loki
+    runner_case_id: loki-query-range-selectors-line-filters
+    endpoint: {method: GET, path: /loki/api/v1/query_range}
+    request:
+      params: {query: '{service_name=~"checkout|payments",deployment_environment!="staging"} |~ "checkout (started|finished|retry)"', start: "1700000000000000001", end: "1700000002000000000", direction: backward, limit: "10"}
+    fixture: {id: loki_success_minimal, path: tests/compat/fixtures/loki_success_minimal.json}
+    capability: {id: loki.query_range, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
+    reference: {service: loki, version: "3.1.1"}
+    evidence: {retain: true}
+    unsupported_feature_allowlist:
+      - {capability: loki.query_range, feature: interval_sampling, path: "$.data"}
+
+  - id: loki-label-names-discovery
+    protocol: loki
+    runner_case_id: loki-label-names-discovery
+    endpoint: {method: GET, path: /loki/api/v1/labels}
+    request: {params: {start: "1700000000000000001", end: "1700000002000000000"}}
+    fixture: {id: loki_success_minimal, path: tests/compat/fixtures/loki_success_minimal.json}
+    capability: {id: loki.labels, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
+    reference: {service: loki, version: "3.1.1"}
+    evidence: {retain: true}
+
+  - id: loki-label-values-matchers
+    protocol: loki
+    runner_case_id: loki-label-values-matchers
+    endpoint: {method: GET, path: /loki/api/v1/label/service_name/values}
+    request: {params: {'match[]': '{deployment_environment="prod"}', start: "1700000000000000001", end: "1700000002000000000"}}
+    fixture: {id: loki_success_minimal, path: tests/compat/fixtures/loki_success_minimal.json}
+    capability: {id: loki.label_values, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
+    reference: {service: loki, version: "3.1.1"}
+    evidence: {retain: true}
+
+  - id: loki-series-discovery
+    protocol: loki
+    runner_case_id: loki-series-discovery
+    endpoint: {method: GET, path: /loki/api/v1/series}
+    request: {params: {'match[]': '{service_name="checkout"}', start: "1700000000000000001", end: "1700000002000000000"}}
+    fixture: {id: loki_success_minimal, path: tests/compat/fixtures/loki_success_minimal.json}
+    capability: {id: loki.series, status: supported}
+    expected: {status: 200, envelope: success}
+    normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
+    reference: {service: loki, version: "3.1.1"}
+    evidence: {retain: true}
+
+  - id: tempo-v1-trace-fidelity
+    protocol: tempo
+    runner_case_id: tempo-v1-trace-fidelity
+    endpoint: {method: GET, path: /api/traces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+    request: {params: {}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.v1_trace, status: supported_subset}
+    expected: {status: 200, envelope: v1}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+
+  - id: tempo-v2-trace-fidelity
+    protocol: tempo
+    runner_case_id: tempo-v2-trace-fidelity
+    endpoint: {method: GET, path: /api/v2/traces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+    request: {params: {}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.v2_trace, status: supported_subset}
+    expected: {status: 200, envelope: v2}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+
+  - id: tempo-search-resource-selector
+    protocol: tempo
+    runner_case_id: tempo-search-resource-selector
+    endpoint: {method: GET, path: /api/search}
+    request: {params: {q: '{ resource.service.name = "api" }', limit: "20"}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.search, status: supported_subset}
+    expected: {status: 200, envelope: search}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+    unsupported_feature_allowlist:
+      - {capability: tempo.search, feature: tag_query_filters, path: "$.data"}
+
+  - id: tempo-search-span-selector
+    protocol: tempo
+    endpoint: {method: GET, path: /api/search}
+    request: {params: {q: '{ .http.method = "GET" }', limit: "20"}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.search, status: supported_subset}
+    expected: {status: 200, envelope: search}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+    conformance_exclusion:
+      reason: "span-selector search duplicates the covered tempo-v1-search case; the pinned Tempo 2.6.1 oracle applies identical TraceQL semantics there"
+      release_evidence: false
+
+  - id: tempo-search-tags
+    protocol: tempo
+    endpoint: {method: GET, path: /api/search/tags}
+    request: {params: {}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.search_tags, status: supported_subset}
+    expected: {status: 200, envelope: tag_names}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+    conformance_exclusion:
+      reason: "tag-name/value discovery is covered by tempo-tag-names and tempo-tag-values cases; the aggregate /api/search/tags listing adds no unique wire semantics"
+      release_evidence: false
+  - id: tempo-tag-values-service-name
+    protocol: tempo
+    runner_case_id: tempo-tag-values
+    endpoint: {method: GET, path: /api/search/tag/service.name/values}
+    request: {params: {}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.tag_values, status: supported_subset}
+    expected: {status: 200, envelope: tag_values}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+
+  - id: tempo-tag-values-peer-service
+    protocol: tempo
+    endpoint: {method: GET, path: /api/search/tag/peer.service/values}
+    request: {params: {}}
+    fixture: {id: tempo_success_minimal, path: tests/compat/fixtures/tempo_success_minimal.json}
+    capability: {id: tempo.tag_values, status: supported_subset}
+    expected: {status: 200, envelope: tag_values}
+    normalization: {policy: "tests/compat/support/tempo.rs::normalize_tempo_response"}
+    reference: {service: tempo, version: "2.6.1"}
+    evidence: {retain: true}
+    conformance_exclusion:
+      reason: "tag-value discovery via peer.service requires the v2 tags endpoint; lake-side contract coverage exists and differential parity is Phase 3 follow-up work"
+      release_evidence: false
+

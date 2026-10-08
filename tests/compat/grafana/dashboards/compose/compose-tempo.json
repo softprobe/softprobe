@@ -1,0 +1,34 @@
+{
+  "annotations": { "list": [] },
+  "description": "Compose-lane Tempo dashboard bound to the deterministic checkout seed trace.",
+  "editable": false,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "tempo", "uid": "softprobe-tempo-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"checkout\" }",
+          "queryType": "search",
+          "refId": "A",
+          "limit": 20
+        }
+      ],
+      "title": "Seeded checkout traces",
+      "type": "traces"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["compose-smoke"],
+  "templating": { "list": [] },
+  "time": { "from": "2023-11-14T22:13:20Z", "to": "2023-11-14T22:14:20Z" },
+  "timezone": "utc",
+  "title": "Softprobe Compose Tempo Smoke",
+  "uid": "compose-tempo",
+  "version": 1
+}

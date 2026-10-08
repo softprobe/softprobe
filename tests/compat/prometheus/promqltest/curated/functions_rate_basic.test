@@ -1,0 +1,18 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/functions.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Dense rate + counter-reset increase (extrapolation factor ≈ 1 when samples fill the window).
+# softprobe: counter
+
+load 1m
+  http_requests{job="api"} 0+60x5
+
+eval instant at 5m rate(http_requests[5m])
+  {job="api"} 1
+
+clear
+
+load 5m
+  http_requests{path="/foo"} 0 1 2 3 2 3 4
+
+eval instant at 30m increase(http_requests[30m])
+  {path="/foo"} 7

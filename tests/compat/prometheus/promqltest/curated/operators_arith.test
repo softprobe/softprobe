@@ -1,0 +1,38 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/operators.test
+# Copyright The Prometheus Authors — Apache-2.0
+# (arith / unary only — set ops and on()/ignoring() excluded)
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"}   0+30x10
+  http_requests{job="api-server", instance="1", group="canary"}   0+40x10
+  http_requests{job="app-server", instance="0", group="production"} 0+50x10
+  http_requests{job="app-server", instance="1", group="production"} 0+60x10
+  http_requests{job="app-server", instance="0", group="canary"}   0+70x10
+  http_requests{job="app-server", instance="1", group="canary"}   0+80x10
+
+eval instant at 50m SUM(http_requests) BY (job) - COUNT(http_requests) BY (job)
+  {job="api-server"} 996
+  {job="app-server"} 2396
+
+eval instant at 50m 2 - SUM(http_requests) BY (job)
+  {job="api-server"} -998
+  {job="app-server"} -2398
+
+eval instant at 50m -http_requests{job="api-server",instance="0",group="production"}
+  {job="api-server",instance="0",group="production"} -100
+
+eval instant at 50m +http_requests{job="api-server",instance="0",group="production"}
+  {job="api-server",instance="0",group="production"} 100
+
+eval instant at 50m SUM(http_requests) BY (job) + SUM(http_requests) BY (job)
+  {job="api-server"} 2000
+  {job="app-server"} 4800
+
+eval instant at 50m SUM(http_requests) BY (job) / 0
+  {job="api-server"} +Inf
+  {job="app-server"} +Inf
+
+eval instant at 50m http_requests{group="canary", instance="0", job="api-server"} / 0
+  {group="canary", instance="0", job="api-server"} +Inf

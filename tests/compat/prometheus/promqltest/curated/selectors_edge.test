@@ -1,0 +1,23 @@
+# Derived from prometheus v2.54.1 promql/promqltest/testdata/selectors.test
+# Copyright The Prometheus Authors — Apache-2.0
+# Edge matchers + __name__ + case-insensitive regex (selector only; dense rate CI deferred).
+
+load 5m
+  http_requests{job="api-server", instance="0", group="production"} 0+10x10
+  http_requests{job="api-server", instance="1", group="production"} 0+20x10
+  http_requests{job="api-server", instance="0", group="canary"} 0+30x10
+  http_requests{job="api-server", instance="1", group="canary"} 0+40x10
+
+eval instant at 0s http_requests{foo!="bar", job="api-server"}
+  http_requests{job="api-server", instance="0", group="production"} 0
+  http_requests{job="api-server", instance="1", group="production"} 0
+  http_requests{job="api-server", instance="0", group="canary"} 0
+  http_requests{job="api-server", instance="1", group="canary"} 0
+
+eval instant at 50m {__name__=~"http_.*", job="api-server", instance="0"}
+  http_requests{job="api-server", instance="0", group="production"} 100
+  http_requests{job="api-server", instance="0", group="canary"} 300
+
+eval instant at 50m http_requests{group=~"(?i:PRO).*"}
+  http_requests{job="api-server", instance="0", group="production"} 100
+  http_requests{job="api-server", instance="1", group="production"} 200

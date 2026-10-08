@@ -2,7 +2,8 @@
 
 This module instruments HTTP traffic at the Istio sidecar and exports
 OpenTelemetry traces to the configured Softprobe endpoint. It is an optional
-telemetry source; `thelake` remains the primary telemetry backend.
+telemetry source for the Softprobe runtime and its agent observability and
+evaluation workflows.
 
 ## Requirements
 

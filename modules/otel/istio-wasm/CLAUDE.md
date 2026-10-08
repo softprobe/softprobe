@@ -8,8 +8,8 @@ W3C trace context, and exports traces to the configured Softprobe OTLP endpoint.
 
 It is an instrumentation source in the Softprobe agent observability and
 evaluation project. It does not implement the telemetry backend or evaluation
-engine; those responsibilities belong to `softprobe/thelake` and the agent/eval
-components.
+engine; those responsibilities belong to the Softprobe runtime and the
+agent/evaluation components in this repository.
 
 ## Module boundaries
 

@@ -1,0 +1,8 @@
+# Packaging-only: only dist/ is required in the build context.
+*
+!dist/
+!dist/**
+
+# Keep explicit denies if someone force-includes sources later.
+.git
+gha-creds-*.json

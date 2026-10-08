@@ -1,0 +1,38 @@
+version: compat.v0
+# Pinned reference images for compatibility differential harnesses.
+# Versions are intentionally conservative; bump with an explicit PR + matrix note.
+references:
+  prometheus:
+    image: prom/prometheus
+    tag: "v2.54.1"
+    digest: "sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94"
+    notes: Query API oracle for supported PromQL subset
+  loki:
+    image: grafana/loki
+    tag: "3.1.1"
+    digest: "sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986"
+    notes: Phase 2 query API oracle for the supported LogQL subset
+    source: https://github.com/grafana/loki/tree/v3.1.1
+    license: AGPL-3.0-only
+    attribution: Grafana Loki contributors; upstream source and license notices apply.
+  tempo:
+    image: grafana/tempo
+    tag: "2.6.1"
+    digest: "sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50"
+    notes: Trace query/search oracle
+    source: https://github.com/grafana/tempo/tree/v2.6.1
+    license: AGPL-3.0-only
+    attribution: Grafana Tempo contributors; upstream source and license notices apply.
+  grafana:
+    image: grafana/grafana
+    tag: "11.2.0"
+    digest: "sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f"
+    notes: Datasource + Explore smoke (Phase 4)
+  otel_collector:
+    runtime: false
+    image: otel/opentelemetry-collector-contrib
+    tag: "0.111.0"
+    notes: Non-runtime fixture-generation metadata; not pulled by CI or conformance
+    source: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/v0.111.0
+    license: Apache-2.0
+    attribution: OpenTelemetry Collector Contrib contributors.

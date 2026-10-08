@@ -1,0 +1,26 @@
+server:
+  port: 8090
+  host: 0.0.0.0
+  max_body_size: 104857600
+  worker_threads: null
+
+object_store:
+  region: us-east-1
+  endpoint: http://localhost:9000
+
+query:
+  max_connections: 10
+  cache_dir: /var/tmp/softprobe/duckdb
+
+maintenance:
+  enabled: false
+  target_file_size_bytes: 67108864
+  interval_seconds: 3600
+
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/softprobe-test-ducklake/metadata.sqlite
+  data_path: s3://warehouse/ducklake/data/
+  catalog_alias: softprobe
+  metadata_schema: main
+  data_inlining_row_limit: 0

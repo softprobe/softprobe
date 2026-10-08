@@ -1,0 +1,240 @@
+//! OTel attribute → Prometheus label projection.
+
+use std::collections::{BTreeMap, HashMap};
+
+/// Sanitize a key to Prometheus label name rules.
+pub fn sanitize_label_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 1);
+    for (i, ch) in raw.chars().enumerate() {
+        let ok = ch.is_ascii_alphanumeric() || ch == '_';
+        if ok {
+            if i == 0 && ch.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "_".into()
+    } else {
+        out
+    }
+}
+
+/// Merge resource then datapoint attributes; datapoint wins on collision.
+/// Applies cardinality cap after reserved aliases.
+pub fn project_prometheus_labels(
+    metric_name: &str,
+    resource: &HashMap<String, String>,
+    datapoint: &HashMap<String, String>,
+    max_labels: usize,
+) -> BTreeMap<String, String> {
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in resource {
+        if k.is_empty() {
+            continue;
+        }
+        merged.insert(sanitize_label_name(k), v.clone());
+    }
+    for (k, v) in datapoint {
+        if k.is_empty() {
+            continue;
+        }
+        merged.insert(sanitize_label_name(k), v.clone());
+    }
+
+    if let Some(svc) = datapoint
+        .get("service.name")
+        .or_else(|| resource.get("service.name"))
+    {
+        merged.entry("job".into()).or_insert_with(|| svc.clone());
+    }
+    if let Some(inst) = datapoint
+        .get("service.instance.id")
+        .or_else(|| datapoint.get("host.name"))
+        .or_else(|| resource.get("service.instance.id"))
+        .or_else(|| resource.get("host.name"))
+    {
+        merged
+            .entry("instance".into())
+            .or_insert_with(|| inst.clone());
+    }
+
+    merged.insert("__name__".into(), sanitize_label_name(metric_name));
+
+    if merged.len() <= max_labels {
+        return merged;
+    }
+
+    // Keep reserved keys, then fill remaining slots in key order.
+    let reserved = ["__name__", "job", "instance"];
+    let mut out = BTreeMap::new();
+    for key in reserved {
+        if let Some(v) = merged.remove(key) {
+            out.insert(key.to_string(), v);
+        }
+    }
+    for (k, v) in merged {
+        if out.len() >= max_labels {
+            break;
+        }
+        out.insert(k, v);
+    }
+    out
+}
+
+/// Map OTel metric type storage strings to Prometheus metadata vocabulary.
+pub fn project_prometheus_metric_type(otel_type: &str) -> &'static str {
+    match otel_type.to_ascii_lowercase().as_str() {
+        "sum" => "counter",
+        "gauge" => "gauge",
+        "histogram" => "histogram",
+        "summary" => "summary",
+        "exponentialhistogram" | "exponential_histogram" => "histogram",
+        _ => "unknown",
+    }
+}
+
+/// Project a metric type without claiming Prometheus counter semantics for an
+/// OTel Sum that is delta or non-monotonic. Missing Sum metadata is deliberately
+/// treated as unknown rather than silently becoming a counter.
+pub fn project_prometheus_metric_type_with_semantics(
+    otel_type: &str,
+    aggregation_temporality: Option<&str>,
+    is_monotonic: Option<bool>,
+) -> &'static str {
+    if otel_type.eq_ignore_ascii_case("sum")
+        && (aggregation_temporality != Some("CUMULATIVE") || is_monotonic != Some(true))
+    {
+        return "unknown";
+    }
+    project_prometheus_metric_type(otel_type)
+}
+
+/// Classic Prom `_bucket` / `_sum` / `_count` suffix on a `__name__` matcher.
+pub fn classic_prom_suffix_base(prom_name: &str) -> Option<&str> {
+    prom_name
+        .strip_suffix("_bucket")
+        .or_else(|| prom_name.strip_suffix("_count"))
+        .or_else(|| prom_name.strip_suffix("_sum"))
+}
+
+/// Dual-write classic suffix gauges at ingest for Grafana GOLD / demo families.
+/// Other histograms stay native and expand at query time.
+pub fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
+    base_name.starts_with("k6_")
+        || base_name.starts_with("demo_")
+        || base_name.starts_with("http_")
+        || base_name.starts_with("rpc_")
+        || base_name.starts_with("traces_span_metrics_")
+        || base_name.starts_with("layout_")
+}
+
+/// `_bucket`/`_sum`/`_count` selector with no dual-written gauge series.
+pub fn classic_suffix_uses_native_hist(prom_name: &str) -> bool {
+    match classic_prom_suffix_base(prom_name) {
+        Some(base) => !classic_prom_dual_write_allowed(base),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datapoint_wins_on_collision() {
+        let mut resource = HashMap::new();
+        resource.insert("http.method".into(), "GET".into());
+        let mut dp = HashMap::new();
+        dp.insert("http.method".into(), "POST".into());
+        let labels = project_prometheus_labels("http_requests", &resource, &dp, 40);
+        assert_eq!(labels.get("http_method").map(String::as_str), Some("POST"));
+        assert_eq!(
+            labels.get("__name__").map(String::as_str),
+            Some("http_requests")
+        );
+    }
+
+    #[test]
+    fn sanitizes_invalid_chars() {
+        assert_eq!(sanitize_label_name("http.method"), "http_method");
+        assert_eq!(sanitize_label_name("9bad"), "_9bad");
+    }
+
+    #[test]
+    fn enforces_cardinality_cap() {
+        let resource = HashMap::new();
+        let mut dp = HashMap::new();
+        for i in 0..20 {
+            dp.insert(format!("k{i}"), format!("v{i}"));
+        }
+        let labels = project_prometheus_labels("m", &resource, &dp, 5);
+        assert!(labels.len() <= 5);
+        assert!(labels.contains_key("__name__"));
+    }
+
+    #[test]
+    fn job_and_instance_aliases_prefer_datapoint_over_resource() {
+        let mut resource = HashMap::new();
+        resource.insert("service.name".into(), "from-resource".into());
+        resource.insert("service.instance.id".into(), "res-instance".into());
+        let mut dp = HashMap::new();
+        dp.insert("service.name".into(), "from-datapoint".into());
+        dp.insert("service.instance.id".into(), "dp-instance".into());
+        let labels = project_prometheus_labels("http_requests", &resource, &dp, 40);
+        assert_eq!(
+            labels.get("job").map(String::as_str),
+            Some("from-datapoint")
+        );
+        assert_eq!(
+            labels.get("instance").map(String::as_str),
+            Some("dp-instance")
+        );
+        assert_eq!(
+            labels.get("service_name").map(String::as_str),
+            Some("from-datapoint")
+        );
+    }
+
+    #[test]
+    fn maps_otel_types_to_prometheus_metadata() {
+        assert_eq!(project_prometheus_metric_type("sum"), "counter");
+        assert_eq!(project_prometheus_metric_type("gauge"), "gauge");
+        assert_eq!(project_prometheus_metric_type("histogram"), "histogram");
+        assert_eq!(project_prometheus_metric_type("summary"), "summary");
+        assert_eq!(project_prometheus_metric_type("other"), "unknown");
+    }
+
+    #[test]
+    fn only_cumulative_monotonic_sums_are_counters() {
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(true)),
+            "counter"
+        );
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("DELTA"), Some(true)),
+            "unknown"
+        );
+        assert_eq!(
+            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(false)),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn classic_suffix_native_hist_skips_dual_write_families() {
+        assert_eq!(
+            classic_prom_suffix_base("db_client_operation_duration_bucket"),
+            Some("db_client_operation_duration")
+        );
+        assert!(classic_suffix_uses_native_hist(
+            "db_client_operation_duration_bucket"
+        ));
+        assert!(!classic_suffix_uses_native_hist("http_duration_bucket"));
+        assert!(!classic_suffix_uses_native_hist("layout_latency_count"));
+        assert!(!classic_suffix_uses_native_hist("k6_vus"));
+    }
+}

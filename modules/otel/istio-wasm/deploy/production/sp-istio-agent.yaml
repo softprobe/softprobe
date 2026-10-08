@@ -56,7 +56,7 @@ spec:
 #   # selector:
 #   #   matchLabels:
 #   #     app: my-service
-#   url: oci://gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/softprobe:latest
+#   url: oci://gcr.io/PROJECT_ID/softprobe:latest
 #   sha256: ""
 #   phase: AUTHN
 #   pluginConfig:
@@ -80,7 +80,7 @@ spec:
 #   selector:
 #     matchLabels:
 #       app: api-service  # Replace with your service label
-#   url: oci://gcr.io/cs-poc-sasxbttlzroculpau4u6e2l/softprobe:latest
+#   url: oci://gcr.io/PROJECT_ID/softprobe:latest
 #   sha256: ""
 #   phase: AUTHN
 #   pluginConfig:

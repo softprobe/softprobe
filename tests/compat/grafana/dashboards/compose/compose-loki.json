@@ -1,0 +1,44 @@
+{
+  "annotations": { "list": [] },
+  "description": "Compose-lane Loki dashboard bound to the deterministic checkout seed stream.",
+  "editable": false,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "softprobe-loki-a" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "sortOrder": "Descending" },
+      "targets": [
+        {
+          "expr": "{service_name=~\"$service\"} |= \"error\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Seeded checkout errors",
+      "type": "logs"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["compose-smoke"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "checkout", "value": "checkout" },
+        "datasource": { "type": "loki", "uid": "softprobe-loki-a" },
+        "name": "service",
+        "query": "label_values({service_name=~\".+\"}, service_name)",
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "2023-11-14T22:13:20Z", "to": "2023-11-14T22:14:20Z" },
+  "timezone": "utc",
+  "title": "Softprobe Compose Loki Smoke",
+  "uid": "compose-loki",
+  "version": 1
+}
