@@ -24,7 +24,7 @@ services:
       - ducklake-postgres-data:/var/lib/postgresql/data
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-06T17-38-46Z
     container_name: minio
     ports:
       - "9000:9000"   # API
