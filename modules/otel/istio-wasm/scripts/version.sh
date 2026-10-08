@@ -2,7 +2,11 @@
 
 set -e
 
-echo "SP-Istio Agent Version Management"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$MODULE_DIR"
+
+echo "OTEL Istio Wasm Module Version Management"
 echo "================================"
 
 # Function to print colored output
@@ -18,12 +22,24 @@ print_error() {
     echo -e "\033[1;31m[ERROR]\033[0m $1"
 }
 
+print_warning() {
+    echo -e "\033[1;33m[WARN]\033[0m $1"
+}
+
+sed_in_place() {
+    if [[ "$OSTYPE" == darwin* ]]; then
+        sed -i "" "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
 # Show help
 show_help() {
     cat << EOF
 Usage: $0 COMMAND [OPTIONS]
 
-Manage versions for SP-Istio Agent project.
+Manage versions for the OpenTelemetry Istio Wasm module.
 
 COMMANDS:
     current                 Show current version
@@ -61,7 +77,7 @@ update_cargo_version() {
     local clean_version="${version#v}"  # Remove 'v' prefix if present
     
     if [ -f "Cargo.toml" ]; then
-        sed -i "" "s/^version = .*/version = \"$clean_version\"/" Cargo.toml
+        sed_in_place "s/^version = .*/version = \"$clean_version\"/" Cargo.toml
         print_success "Updated Cargo.toml to version $clean_version"
     else
         print_error "Cargo.toml not found"
@@ -76,24 +92,30 @@ update_deployment_manifests() {
     
     # Update minimal.yaml
     if [ -f "deploy/minimal.yaml" ]; then
-        sed -i "" "s|oci://softprobe/softprobe:.*|oci://softprobe/softprobe:$version|" deploy/minimal.yaml
+        sed_in_place "s|oci://.*softprobe/softprobe:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|; s|oci://.*softprobe/otel-istio-wasm:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|" deploy/minimal.yaml
         print_success "Updated deploy/minimal.yaml"
-        ((updated++))
+        updated=$((updated + 1))
     fi
     
     # Update production.yaml
-    if [ -f "deploy/production.yaml" ]; then
-        sed -i "" "s|oci://softprobe/softprobe:.*|oci://softprobe/softprobe:$version|" deploy/production.yaml
-        print_success "Updated deploy/production.yaml"
-        ((updated++))
+    if [ -f "deploy/production/sp-istio-agent.yaml" ]; then
+        sed_in_place "s|oci://.*softprobe/softprobe:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|; s|oci://.*softprobe/otel-istio-wasm:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|" deploy/production/sp-istio-agent.yaml
+        print_success "Updated deploy/production/sp-istio-agent.yaml"
+        updated=$((updated + 1))
+    fi
+
+    if [ -f "deploy/production/test-bookinfo.yaml" ]; then
+        sed_in_place "s|oci://.*softprobe/softprobe:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|; s|oci://.*softprobe/otel-istio-wasm:.*|oci://docker.io/softprobe/otel-istio-wasm:$version|" deploy/production/test-bookinfo.yaml
+        print_success "Updated deploy/production/test-bookinfo.yaml"
+        updated=$((updated + 1))
     fi
     
     # Update examples
     for file in deploy/examples/*.yaml; do
         if [ -f "$file" ] && grep -q "softprobe" "$file"; then
-            sed -i "" "s|oci://softprobe/softprobe:.*|oci://softprobe/softprobe:$version|" "$file"
+            sed_in_place "s|oci://softprobe/otel-istio-wasm:.*|oci://softprobe/otel-istio-wasm:$version|" "$file"
             print_success "Updated $file"
-            ((updated++))
+            updated=$((updated + 1))
         fi
     done
     
@@ -107,6 +129,7 @@ update_deployment_manifests() {
 # Create and push git tag
 create_git_tag() {
     local version="$1"
+    local tag="otel-istio-wasm-${version#otel-istio-wasm-}"
     
     # Check if we're in a git repository
     if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -115,8 +138,8 @@ create_git_tag() {
     fi
     
     # Check if tag already exists
-    if git tag -l | grep -q "^$version$"; then
-        print_error "Tag $version already exists"
+    if git tag -l | grep -q "^$tag$"; then
+        print_error "Tag $tag already exists"
         exit 1
     fi
     
@@ -131,12 +154,12 @@ create_git_tag() {
     fi
     
     # Create annotated tag
-    git tag -a "$version" -m "Release $version"
-    print_success "Created tag $version"
+    git tag -a "$tag" -m "Release $tag"
+    print_success "Created tag $tag"
     
     # Push tag
-    git push origin "$version"
-    print_success "Pushed tag $version to origin"
+    git push origin "$tag"
+    print_success "Pushed tag $tag to origin"
 }
 
 # Validate version format
@@ -163,22 +186,22 @@ do_release() {
     update_cargo_version "$version"
     update_deployment_manifests "$version"
     
-    # Build and test
-    print_status "Building and testing..."
+    # Build and run the module's integration harness
+    print_status "Building and validating the integration harness..."
     if ! make build; then
         print_error "Build failed"
         exit 1
     fi
     
-    if ! make test; then
-        print_error "Tests failed"
+    if ! make integration-test; then
+        print_error "Integration validation failed"
         exit 1
     fi
     
     # Commit changes
     print_status "Committing version changes..."
     git add Cargo.toml deploy/
-    git commit -m "Bump version to $version
+    git commit -m "Release OTEL Istio Wasm module $version
 
 🤖 Generated with [Claude Code](https://claude.ai/code)
 
@@ -187,7 +210,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
     # Create tag
     create_git_tag "$version"
     
-    print_success "Release $version completed successfully!"
+    print_success "Release otel-istio-wasm-$version completed successfully!"
     print_status "Next steps:"
     print_status "1. Build and push Docker images: make docker-push VERSION=$version"
     print_status "2. Create GitHub release with release notes"

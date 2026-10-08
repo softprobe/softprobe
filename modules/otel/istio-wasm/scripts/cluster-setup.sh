@@ -76,7 +76,7 @@ fi
 
 # 6. Apply OpenTelemetry auto-instrumentation configuration
 echo "📊 Applying OpenTelemetry auto-instrumentation configuration..."
-kubectl apply -f https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/deploy/otel-auto-instrumentation.yaml
+kubectl apply -f https://raw.githubusercontent.com/softprobe/softprobe/refs/heads/main/modules/otel/istio-wasm/deploy/otel-auto-instrumentation.yaml
 
 # Wait for configuration processing
 echo "⏳ Waiting for configuration processing..."

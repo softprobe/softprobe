@@ -44,11 +44,11 @@ jobs:
 
     - name: Verify test configuration exists
       run: |
-        if [ ! -f test/envoy.yaml ]; then
-          echo "Error: test/envoy.yaml not found"
+        if [ ! -f modules/otel/istio-wasm/test/envoy.yaml ]; then
+          echo "Error: modules/otel/istio-wasm/test/envoy.yaml not found"
           exit 1
         fi
-        echo "✓ test/envoy.yaml found"
+        echo "✓ Istio module Envoy configuration found"
 
     - name: Run integration tests
       run: make integration-test
@@ -64,7 +64,7 @@ jobs:
         path: |
           target/wasm32-unknown-unknown/release/sp_istio_agent.wasm
           target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256
-          test/
+          modules/otel/istio-wasm/test/
         retention-days: 7
 
     - name: Display logs on failure

@@ -1,7 +1,7 @@
 ---
 # Softprobe Istio Agent - One-Click Deployment
 # This configuration enables transparent HTTP traffic recording for all services in the cluster
-# Usage: kubectl apply -f https://raw.githubusercontent.com/softprobe/sp-istio/main/deploy/sp-istio-agent.yaml
+# Usage: kubectl apply -f https://raw.githubusercontent.com/softprobe/softprobe/main/modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
 
 apiVersion: extensions.istio.io/v1alpha1
 kind: WasmPlugin

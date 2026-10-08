@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'otel-istio-wasm-v*.*.*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,16 +24,17 @@ jobs:
       id: version
       run: |
         TAG_NAME=${GITHUB_REF#refs/tags/}
-        VERSION=${TAG_NAME#v}
+        VERSION=${TAG_NAME#otel-istio-wasm-v}
         echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "image_tag=v${VERSION}" >> $GITHUB_OUTPUT
         echo "Tag: $TAG_NAME, Version: $VERSION"
 
     - name: Update Cargo.toml version
       run: |
-        sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+        sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" modules/otel/istio-wasm/Cargo.toml
         echo "Updated Cargo.toml version to ${{ steps.version.outputs.version }}"
-        grep "^version = " Cargo.toml
+        grep "^version = " modules/otel/istio-wasm/Cargo.toml
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -65,11 +66,11 @@ jobs:
 
     - name: Verify test configuration exists
       run: |
-        if [ ! -f test/envoy.yaml ]; then
-          echo "Error: test/envoy.yaml not found"
+        if [ ! -f modules/otel/istio-wasm/test/envoy.yaml ]; then
+          echo "Error: modules/otel/istio-wasm/test/envoy.yaml not found"
           exit 1
         fi
-        echo "✓ test/envoy.yaml found"
+        echo "✓ Istio module Envoy configuration found"
 
     - name: Run integration tests
       run: make integration-test
@@ -88,42 +89,45 @@ jobs:
     - name: Build and push Docker images
       run: |
         # Override VERSION from Makefile to use our extracted version
-        export VERSION=${{ steps.version.outputs.tag }}
+        export VERSION=${{ steps.version.outputs.image_tag }}
         echo "Building Docker images with version: $VERSION"
         
         # Build images
         make docker-build
         
         # Also tag as latest for releases
-        docker tag ${REGISTRY}/softprobe:$VERSION ${REGISTRY}/softprobe:latest
+        docker tag ${REGISTRY}/otel-istio-wasm:$VERSION ${REGISTRY}/otel-istio-wasm:latest
         docker tag ${REGISTRY}/sp-envoy:$VERSION ${REGISTRY}/sp-envoy:latest
         
         # Push all tags
-        docker push ${REGISTRY}/softprobe:$VERSION
-        docker push ${REGISTRY}/softprobe:latest
+        docker push ${REGISTRY}/otel-istio-wasm:$VERSION
+        docker push ${REGISTRY}/otel-istio-wasm:latest
         docker push ${REGISTRY}/sp-envoy:$VERSION
         docker push ${REGISTRY}/sp-envoy:latest
 
     - name: Generate release notes
       id: release_notes
       run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        IMAGE_TAG="${{ steps.version.outputs.image_tag }}"
+        WASM_SHA256="$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)"
         cat > release_notes.md << 'EOF'
-        ## SP-Istio Agent Release ${{ steps.version.outputs.tag }}
+        ## OTEL Istio Wasm Module Release @TAG@
         
         ### What's Changed
         
-        This release includes the SP-Istio transparent cache WASM extension for Istio.
+        This release includes the Softprobe OpenTelemetry Istio Wasm integration.
         
         ### Docker Images
         
-        - `softprobe/softprobe:${{ steps.version.outputs.tag }}`
-        - `softprobe/sp-envoy:${{ steps.version.outputs.tag }}`
+        - `softprobe/otel-istio-wasm:@IMAGE_TAG@`
+        - `softprobe/sp-envoy:@IMAGE_TAG@`
         
         ### WASM Binary
         
         The WASM binary is attached to this release and can be used directly with Envoy or Istio.
         
-        **SHA256:** `$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)`
+        **SHA256:** `@SHA256@`
         
         ### Deployment
         
@@ -136,8 +140,8 @@ jobs:
           name: sp-istio-agent
           namespace: istio-system
         spec:
-          url: https://github.com/your-org/sp-istio/releases/download/${{ steps.version.outputs.tag }}/sp_istio_agent.wasm
-          sha256: $(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)
+          url: oci://docker.io/softprobe/otel-istio-wasm:@IMAGE_TAG@
+          sha256: @SHA256@
         ```
         
         ### Integration Test Results
@@ -147,6 +151,17 @@ jobs:
         ✅ Softprobe backend connectivity verified  
         
         EOF
+        sed -i "s/@TAG@/${TAG}/g; s/@IMAGE_TAG@/${IMAGE_TAG}/g; s/@SHA256@/${WASM_SHA256}/g" release_notes.md
+
+    - name: Update deployment configs with release version
+      run: |
+        HASH=$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/minimal.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/minimal.yaml
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+        sed -i "s|url: .*|url: oci://docker.io/softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}|" modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
+        sed -i "s/sha256: .*/sha256: $HASH/" modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -159,44 +174,26 @@ jobs:
         files: |
           target/wasm32-unknown-unknown/release/sp_istio_agent.wasm
           target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256
-          deploy/minimal.yaml
-          deploy/production.yaml
+          modules/otel/istio-wasm/deploy/minimal.yaml
+          modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml
+          modules/otel/istio-wasm/deploy/production/test-bookinfo.yaml
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Update deployment configs with release version
-      run: |
-        # Update SHA256 in deployment files for the release
-        HASH=$(cat target/wasm32-unknown-unknown/release/sp_istio_agent.wasm.sha256)
-        
-        # Update minimal.yaml
-        if [ -f deploy/minimal.yaml ]; then
-          sed -i "s|url: .*|url: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sp_istio_agent.wasm|" deploy/minimal.yaml
-          sed -i "s/sha256: .*/sha256: $HASH/" deploy/minimal.yaml
-          echo "✓ Updated deploy/minimal.yaml"
-        fi
-        
-        # Update production.yaml  
-        if [ -f deploy/production.yaml ]; then
-          sed -i "s|url: .*|url: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sp_istio_agent.wasm|" deploy/production.yaml
-          sed -i "s/sha256: .*/sha256: $HASH/" deploy/production.yaml
-          echo "✓ Updated deploy/production.yaml"
-        fi
 
     - name: Summary
       run: |
         echo "🎉 Release ${{ steps.version.outputs.tag }} completed successfully!"
         echo ""
         echo "📦 Docker Images Published:"
-        echo "  - softprobe/softprobe:${{ steps.version.outputs.tag }}"
-        echo "  - softprobe/softprobe:latest"
-        echo "  - softprobe/sp-envoy:${{ steps.version.outputs.tag }}"
+        echo "  - softprobe/otel-istio-wasm:${{ steps.version.outputs.image_tag }}"
+        echo "  - softprobe/otel-istio-wasm:latest"
+        echo "  - softprobe/sp-envoy:${{ steps.version.outputs.image_tag }}"
         echo "  - softprobe/sp-envoy:latest"
         echo ""
         echo "📋 Release Assets:"
         echo "  - sp_istio_agent.wasm"
         echo "  - sp_istio_agent.wasm.sha256"
-        echo "  - deploy/minimal.yaml"
-        echo "  - deploy/production.yaml"
+        echo "  - modules/otel/istio-wasm/deploy/minimal.yaml"
+        echo "  - modules/otel/istio-wasm/deploy/production/sp-istio-agent.yaml"
         echo ""
         echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
